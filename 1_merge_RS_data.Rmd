@@ -1,0 +1,186 @@
+---
+title: "Script to merge all RS data"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: html_notebook
+---
+
+This R script is used to merge RS data downloaded the Google Drive folder shared by Bea with the ReSurvey database.
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+```
+
+# Read files with RS data from Bea
+
+```{r}
+# Set the folder path
+folder_path <- here("data","raw","S2")
+
+# List only CSV files that contain "max_Filtered" in their filename
+csv_files <- list.files(folder_path, pattern = "max_Filtered.*\\.csv$",
+                        full.names = TRUE, recursive = TRUE)
+
+# Function to read each file and extract info from the filename
+read_and_label <- function(file_path) {
+  file_name <- basename(file_path)
+  
+  # Extract region and subregion from the filename
+  # Updated regular expression to handle the case where subregion is missing
+  components <- str_match(file_name, "(.*?)_(.*?)_Sentinel.*?_(.*?)\\.csv")
+  
+  # Extract the biogeo and unit, handling missing subregion (unit)
+  biogeo <- components[2]
+  
+  # If subregion (unit) is missing, set it as NA
+  unit <- ifelse(is.na(components[3]), NA, components[3])
+  
+  # Check if biogeo is missing, and if so,
+  # assign the first part of the filename (region name)
+  if (is.na(biogeo) && grepl("Sentinel", file_name)) {
+    # Capture the first part (biogeo) directly
+    biogeo <- str_match(file_name, "^(.*?)_Sentinel")[2]
+  }
+  
+  # If biogeo is still NA, print a warning
+  if (is.na(biogeo)) {
+    warning(paste("Failed to extract biogeo for file:", file_name))
+  }
+
+  # Read CSV and add columns for extracted info
+  read_csv(file_path) %>%
+    mutate(biogeo = biogeo,
+           unit = unit)
+}
+# Read and merge all CSV files
+data_RS <- map_dfr(csv_files, read_and_label)
+
+# View the resulting tibble
+print(data_RS)
+```
+
+# Data cleaning RS
+
+```{r}
+data_RS <- data_RS %>%
+  # Keep the columns we need
+  select(obs_unique, biogeo, unit, year, source, Lat_update, Lon_update,
+         NDVI, NDMI) %>%
+  # Rename Lat and Lon, these are only kept in case there is differrence with
+  # those in the ReSurvey database due to updates based on Ilona's info
+  rename(Lat_RS = Lat_update, Lon_RS = Lon_update) %>%
+  # Same for year
+  rename(year_RS = year)
+```
+
+# Read file db_Europa
+
+In this file, there is the correspondence obs_unique - PlotObservationID.
+
+```{r}
+db_Europa <- read_csv(
+  here("..", "DB_first_check", "data", "clean","db_Europa_20250107.csv")
+  )
+```
+
+Get only the columns PlotObservationID (original unique identifier) obs_unique_id (unique identified created by me) and year.
+
+```{r}
+db_Europa <- db_Europa %>% select(PlotObservationID, obs_unique_id)
+```
+
+# Merge data_RS and db_Europa
+
+```{r}
+data_RS_ID <- db_Europa %>%
+  right_join(data_RS %>%
+              # Rename to be able to join on this column
+              rename(obs_unique_id = obs_unique))
+```
+
+Now we have PlotObservationID in data_RS_ID.
+
+# Read file db_resurv_updated_clean
+
+This is the ReSurvey database after updates (to be continued).
+
+```{r}
+db_resurv <- read_tsv(
+  here("..", "DB_first_check","data", "clean","db_resurv_updated_clean.csv"),
+  col_types = cols(
+    # Dynamically specify EUNIS columns as character
+    .default = col_guess(),  # Default guessing for other columns
+    EUNISa = col_character(),
+    EUNISb = col_character(),
+    EUNISc = col_character(),
+    EUNISd = col_character(),
+    EUNISa_1 = col_character(),
+    EUNISa_2 = col_character(),
+    EUNISa_3 = col_character(),
+    EUNISa_4 = col_character(),
+    EUNISb_1 = col_character(),
+    EUNISb_2 = col_character(),
+    EUNISb_3 = col_character(),
+    EUNISb_4 = col_character(),
+    EUNISc_1 = col_character(),
+    EUNISc_2 = col_character(),
+    EUNISc_3 = col_character(),
+    EUNISc_4 = col_character(),
+    EUNISd_1 = col_character(),
+    EUNISd_2 = col_character(),
+    EUNISd_3 = col_character(),
+    EUNISd_4 = col_character(),
+    EUNISa_1_descr = col_character(),
+    EUNISb_1_descr = col_character(),
+    EUNISc_1_descr = col_character(),
+    EUNISd_1_descr = col_character(),
+    EUNIS_assignation = col_character(),
+    EUNISa_2_descr = col_character(),
+    EUNISa_3_descr = col_character(),
+    EUNISa_4_descr = col_character(),
+    EUNISb_2_descr = col_character(),
+    EUNISb_3_descr = col_character(),
+    EUNISb_4_descr = col_character(),
+    EUNISc_2_descr = col_character(),
+    EUNISc_3_descr = col_character(),
+    EUNISc_4_descr = col_character(),
+    EUNISd_2_descr = col_character(),
+    EUNISd_3_descr = col_character(),
+    EUNISd_4_descr = col_character()
+    )
+  )
+```
+
+No parsing issues!
+
+# Merge RS data to the ReSurvey database
+
+```{r}
+db_resurv_RS <- db_resurv %>%
+  left_join(data_RS_ID %>%
+              # This column is not needed anymore
+              select(-obs_unique_id)) %>%
+  mutate(RS_data = !is.na(biogeo))
+```
+
+```{r}
+db_resurv_RS %>% count(RS_data)
+```
+
+# Save to clean data
+
+Save clean file for analyses (to be updated continuosly due to updates in ReSurvey database and updates on RS data).
+
+```{r}
+write_tsv(db_resurv_RS,here("data", "clean","db_resurv_RS.csv"))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+

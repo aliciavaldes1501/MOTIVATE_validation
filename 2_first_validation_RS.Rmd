@@ -1,0 +1,358 @@
+---
+title: "Script to validate points in ReSurvey database using RS data"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: html_notebook
+---
+
+This R script is used to make a first attempt to validate the points in the ReSurvey database using RS indicators (NDVI and NDMI).
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+```
+
+# Define printall function
+
+```{r}
+printall <- function(tibble) {
+  print(tibble, width = Inf)
+  }
+```
+
+# Read ReSurvey data with RS indicators
+
+```{r}
+db_resurv_RS<-read_tsv(
+  here("data", "clean", "db_resurv_RS.csv"),
+  col_types = cols(
+    # Dynamically specify EUNIS columns as character
+    .default = col_guess(),  # Default guessing for other columns
+    EUNISa = col_character(),
+    EUNISb = col_character(),
+    EUNISc = col_character(),
+    EUNISd = col_character(),
+    EUNISa_1 = col_character(),
+    EUNISa_2 = col_character(),
+    EUNISa_3 = col_character(),
+    EUNISa_4 = col_character(),
+    EUNISb_1 = col_character(),
+    EUNISb_2 = col_character(),
+    EUNISb_3 = col_character(),
+    EUNISb_4 = col_character(),
+    EUNISc_1 = col_character(),
+    EUNISc_2 = col_character(),
+    EUNISc_3 = col_character(),
+    EUNISc_4 = col_character(),
+    EUNISd_1 = col_character(),
+    EUNISd_2 = col_character(),
+    EUNISd_3 = col_character(),
+    EUNISd_4 = col_character(),
+    EUNISa_1_descr = col_character(),
+    EUNISb_1_descr = col_character(),
+    EUNISc_1_descr = col_character(),
+    EUNISd_1_descr = col_character(),
+    EUNIS_assignation = col_character(),
+    EUNISa_2_descr = col_character(),
+    EUNISa_3_descr = col_character(),
+    EUNISa_4_descr = col_character(),
+    EUNISb_2_descr = col_character(),
+    EUNISb_3_descr = col_character(),
+    EUNISb_4_descr = col_character(),
+    EUNISc_2_descr = col_character(),
+    EUNISc_3_descr = col_character(),
+    EUNISc_4_descr = col_character(),
+    EUNISd_2_descr = col_character(),
+    EUNISd_3_descr = col_character(),
+    EUNISd_4_descr = col_character()
+    )
+  )
+```
+
+No parsing issues!
+
+# Several EUNIS level 1 assigned
+
+Number of rows where there is more than one EUNIS 1 assigned, and they are different among them. See what to do with these later! So far I take EUNISa_1.
+
+```{r}
+nrow(db_resurv_RS %>% 
+       # Rows with more than one EUNIS 1 assigned
+       filter(!is.na(EUNISb_1)) %>% 
+       filter(EUNISa_1!=EUNISb_1 | EUNISb_1 != EUNISc_1 | EUNISa_1 != EUNISc_1))
+```
+
+# Tibble with selected columns
+
+```{r}
+db_resurv_RS_short <- db_resurv_RS %>%
+  select(PlotObservationID, Country, RS_CODE, `ReSurvey site`, `ReSurvey plot`,
+         `Manipulate (y/n)`, `Type of manipulation`, Lon_updated, Lat_updated,
+         `Location uncertainty (m)`, EUNISa_1, EUNISa_1_descr, date, year,
+         biogeo, unit, year_RS, source, Lon_RS, Lat_RS, NDVI, NDMI, RS_data)
+```
+
+# Missing data checks
+
+Do when all RS data is ready!
+
+# Flag when coordinates are different between RS data and ReSurvey db
+
+```{r}
+db_resurv_RS_short <- db_resurv_RS_short %>%
+  mutate(Lon_diff = Lon_updated != Lon_RS,
+         Lat_diff = Lat_updated != Lat_RS)
+```
+
+```{r}
+db_resurv_RS_short %>% count(Lon_diff)
+db_resurv_RS_short %>% count(Lat_diff)
+```
+
+NDVI and NDMI would need to be calculated again for those?
+
+# Distributions NDVI and NDMI for all bioregions
+
+```{r}
+ggplot(db_resurv_RS_short %>% filter(!is.na(EUNISa_1_descr)), aes(x = NDVI)) +
+  facet_wrap(~ EUNISa_1_descr) +
+  geom_density()
+```
+
+```{r}
+ggplot(db_resurv_RS_short %>% filter(!is.na(EUNISa_1_descr)), aes(x = NDMI)) +
+  facet_wrap(~ EUNISa_1_descr) +
+  geom_density()
+```
+
+# Distributions NDVI and NDMI for each bioregion
+
+```{r}
+# Get unique values of EUNISa_1_descr, excluding NA
+eunis_levels <- unique(db_resurv_RS_short$EUNISa_1_descr
+                       [!is.na(db_resurv_RS_short$EUNISa_1_descr)])
+
+# Generate plots using purrr::map
+eunis_levels %>%
+  set_names() %>%  # Set names to access plots by EUNISa_1_descr
+  map(~
+        ggplot() +
+        # Density plot for each biogeo (filled)
+        geom_density(data = filter(db_resurv_RS_short, EUNISa_1_descr == .x), 
+                     aes(x = NDVI, fill = biogeo), alpha = 0.5) +
+        # Density plot for NDVI in red with thicker line
+        geom_density(data = filter(db_resurv_RS_short, EUNISa_1_descr == .x), 
+                     aes(x = NDVI),
+                     color = "red", alpha = 0.5, size = 1,
+                     show.legend = FALSE) +
+        labs(title = .x)
+      ) %>%
+  walk(print)
+```
+
+```{r}
+eunis_levels %>%
+  set_names() %>%  # Set names to access plots by EUNISa_1_descr
+  map(~
+        ggplot() +
+        # Density plot for each biogeo (filled)
+        geom_density(data = filter(db_resurv_RS_short, EUNISa_1_descr == .x), 
+                     aes(x = NDMI, fill = biogeo), alpha = 0.5) +
+        # Density plot for NDMI in red with thicker line
+        geom_density(data = filter(db_resurv_RS_short, EUNISa_1_descr == .x), 
+                     aes(x = NDMI),
+                     color = "red", alpha = 0.5, size = 1,
+                     show.legend = FALSE) +
+        labs(title = .x)
+      ) %>%
+  walk(print)
+```
+
+# Violin + boxplot + points for each bioregion
+
+```{r}
+source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/fb53bd97121f7f9ce947837ef1a4c65a73bffb3f/geom_flat_violin.R")
+```
+
+```{r warning=FALSE}
+eunis_levels %>%
+  set_names() %>%  # Set names to access plots by EUNISa_1_descr
+  map(~
+        ggplot(data = filter(db_resurv_RS_short %>% filter(RS_data == T),
+                             EUNISa_1_descr == .x),
+               aes(x = biogeo, y = NDVI, fill = biogeo)) +
+        geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+        geom_point(aes(y = NDVI, color = biogeo),
+                   position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+        geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+        stat_summary(fun.y=mean, geom="point", shape = 20, size=2) +
+        labs(y = "NDVI", x = "biogeo") +
+        guides(fill = FALSE, color = FALSE) +
+        labs(title = .x)
+      ) %>%
+  walk(print)
+```
+
+```{r warning=FALSE}
+ggplot(data = filter(db_resurv_RS_short %>%
+                       filter(RS_data == T & !is.na(EUNISa_1_descr))),
+       aes(x = biogeo, y = NDVI, fill = biogeo)) +
+  facet_wrap(~ EUNISa_1_descr) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+  geom_point(aes(y = NDVI, color = biogeo),
+             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1) +
+  labs(y = "NDVI", x = "biogeo") +
+  guides(fill = FALSE, color = FALSE) +
+  theme_bw()
+ggsave(
+  here("output", "figures", "NDVI_biogeo.tiff"),
+  width = 29.7, height = 21, units = "cm", dpi = 300)
+```
+
+```{r warning=FALSE}
+eunis_levels %>%
+  set_names() %>%  # Set names to access plots by EUNISa_1_descr
+  map(~
+        ggplot(data = filter(db_resurv_RS_short %>% filter(RS_data == T),
+                             EUNISa_1_descr == .x),
+               aes(x = biogeo, y = NDMI, fill = biogeo)) +
+        geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+        geom_point(aes(y = NDMI, color = biogeo),
+                   position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+        geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+        labs(y = "NDMI", x = "biogeo") +
+        guides(fill = FALSE, color = FALSE) +
+        labs(title = .x)
+      ) %>%
+  walk(print)
+```
+
+```{r warning=FALSE}
+ggplot(data = filter(db_resurv_RS_short %>%
+                       filter(RS_data == T & !is.na(EUNISa_1_descr))),
+       aes(x = biogeo, y = NDMI, fill = biogeo)) +
+  facet_wrap(~ EUNISa_1_descr) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+  geom_point(aes(y = NDMI, color = biogeo),
+             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1) +
+  labs(y = "NDMI", x = "biogeo") +
+  guides(fill = FALSE, color = FALSE) +
+  theme_bw()
+ggsave(
+  here("output", "figures", "NDMI_biogeo.tiff"),
+  width = 29.7, height = 21, units = "cm", dpi = 300)
+```
+
+# PCA
+
+```{r}
+PCA_all <- prcomp(~ NDVI + NDMI, data = db_resurv_RS_short)
+```
+
+```{r}
+PCA_ALP <- prcomp(~ NDVI + NDMI, 
+                    data = db_resurv_RS_short %>% filter(biogeo == "ALP"))
+PCA_CON <- prcomp(~ NDVI + NDMI, 
+                    data = db_resurv_RS_short %>% filter(biogeo == "CON"))
+PCA_ATL <- prcomp(~ NDVI + NDMI, 
+                    data = db_resurv_RS_short %>% filter(biogeo == "ATL"))
+PCA_PANNONIA <- prcomp(~ NDVI + NDMI, 
+                    data = db_resurv_RS_short %>% filter(biogeo == "PANNONIA"))
+PCA_MED <- prcomp(~ NDVI + NDMI, 
+                    data = db_resurv_RS_short %>% filter(biogeo == "MED"))
+PCA_BOR <- prcomp(~ NDVI + NDMI, 
+                    data = db_resurv_RS_short %>% filter(biogeo == "BOR"))
+```
+
+```{r}
+plot(PCA_all)
+biplot(PCA_all)
+```
+
+```{r}
+# Define a function to generate PCA biplots
+generate_pca_biplot <- function(pca_result, title) {
+  ggplot(as.data.frame(pca_result$x), aes(x = PC1, y = PC2)) +
+    geom_point() +
+    geom_segment(data = as.data.frame(pca_result$rotation),
+                 aes(x = 0, y = 0, xend = PC1, yend = PC2),
+                 arrow = arrow(length = unit(0.2, "inches")),
+                 color = "blue", size = 1) +
+    geom_text(data = as.data.frame(pca_result$rotation),
+              aes(x = PC1, y = PC2,
+                  label = rownames(as.data.frame(pca_result$rotation))),
+              vjust = 1, hjust = 1, color = "blue") +
+    labs(title = title, x = "PC1", y = "PC2") +
+    theme_minimal()
+}
+```
+
+```{r}
+# Function to generate variance explained bar plot
+generate_variance_plot <- function(pca_result, title) {
+  ggplot(
+    data.frame(PC = names(summary(pca_result)$importance[2, ]),
+               Variance = summary(pca_result)$importance[2, ]), 
+    aes(x = PC, y = Variance)
+  ) +
+    geom_bar(stat = "identity") +
+    labs(x = "Principal Component", y = "Variance Explained (%)", title = title) +
+    theme_minimal()
+}
+```
+
+
+```{r}
+generate_pca_biplot(PCA_all, "PCA_all")
+```
+
+```{r}
+generate_variance_plot(PCA_all, "PCA_all")
+```
+
+```{r}
+pca_list <- list(PCA_ALP = PCA_ALP, PCA_CON = PCA_CON, PCA_ATL = PCA_ATL,
+                 PCA_PANNONIA = PCA_PANNONIA, PCA_MED = PCA_MED,
+                 PCA_BOR = PCA_BOR)
+```
+
+
+```{r}
+pca_biplots <- lapply(names(pca_list), 
+                      function(pca_name) {
+                        generate_pca_biplot(pca_list[[pca_name]],
+                                            pca_name)
+                        })
+grid.arrange(grobs = pca_biplots, ncol = 3)
+```
+
+```{r}
+variance_plots <- lapply(names(pca_list), function(pca_name) {
+  generate_variance_plot(pca_list[[pca_name]], pca_name)
+})
+grid.arrange(grobs = variance_plots, ncol = 3)
+```
+
+
+
+# 
+
+Mean values per biogeographical region
+Ranges of membership
+
+
+
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
