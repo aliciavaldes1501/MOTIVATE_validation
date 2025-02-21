@@ -163,7 +163,7 @@ db_resurv_RS <- db_resurv %>%
   left_join(data_RS_ID %>%
               # This column is not needed anymore
               select(-obs_unique_id)) %>%
-  mutate(RS_data = !is.na(biogeo))
+  mutate(RS_data = !is.na(NDVI))
 ```
 
 ```{r}
@@ -183,4 +183,3 @@ write_tsv(db_resurv_RS,here("data", "clean","db_resurv_RS.csv"))
 ```{r}
 sessionInfo()
 ```
-
