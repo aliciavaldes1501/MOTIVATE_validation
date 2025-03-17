@@ -16,9 +16,11 @@ library(here)
 
 # Read files with RS data from Bea
 
+## S2 (NDVI & NDMI)
+
 ```{r}
 # Set the folder path
-folder_path <- here("data","raw","S2")
+folder_path <- here("..", "..", "..", "Data","MOTIVATE_RS_data","S2")
 
 # List only CSV files that contain "max_Filtered" in their filename
 csv_files <- list.files(folder_path, pattern = "max_Filtered.*\\.csv$",
@@ -30,7 +32,8 @@ read_and_label <- function(file_path) {
   
   # Extract region and subregion from the filename
   # Updated regular expression to handle the case where subregion is missing
-  components <- str_match(file_name, "(.*?)_(.*?)_Sentinel.*?_(.*?)\\.csv")
+  components <- str_match(file_name,
+                          "^[0-9_]*([^_]+)_([^_]+)_Sentinel.*?_(.*?).csv")
   
   # Extract the biogeo and unit, handling missing subregion (unit)
   biogeo <- components[2]
@@ -42,7 +45,7 @@ read_and_label <- function(file_path) {
   # assign the first part of the filename (region name)
   if (is.na(biogeo) && grepl("Sentinel", file_name)) {
     # Capture the first part (biogeo) directly
-    biogeo <- str_match(file_name, "^(.*?)_Sentinel")[2]
+    biogeo <- str_match(file_name, "^[0-9_]*([^_]+)_Sentinel")[2]
   }
   
   # If biogeo is still NA, print a warning
@@ -52,17 +55,19 @@ read_and_label <- function(file_path) {
 
   # Read CSV and add columns for extracted info
   read_csv(file_path) %>%
-    mutate(biogeo = biogeo,
-           unit = unit)
+    mutate(biogeo = biogeo, unit = unit)
 }
 # Read and merge all CSV files
 data_RS <- map_dfr(csv_files, read_and_label)
 
 # View the resulting tibble
 print(data_RS)
+
+# Counts per biogeo and unit
+print(data_RS %>% count(biogeo, unit), n = 100)
 ```
 
-# Data cleaning RS
+### Data cleaning S2
 
 ```{r}
 data_RS <- data_RS %>%
@@ -74,6 +79,23 @@ data_RS <- data_RS %>%
   rename(Lat_RS = Lat_update, Lon_RS = Lon_update) %>%
   # Same for year
   rename(year_RS = year)
+```
+
+## Canopy height
+
+```{r}
+data_RS_CH <- read_csv(here("..", "..", "..", "Data","MOTIVATE_RS_data",
+                            "Canopy_Height_1m",
+                            "Europe_points_CanopyHeight_1m.csv"))
+data_RS_CH
+```
+
+### Data cleaning CH
+
+```{r}
+data_RS_CH <- data_RS_CH %>%
+  # Keep the columns we need
+  select(obs_unique, canopy_height)
 ```
 
 # Read file db_Europa
@@ -92,7 +114,7 @@ Get only the columns PlotObservationID (original unique identifier) obs_unique_i
 db_Europa <- db_Europa %>% select(PlotObservationID, obs_unique_id)
 ```
 
-# Merge data_RS and db_Europa
+# Merge RS data and db_Europa
 
 ```{r}
 data_RS_ID <- db_Europa %>%
@@ -102,6 +124,15 @@ data_RS_ID <- db_Europa %>%
 ```
 
 Now we have PlotObservationID in data_RS_ID.
+
+```{r}
+data_RS_CH_ID <- db_Europa %>%
+  right_join(data_RS_CH %>%
+              # Rename to be able to join on this column
+              rename(obs_unique_id = obs_unique))
+```
+
+Now we have PlotObservationID in data_RS_CH_ID.
 
 # Read file db_resurv_updated_clean
 
@@ -163,11 +194,25 @@ db_resurv_RS <- db_resurv %>%
   left_join(data_RS_ID %>%
               # This column is not needed anymore
               select(-obs_unique_id)) %>%
-  mutate(RS_data = !is.na(NDVI))
+  mutate(S2_data = !is.na(NDVI))
 ```
 
 ```{r}
-db_resurv_RS %>% count(RS_data)
+db_resurv_RS %>% count(S2_data)
+```
+
+From 20054 to 68595 points with RS_data after adding ATL_BENELUX y CON_NORDIC.
+
+```{r}
+db_resurv_RS <- db_resurv_RS %>%
+  left_join(data_RS_CH_ID %>%
+              # This column is not needed anymore
+              select(-obs_unique_id)) %>%
+  mutate(CH_data = !is.na(canopy_height))
+```
+
+```{r}
+db_resurv_RS %>% count(CH_data)
 ```
 
 # Save to clean data

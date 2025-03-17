@@ -14,7 +14,6 @@ This R script is used to make a first attempt to validate the points in the ReSu
 ```{r}
 library(tidyverse)
 library(here)
-library(sf)
 library(gridExtra)
 library(sf)
 library(rnaturalearth)
@@ -577,23 +576,155 @@ ggsave(
   width = 21, height = 29.7, units = "cm", dpi = 300)
 ```
 
-```{r}
-ggplot(data = filter(db_resurv_RS_short %>%
-                       filter(`Location uncertainty (m)` < 50) %>%
-                       filter(RS_data == T & !is.na(EUNISa_1_descr))),
-       aes(x = biogeo, y = NDVI, fill = biogeo)) +
-  facet_wrap(~ EUNISa_1_descr) +
+## Distributions with Location method = "Location with GPS" or "Location with differential GPS"
+
+```{r warning=FALSE}
+ggplot(data = db_resurv_RS_short %>%
+         filter(`Location method` == "Location with GPS" |
+                  `Location method` == "Location with differential GPS") %>%
+         filter(RS_data == T & !is.na(EUNISa_1_descr)),
+       aes(x = EUNISa_1_descr, y = NDVI, fill = EUNISa_1_descr)) +
   geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
-  geom_point(aes(y = NDVI, color = biogeo),
+  geom_point(aes(y = NDVI, color = EUNISa_1_descr),
              position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
   geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
   stat_summary(fun.y=mean, geom="point", shape = 20, size = 1) +
   stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
                                                  label = length(x)),
                geom = "text", aes(label = ..label..), vjust = 0.5) +
-  labs(y = "NDVI", x = "biogeo") +
+  labs(y = "NDVI", x = "EUNISa_1_descr") +
   guides(fill = FALSE, color = FALSE) +
-  theme_bw()
+  theme_bw() + coord_flip()
+ggsave(
+  here("output", "figures", "NDVI_GPS.tiff"),
+  width = 21, height = 29.7, units = "cm", dpi = 300)
+ggplot(data = db_resurv_RS_short %>%
+         filter(`Location method` == "Location with GPS" |
+                  `Location method` == "Location with differential GPS") %>%
+         filter(RS_data == T & !is.na(EUNISa_1_descr)),
+       aes(x = EUNISa_1_descr, y = NDMI, fill = EUNISa_1_descr)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+  geom_point(aes(y = NDMI, color = EUNISa_1_descr),
+             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                 label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5) +
+  labs(y = "NDMI", x = "EUNISa_1_descr") +
+  guides(fill = FALSE, color = FALSE) +
+  theme_bw() + coord_flip()
+ggsave(
+  here("output", "figures", "NDMI_GPS.tiff"),
+  width = 21, height = 29.7, units = "cm", dpi = 300)
+```
+
+# Comparison good / bad points
+
+Only with terrestrial natural habitats, i.e. T, R, S, Q & N.
+
+## Group by spatial uncertainty
+
+```{r}
+ggplot(data = db_resurv_RS_short %>%
+         filter(RS_data == T & !is.na(EUNISa_1_descr)) %>%
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q", "N")) %>%
+         mutate(
+           Location_uncertainty_range = factor(
+             case_when(
+               `Location uncertainty (m)` <= 30 ~ "0 – 30 m",
+               `Location uncertainty (m)` <= 200 ~ "30 m – 200 m",
+               is.na(`Location uncertainty (m)`) ~ "NA",
+               TRUE ~ "200 m +"
+             ), 
+             levels = c("0 – 30 m", "30 m – 200 m", "200 m +", "NA"))
+         ),
+       aes(x = Location_uncertainty_range, y = NDVI, fill = Location_uncertainty_range)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.5) +
+  geom_point(aes(y = NDVI, color = Location_uncertainty_range),
+             position = position_jitterdodge(jitter.width = 0.5, 
+                                             dodge.width = 0.25),
+             size = 0.5, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5,
+               position = position_dodge(width = 0.25)) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1,
+               position = position_dodge(width = 0.25)) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                 label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5,
+               position = position_dodge(width = 0.25)) +
+  labs(y = "NDVI", x = "Location uncertainty") +
+  guides(fill = FALSE, color = FALSE) +
+  theme_bw() + coord_flip() + facet_wrap(~ EUNISa_1_descr, nrow = 2)
+ggsave(
+  here("output", "figures", "NDVI_comp_unc_range.tiff"),
+  width = 29.7, height = 21, units = "cm", dpi = 300)
+```
+
+
+## GPS vs. no GPS
+
+```{r warning=FALSE}
+ggplot(data = db_resurv_RS_short %>%
+         mutate(GPS = ifelse(
+           `Location method` == "Location with GPS" |
+             `Location method` == "Location with differential GPS",
+           "Y", "N")) %>%
+         filter(RS_data == T & !is.na(EUNISa_1_descr)) %>%
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q", "N")),
+       aes(x = GPS, y = NDVI, fill = GPS)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.5) +
+  geom_point(aes(y = NDVI, color = GPS),
+             position = position_jitterdodge(jitter.width = 0.25, 
+                                             dodge.width = 0.25),
+             size = 0.5, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5,
+               position = position_dodge(width = 0.25)) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1,
+               position = position_dodge(width = 0.25)) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                 label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5,
+               position = position_dodge(width = 0.25)) +
+  labs(y = "NDVI", x = "GPS") +
+  guides(fill = FALSE, color = FALSE) +
+  theme_bw() + coord_flip() + facet_wrap(~ EUNISa_1_descr, nrow = 2)
+ggsave(
+  here("output", "figures", "NDVI_comp_GPS.tiff"),
+  width = 29.7, height = 21, units = "cm", dpi = 300)
+```
+
+## GPS (differential - normal) vs. no GPS
+
+```{r warning=FALSE}
+ggplot(data = db_resurv_RS_short %>%
+         mutate(GPS = ifelse(
+           `Location method` == "Location with differential GPS",
+           "Differential GPS", 
+           ifelse(`Location method` == "Location with GPS", "GPS",
+                  "No GPS"))) %>%
+         filter(RS_data == T & !is.na(EUNISa_1_descr)) %>%
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q", "N")),
+       aes(x = GPS, y = NDVI, fill = GPS)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.5) +
+  geom_point(aes(y = NDVI, color = GPS),
+             position = position_jitterdodge(jitter.width = 0.25, 
+                                             dodge.width = 0.25),
+             size = 0.5, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5,
+               position = position_dodge(width = 0.25)) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1,
+               position = position_dodge(width = 0.25)) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                 label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5,
+               position = position_dodge(width = 0.25)) +
+  labs(y = "NDVI", x = "GPS") +
+  guides(fill = FALSE, color = FALSE) +
+  theme_bw() + coord_flip() + facet_wrap(~ EUNISa_1_descr, nrow = 2)
+ggsave(
+  here("output", "figures", "NDVI_comp_GPS_diff.tiff"),
+  width = 29.7, height = 21, units = "cm", dpi = 300)
 ```
 
 # Save csv for SONATA workshop
@@ -645,7 +776,7 @@ world_centroids <- world %>%
 ggplot() +
   geom_sf(data = world, fill = "lightblue", color = "gray") +
   geom_point(data = points_SONATA %>%
-               filter(`Location uncertainty (m)` < 20),
+               filter(`Location uncertainty (m)` < 50),
              aes(x = Lon_updated, y = Lat_updated, color = Country),
              size = 2) +
   geom_text(data = world_centroids, 
