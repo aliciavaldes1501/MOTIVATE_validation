@@ -1,5 +1,5 @@
 # First try of a random forest model to classify points into EUNIS 1
-# keeping only  GPS points to train the model
+# keeping only differential GPS points to train the model
 
 # Load necessary libraries
 library(dplyr)
@@ -10,25 +10,27 @@ library(randomForestExplainer)
 
 # Filter the data for training and testing sets
 filtered_data <- db_resurv_RS_short %>%
-  filter(!is.na(NDVI) & !is.na(NDMI) &
-           EUNISa_1 %in% c("T", "R", "S", "Q", "N")) %>%
-  # Ensure EUNISa_1 is a factor and NDVI, NDMI are numeric
+  filter(!is.na(NDVI) & !is.na(NDMI) & !is.na(canopy_height) &
+           EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  # Ensure EUNISa_1 is a factor and NDVI, canopy_height are numeric
   mutate(EUNISa_1 = as.factor(EUNISa_1),
          NDVI = as.numeric(NDVI),
-         NDMI = as.numeric(NDMI))
+         NDMI = as.numeric(NDMI),
+         NDMI = as.numeric(canopy_height)) %>%
+  filter(`Location method` == "Location with differential GPS")
 
-train_data <- filtered_data %>%
-  filter(`Location method` %in%
-           c("Location with GPS", "Location with differential GPS"))
+# Set seed (for reproducibility)
+set.seed(123) 
 
-test_data <- filtered_data %>%
-  filter(!(`Location method` %in%
-             c("Location with GPS", "Location with differential GPS")))
+# # Split GPS-located points into training and test sets
+train_indices <- sample(1:nrow(filtered_data), 0.7 * nrow(filtered_data))
+train_data <- filtered_data[train_indices, ]
+test_data <- filtered_data[-train_indices, ]
 
 # Train the random forest model
-set.seed(123)  # For reproducibility
-rf_model <- randomForest(EUNISa_1 ~ NDVI + NDMI, data = train_data,
-                         importance = TRUE, ntree = 500, proximity = TRUE)
+rf_model <- randomForest(EUNISa_1 ~ NDVI + NDMI + canopy_height, 
+                         data = train_data, importance = TRUE, ntree = 500,
+                         proximity = TRUE)
 
 # Evaluate the model
 predictions <- predict(rf_model, test_data)

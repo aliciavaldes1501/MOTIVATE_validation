@@ -1,6 +1,6 @@
 ---
 title: "Script to validate points in ReSurvey database using RS data"
-subtitle: "Adding ATL_BENELUX and CON_NORDIC S2 data, adding canopy height data"
+subtitle: "Adding ATL_BENELUX and CON_NORDIC S2 data, some Landsat data, adding canopy height data"
 author: "Alicia Valdés"
 date: "`r format(Sys.time(), '%d %B %Y')`"
 output:
@@ -18,6 +18,8 @@ library(here)
 library(gridExtra)
 library(readxl)
 library(scales)
+library(sf)
+library(rnaturalearth)
 ```
 
 # Define printall function
@@ -32,7 +34,7 @@ printall <- function(tibble) {
 
 ```{r}
 db_resurv_RS<-read_tsv(
-  here("data", "clean", "db_resurv_RS.csv"),
+  here("data", "clean", "db_resurv_RS_20250318.csv"),
   col_types = cols(
     # Dynamically specify EUNIS columns as character
     .default = col_guess(),  # Default guessing for other columns
@@ -98,8 +100,9 @@ db_resurv_RS_short <- db_resurv_RS %>%
          `Manipulate (y/n)`, `Type of manipulation`, Lon_updated, Lat_updated,
          `Location method`, `Location uncertainty (m)`, EUNISa_1,
          EUNISa_1_descr, EUNISa_2, EUNISa_2_descr, EUNISa_3, EUNISa_3_descr,
-         EUNISa_4, EUNISa_4_descr, date, year, biogeo, unit, year_RS, source,
-         Lon_RS, Lat_RS, NDVI, NDMI, S2_data, canopy_height, CH_data)
+         EUNISa_4, EUNISa_4_descr, date, year, biogeo, unit, year_RS, Lon_RS,
+         Lat_RS, NDVI_S2, NDMI_S2, NDVI_Landsat, NDMI_Landsat, NDVI, NDMI,
+         canopy_height, S2_data, Landsat_data, CH_data)
 ```
 
 # Missing data checks
@@ -116,6 +119,8 @@ db_resurv_RS_short <- db_resurv_RS_short %>%
 ```{r}
 db_resurv_RS_short %>% count(year_diff)
 ```
+
+2 with different year. NDVI and NDMI would need to be calculated again for those.
 
 # Flag when coordinates are different between RS data and ReSurvey db
 
@@ -138,7 +143,17 @@ db_resurv_RS_short %>% count(Lon_diff)
 db_resurv_RS_short %>% count(Lat_diff)
 ```
 
-Very few with large differences (2 for longitude, 3 for latitude). NDVI and NDMI would need to be calculated again for those?
+Very few with large differences (4 for longitude, 6 for latitude). NDVI and NDMI would need to be calculated again for those.
+
+If year_diff is TRUE or Lon_diff is LARGE or Lat_diff is LARGE --> NDVI and NDMI need to be recalculated. So far, remove those rows from db_resurv_RS_short.
+
+```{r}
+db_resurv_RS_short <- db_resurv_RS_short %>%
+  filter(year_diff == FALSE | is.na(year_diff)) %>%
+  filter(Lon_diff == "NO" |Lon_diff == "SMALL" | is.na(Lon_diff)) %>%
+  filter(Lat_diff == "NO" |Lat_diff == "SMALL" | is.na(Lat_diff))
+```
+
 
 # Distributions all bioregions
 
@@ -151,8 +166,9 @@ source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/f
 ```
 
 ```{r warning=FALSE}
-ggplot(data = filter(db_resurv_RS_short %>%
-                       filter(S2_data == T & !is.na(EUNISa_1_descr))),
+ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
        aes(x = EUNISa_1_descr, y = NDVI, fill = EUNISa_1_descr)) +
   geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
   geom_point(aes(y = NDVI, color = EUNISa_1_descr),
@@ -173,8 +189,9 @@ ggsave(
 ## NDMI
 
 ```{r}
-ggplot(data = filter(db_resurv_RS_short %>%
-                       filter(S2_data == T & !is.na(EUNISa_1_descr))),
+ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
        aes(x = EUNISa_1_descr, y = NDMI, fill = EUNISa_1_descr)) +
   geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
   geom_point(aes(y = NDMI, color = EUNISa_1_descr),
@@ -195,8 +212,9 @@ ggsave(
 ## CH
 
 ```{r}
-ggplot(data = filter(db_resurv_RS_short %>%
-                       filter(CH_data == T & !is.na(EUNISa_1_descr))),
+ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
        aes(x = EUNISa_1_descr, y = canopy_height, fill = EUNISa_1_descr)) +
   geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
   geom_point(aes(y = canopy_height, color = EUNISa_1_descr),
@@ -211,28 +229,6 @@ ggplot(data = filter(db_resurv_RS_short %>%
   theme_bw() + coord_flip()
 ggsave(
   here("output", "figures", "CH.tiff"),
-  width = 21, height = 29.7, units = "cm", dpi = 300)
-```
-
-```{r}
-ggplot(data = filter(db_resurv_RS_short %>%
-                       filter(CH_data == T & !is.na(EUNISa_1_descr)) %>%
-         # Only terrestrial natural habitats
-         filter(EUNISa_1 %in% c("T", "R", "S", "Q", "N"))),
-       aes(x = EUNISa_1_descr, y = canopy_height, fill = EUNISa_1_descr)) +
-  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
-  geom_point(aes(y = canopy_height, color = EUNISa_1_descr),
-             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
-  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
-  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1) +
-  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
-                                                 label = length(x)),
-               geom = "text", aes(label = ..label..), vjust = 0.5) +
-  labs(y = "Canopy height (m)", x = "EUNISa_1_descr") +
-  guides(fill = FALSE, color = FALSE) +
-  theme_bw() + coord_flip()
-ggsave(
-  here("output", "figures", "CH_terr_nat.tiff"),
   width = 21, height = 29.7, units = "cm", dpi = 300)
 ```
 
@@ -260,7 +256,8 @@ ggtitle("Points with canopy height < 5 m")
 
 ```{r}
 ggplot(db_resurv_RS_short %>%
-         filter(!is.na(EUNISa_1_descr)) %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
          mutate(CH_cat =
                   factor(
                     case_when(canopy_height == 0 ~ "0 m",
@@ -281,35 +278,12 @@ ggsave(
   width = 18, height = 18, units = "cm", dpi = 300)
 ```
 
-```{r}
-ggplot(db_resurv_RS_short %>%
-         filter(!is.na(EUNISa_1_descr)) %>%
-         filter(EUNISa_1 %in% c("T", "R", "S", "Q", "N")) %>%
-         mutate(CH_cat =
-                  factor(
-                    case_when(canopy_height == 0 ~ "0 m",
-                              canopy_height > 0 & canopy_height <= 1 ~ "0-1 m",
-                              canopy_height > 1 & canopy_height <=2 ~ "1-2 m",
-                              canopy_height > 2 & canopy_height <=5 ~ "2-5 m",
-                              canopy_height > 5 & canopy_height <=8 ~ "5-8 m",
-                              canopy_height > 8 ~ "> 8 m",
-                              is.na(canopy_height) ~ NA_character_),
-                    levels = c(
-                      "0 m", "0-1 m", "1-2 m", "2-5 m", "5-8 m", "> 8 m"))),
-       aes(x = EUNISa_1_descr, fill = CH_cat)) +
-  geom_bar() + 
-  scale_y_continuous(labels = label_number()) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-ggsave(
-  here("output", "figures", "CH_cats_habs_terr.tiff"),
-  width = 18, height = 18, units = "cm", dpi = 300)
-```
-
 ### Stats per habitat type
 
 ```{r}
 db_resurv_RS_short %>%
-  filter(!is.na(EUNISa_1_descr)) %>%
+  # Keep only forests, grasslands, shrublands and wetlands
+  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
   group_by(EUNISa_1_descr) %>%
   summarise(across(canopy_height, list(
     mean = mean,
@@ -317,18 +291,18 @@ db_resurv_RS_short %>%
     sd = sd,
     min = min,
     max = max
-  ), na.rm = TRUE))
-
+    ), na.rm = TRUE))
 ```
-
 
 # Distributions per bioregion
 
 ## NDVI
 
 ```{r warning=FALSE}
-ggplot(data = filter(db_resurv_RS_short %>%
-                       filter(S2_data == T & !is.na(EUNISa_1_descr))),
+ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+         filter(S2_data == T | Landsat_data == T ),
        aes(x = biogeo, y = NDVI, fill = biogeo)) +
   facet_wrap(~ EUNISa_1_descr) +
   geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
@@ -350,8 +324,10 @@ ggsave(
 ## NDMI
 
 ```{r warning=FALSE}
-ggplot(data = filter(db_resurv_RS_short %>%
-                       filter(S2_data == T & !is.na(EUNISa_1_descr))),
+ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+         filter(S2_data == T | Landsat_data == T ),
        aes(x = biogeo, y = NDMI, fill = biogeo)) +
   facet_wrap(~ EUNISa_1_descr) +
   geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
@@ -373,8 +349,10 @@ ggsave(
 ## CH
 
 ```{r warning=FALSE}
-ggplot(data = filter(db_resurv_RS_short %>%
-                       filter(CH_data == T & !is.na(EUNISa_1_descr))),
+ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+         filter(CH_data == T),
        aes(x = biogeo, y = canopy_height, fill = biogeo)) +
   facet_wrap(~ EUNISa_1_descr) +
   geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
@@ -393,167 +371,22 @@ ggsave(
   width = 29.7, height = 21, units = "cm", dpi = 300)
 ```
 
-# Comparison good / bad points
+In this plot, those with biogeo = NA are those that do not have S2 or Landsat data (and thus biogeo has not been assigned), but have CH data. We should later assign a biogeo based on location. 
 
-Only with terrestrial natural habitats, i.e. T, R, S, Q & N.
-
-## Group by spatial uncertainty
-
-### NDVI
-
-```{r}
-ggplot(data = db_resurv_RS_short %>%
-         filter(S2_data == T & !is.na(EUNISa_1_descr)) %>%
-         filter(EUNISa_1 %in% c("T", "R", "S", "Q", "N")) %>%
-         mutate(
-           Location_uncertainty_range = factor(
-             case_when(
-               `Location uncertainty (m)` <= 30 ~ "0 – 30 m",
-               `Location uncertainty (m)` <= 200 ~ "30 m – 200 m",
-               is.na(`Location uncertainty (m)`) ~ "NA",
-               TRUE ~ "200 m +"
-             ), 
-             levels = c("0 – 30 m", "30 m – 200 m", "200 m +", "NA"))
-         ),
-       aes(x = Location_uncertainty_range, y = NDVI, fill = Location_uncertainty_range)) +
-  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.5) +
-  geom_point(aes(y = NDVI, color = Location_uncertainty_range),
-             position = position_jitterdodge(jitter.width = 0.5, 
-                                             dodge.width = 0.25),
-             size = 0.5, alpha = 0.25) +
-  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5,
-               position = position_dodge(width = 0.25)) +
-  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1,
-               position = position_dodge(width = 0.25)) +
-  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
-                                                 label = length(x)),
-               geom = "text", aes(label = ..label..), vjust = 0.5,
-               position = position_dodge(width = 0.25)) +
-  labs(y = "NDVI", x = "Location uncertainty") +
-  guides(fill = FALSE, color = FALSE) +
-  theme_bw() + coord_flip() + facet_wrap(~ EUNISa_1_descr, nrow = 2)
-ggsave(
-  here("output", "figures", "NDVI_comp_unc_range.tiff"),
-  width = 29.7, height = 21, units = "cm", dpi = 300)
-```
-
-### NDMI
-
-```{r}
-ggplot(data = db_resurv_RS_short %>%
-         filter(S2_data == T & !is.na(EUNISa_1_descr)) %>%
-         filter(EUNISa_1 %in% c("T", "R", "S", "Q", "N")) %>%
-         mutate(
-           Location_uncertainty_range = factor(
-             case_when(
-               `Location uncertainty (m)` <= 30 ~ "0 – 30 m",
-               `Location uncertainty (m)` <= 200 ~ "30 m – 200 m",
-               is.na(`Location uncertainty (m)`) ~ "NA",
-               TRUE ~ "200 m +"
-             ), 
-             levels = c("0 – 30 m", "30 m – 200 m", "200 m +", "NA"))
-         ),
-       aes(x = Location_uncertainty_range, y = NDMI, fill = Location_uncertainty_range)) +
-  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.5) +
-  geom_point(aes(y = NDMI, color = Location_uncertainty_range),
-             position = position_jitterdodge(jitter.width = 0.5, 
-                                             dodge.width = 0.25),
-             size = 0.5, alpha = 0.25) +
-  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5,
-               position = position_dodge(width = 0.25)) +
-  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1,
-               position = position_dodge(width = 0.25)) +
-  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
-                                                 label = length(x)),
-               geom = "text", aes(label = ..label..), vjust = 0.5,
-               position = position_dodge(width = 0.25)) +
-  labs(y = "NDMI", x = "Location uncertainty") +
-  guides(fill = FALSE, color = FALSE) +
-  theme_bw() + coord_flip() + facet_wrap(~ EUNISa_1_descr, nrow = 2)
-ggsave(
-  here("output", "figures", "NDMI_comp_unc_range.tiff"),
-  width = 29.7, height = 21, units = "cm", dpi = 300)
-```
-
-## GPS vs. no GPS
+# Comparison GPS vs. no GPS points
 
 ### NDVI
 
 ```{r warning=FALSE}
 ggplot(data = db_resurv_RS_short %>%
-         mutate(GPS = ifelse(
-           `Location method` == "Location with GPS" |
-             `Location method` == "Location with differential GPS",
-           "Y", "N")) %>%
-         filter(S2_data == T & !is.na(EUNISa_1_descr)) %>%
-         filter(EUNISa_1 %in% c("T", "R", "S", "Q", "N")),
-       aes(x = GPS, y = NDVI, fill = GPS)) +
-  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.5) +
-  geom_point(aes(y = NDVI, color = GPS),
-             position = position_jitterdodge(jitter.width = 0.25, 
-                                             dodge.width = 0.25),
-             size = 0.5, alpha = 0.25) +
-  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5,
-               position = position_dodge(width = 0.25)) +
-  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1,
-               position = position_dodge(width = 0.25)) +
-  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
-                                                 label = length(x)),
-               geom = "text", aes(label = ..label..), vjust = 0.5,
-               position = position_dodge(width = 0.25)) +
-  labs(y = "NDVI", x = "GPS") +
-  guides(fill = FALSE, color = FALSE) +
-  theme_bw() + coord_flip() + facet_wrap(~ EUNISa_1_descr, nrow = 2)
-ggsave(
-  here("output", "figures", "NDVI_comp_GPS.tiff"),
-  width = 29.7, height = 21, units = "cm", dpi = 300)
-```
-
-### NDMI
-
-```{r warning=FALSE}
-ggplot(data = db_resurv_RS_short %>%
-         mutate(GPS = ifelse(
-           `Location method` == "Location with GPS" |
-             `Location method` == "Location with differential GPS",
-           "Y", "N")) %>%
-         filter(S2_data == T & !is.na(EUNISa_1_descr)) %>%
-         filter(EUNISa_1 %in% c("T", "R", "S", "Q", "N")),
-       aes(x = GPS, y = NDMI, fill = GPS)) +
-  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.5) +
-  geom_point(aes(y = NDMI, color = GPS),
-             position = position_jitterdodge(jitter.width = 0.25, 
-                                             dodge.width = 0.25),
-             size = 0.5, alpha = 0.25) +
-  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5,
-               position = position_dodge(width = 0.25)) +
-  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1,
-               position = position_dodge(width = 0.25)) +
-  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
-                                                 label = length(x)),
-               geom = "text", aes(label = ..label..), vjust = 0.5,
-               position = position_dodge(width = 0.25)) +
-  labs(y = "NDMI", x = "GPS") +
-  guides(fill = FALSE, color = FALSE) +
-  theme_bw() + coord_flip() + facet_wrap(~ EUNISa_1_descr, nrow = 2)
-ggsave(
-  here("output", "figures", "NDMI_comp_GPS.tiff"),
-  width = 29.7, height = 21, units = "cm", dpi = 300)
-```
-
-## GPS (differential - normal) vs. no GPS
-
-### NDVI
-
-```{r warning=FALSE}
-ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+         filter(S2_data == T | Landsat_data == T ) %>%
          mutate(GPS = ifelse(
            `Location method` == "Location with differential GPS",
            "Differential GPS", 
            ifelse(`Location method` == "Location with GPS", "GPS",
-                  "No GPS"))) %>%
-         filter(S2_data == T & !is.na(EUNISa_1_descr)) %>%
-         filter(EUNISa_1 %in% c("T", "R", "S", "Q", "N")),
+                  "No GPS"))),
        aes(x = GPS, y = NDVI, fill = GPS)) +
   geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.5) +
   geom_point(aes(y = NDVI, color = GPS),
@@ -580,13 +413,14 @@ ggsave(
 
 ```{r warning=FALSE}
 ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+         filter(S2_data == T | Landsat_data == T ) %>%
          mutate(GPS = ifelse(
            `Location method` == "Location with differential GPS",
            "Differential GPS", 
            ifelse(`Location method` == "Location with GPS", "GPS",
-                  "No GPS"))) %>%
-         filter(S2_data == T & !is.na(EUNISa_1_descr)) %>%
-         filter(EUNISa_1 %in% c("T", "R", "S", "Q", "N")),
+                  "No GPS"))),
        aes(x = GPS, y = NDMI, fill = GPS)) +
   geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.5) +
   geom_point(aes(y = NDMI, color = GPS),
@@ -609,7 +443,290 @@ ggsave(
   width = 29.7, height = 21, units = "cm", dpi = 300)
 ```
 
-# Rules based on CH
+# Plots Halle
+
+## Points Cordillera
+
+### Read and merge RS data
+
+Read sheets from Excel file sent by Gonzalo (and edited by me to create new sheets). Rename identifiers (Codigo and Plot_ID to id to be able to bind rows of both datasets).
+
+```{r}
+cordi1 <- read_excel(
+  here("data", "edited","NDVI_NDMI_Pastizales_Bosques 2_AV.xlsx"),
+  sheet = "pastizal_AV") %>%
+  rename(id = "Releve_num") %>% mutate(id = as.character(id))
+cordi2 <- read_excel(
+  here("data", "edited","NDVI_NDMI_Pastizales_Bosques_AV.xlsx"), 
+  sheet = "bosque_AV") %>%
+  rename(id = "Plot_ID")
+```
+
+Merge both datasets and get max NDVI and NDMI for each point:
+
+```{r}
+cordi <- bind_rows(cordi1, cordi2) %>% select(-date, -mes) %>%
+  group_by(id) %>%
+  summarise(max_NDVI = max(NDVI, na.rm = TRUE),
+            max_NDMI = max(NDMI, na.rm = TRUE))
+```
+
+### Read and merge shapefiles to get vegetation / habitat info
+
+```{r}
+alpine_grasslands <- st_read(
+  "C:/GIS/MOTIVATE/shapefiles/EVEREST/AlpineGrasslands_WGS84.shp") %>%
+  rename(id = "Releve_num", hab = "Hábitat") %>% select (id, hab) %>% 
+  mutate(longitude = st_coordinates(geometry)[, 1],
+         latitude = st_coordinates(geometry)[, 2]) %>%
+  as_tibble() %>%
+  mutate(id = as.character(id))
+vegetation_types <- st_read(
+  "C:/GIS/MOTIVATE/shapefiles/EVEREST/VegetationTypes_WGS84.shp") %>%
+  rename(id = "Plot_ID", hab = "Vegetation") %>% select(id, hab) %>%
+  mutate(longitude = st_coordinates(geometry)[, 1],
+         latitude = st_coordinates(geometry)[, 2]) %>%
+  as_tibble()
+```
+
+```{r}
+habitats <- bind_rows(alpine_grasslands, vegetation_types)
+```
+
+### Merge RS and habitat data
+
+```{r}
+cordi <- habitats %>%
+  left_join(cordi)
+```
+
+See the different info on hab:
+
+```{r}
+cordi %>% distinct(hab)
+```
+
+Assign to EUNIS level 1:
+
+```{r}
+cordi <- cordi %>%
+  mutate(EUNIS_1 = case_when(hab = str_detect(hab, "Pastizal|Cervunal|grassland|meadow") ~ "R",
+                             hab = str_detect(hab, "forest") ~ "T",
+                             hab = str_detect(hab, "Scrub|scrub|Shrubland|shrubland|shrub|Heathland") ~ "S",
+                             hab = str_detect(hab, "Suelo") ~ "U",
+                             TRUE ~ NA_character_))
+```
+
+### Plots NDVI and NDMI
+
+```{r}
+ggplot(data = cordi %>% filter(!is.na(max_NDVI)) %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNIS_1 %in% c("T", "R", "S", "Q")),
+       aes(x = EUNIS_1, y = max_NDVI, fill = EUNIS_1)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+  geom_point(aes(y = max_NDVI, color = EUNIS_1),
+             position = position_jitter(width = 0.15), size = 3,
+             alpha = 0.5) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 3) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                 label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5) +
+  guides(fill = FALSE, color = FALSE) + theme_bw() + coord_flip()
+ggsave(here("output", "figures", "cordi_NDVI.tiff"),
+       width = 21, height = 29.7, units = "cm", dpi = 300)
+ggplot(data = cordi %>% filter(!is.na(max_NDMI)) %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNIS_1 %in% c("T", "R", "S", "Q")),
+       aes(x = EUNIS_1, y = max_NDMI, fill = EUNIS_1)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+  geom_point(aes(y = max_NDMI, color = EUNIS_1),
+             position = position_jitter(width = 0.15), size = 3,
+             alpha = 0.5) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 3) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                 label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5) +
+  guides(fill = FALSE, color = FALSE) + theme_bw() + coord_flip()
+ggsave(here("output", "figures", "cordi_NDMI.tiff"),
+       width = 21, height = 29.7, units = "cm", dpi = 300)
+```
+
+### Maps
+
+```{r}
+# Load world boundaries
+world <- ne_countries(scale = "medium", returnclass = "sf")
+```
+
+```{r}
+# Calculate the extent of the points
+points_cordi_extent <- cordi %>% filter(EUNIS_1 %in% c("T", "R", "S", "Q")) %>%
+  summarise(lon_min = min(longitude, na.rm = TRUE),
+            lon_max = max(longitude, na.rm = TRUE),
+            lat_min = min(latitude, na.rm = TRUE),
+            lat_max = max(latitude, na.rm = TRUE))
+
+# Add padding to the extent (adjust as needed)
+padding <- 3  # Adjust padding to your preference
+x_limits <- c(points_cordi_extent$lon_min - padding,
+              points_cordi_extent$lon_max + padding)
+y_limits <- c(points_cordi_extent$lat_min - padding,
+              points_cordi_extent$lat_max + padding)
+
+# Create the zoomed map
+ggplot() +
+  geom_sf(data = world, fill = "lightblue", color = "gray") +
+  geom_point(data = cordi %>% filter(EUNIS_1 %in% c("T", "R", "S", "Q")),
+             aes(x = longitude, y = latitude, color = EUNIS_1),
+             size = 1) +
+  coord_sf(xlim = x_limits, ylim = y_limits) +
+  theme_minimal()
+```
+
+## Points differential GPS
+
+### Maps
+
+```{r}
+# Calculate the extent of the points
+points_GPS_extent <- db_resurv_RS_short %>%
+  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  filter(S2_data == T | Landsat_data == T ) %>%
+  filter(`Location method` == "Location with differential GPS") %>%
+  summarise(lon_min = min(Lon_updated, na.rm = TRUE),
+            lon_max = max(Lon_updated, na.rm = TRUE),
+            lat_min = min(Lat_updated, na.rm = TRUE),
+            lat_max = max(Lat_updated, na.rm = TRUE))
+
+# Add padding to the extent (adjust as needed)
+padding <- 2  # Adjust padding to your preference
+x_limits <- c(points_GPS_extent$lon_min - padding,
+              points_GPS_extent$lon_max + padding)
+y_limits <- c(points_GPS_extent$lat_min - padding,
+              points_GPS_extent$lat_max + padding)
+
+# Create the zoomed map
+ggplot() +
+  geom_sf(data = world, fill = "lightblue", color = "gray") +
+  geom_point(data = db_resurv_RS_short %>%
+               filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+               filter(S2_data == T | Landsat_data == T ) %>%
+               filter(`Location method` == "Location with differential GPS"),
+             aes(x = Lon_updated, y = Lat_updated, color = EUNISa_1),
+             size = 1) +
+  coord_sf(xlim = x_limits, ylim = y_limits) +
+  theme_minimal()
+```
+
+Number of differential GPS points by Country:
+
+```{r}
+db_resurv_RS_short %>%
+  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  filter(S2_data == T | Landsat_data == T ) %>%
+  filter(`Location method` == "Location with differential GPS") %>%
+  count(Country)
+```
+
+## Points ReSurvey
+
+### Maps
+
+```{r}
+# Calculate the extent of the points
+points_resurvey_extent <- db_resurv_RS_short %>%
+  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  filter(S2_data == T | Landsat_data == T ) %>%
+  summarise(lon_min = min(Lon_updated, na.rm = TRUE),
+            lon_max = max(Lon_updated, na.rm = TRUE),
+            lat_min = min(Lat_updated, na.rm = TRUE),
+            lat_max = max(Lat_updated, na.rm = TRUE))
+
+# Add padding to the extent (adjust as needed)
+padding <- 2  # Adjust padding to your preference
+x_limits <- c(points_resurvey_extent$lon_min - padding,
+              points_resurvey_extent$lon_max + padding)
+y_limits <- c(points_resurvey_extent$lat_min - padding,
+              points_resurvey_extent$lat_max + padding)
+
+# Create the zoomed map
+ggplot() +
+  geom_sf(data = world, fill = "lightblue", color = "gray") +
+  geom_point(data = db_resurv_RS_short %>%
+               filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+               filter(S2_data == T | Landsat_data == T ),
+             aes(x = Lon_updated, y = Lat_updated, color = EUNISa_1),
+             size = 1) +
+  coord_sf(xlim = x_limits, ylim = y_limits) +
+  theme_minimal()
+```
+
+Number of ReSurvey points by Country:
+
+```{r}
+db_resurv_RS_short %>%
+  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  filter(S2_data == T | Landsat_data == T ) %>%
+  count(Country)
+```
+
+## Join
+
+```{r}
+points_halle <- bind_rows(
+  cordi %>% filter(EUNIS_1 %in% c("T", "R", "S", "Q")) %>%
+    select(longitude, latitude, max_NDVI, max_NDMI, EUNIS_1) %>%
+    rename(NDVI = max_NDVI, NDMI = max_NDMI, EUNIS = EUNIS_1) %>%
+    mutate(point_type = "Cordillera"),
+  db_resurv_RS_short %>%
+    filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+    filter(S2_data == T | Landsat_data == T ) %>%
+    filter(`Location method` == "Location with differential GPS") %>%
+    select(Lon_updated, Lat_updated, NDVI, NDMI, EUNISa_1) %>%
+    rename(longitude = Lon_updated, latitude = Lat_updated,
+           EUNIS = EUNISa_1) %>%
+    mutate(point_type = "ReSurvey differential GPS"),
+  db_resurv_RS_short %>%
+    filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+    filter(S2_data == T | Landsat_data == T ) %>%
+    select(Lon_updated, Lat_updated, NDVI, NDMI, EUNISa_1) %>%
+    rename(longitude = Lon_updated, latitude = Lat_updated,
+           EUNIS = EUNISa_1) %>%
+    mutate(point_type = "ReSurvey")
+)
+```
+
+```{r}
+ggplot(data = points_halle,
+       aes(x = point_type, y = NDVI, fill = point_type)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+  geom_point(aes(y = NDVI, color = point_type),
+             position = position_jitter(width = 0.15), size = 3,
+             alpha = 0.5) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 3) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                 label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5) +
+  guides(fill = FALSE, color = FALSE) + theme_bw() + coord_flip() +
+  facet_wrap(~ EUNIS)
+```
+
+Create shapefile:
+
+```{r}
+st_write(st_as_sf(points_halle, coords = c("longitude", "latitude"),
+                  crs = 4326), 
+         here("..", "..", "..", "GIS", "MOTIVATE", "shapefiles",
+              "points_halle.shp"))
+```
+
+# HERE: fiddling with map in ArcGIS Pro
+
+# LATER: Rules based on CH
 
 Points that are probably wrong / need to be investigated based on CH and habitat types.
 
