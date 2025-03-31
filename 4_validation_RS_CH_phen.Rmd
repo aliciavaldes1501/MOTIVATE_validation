@@ -20,6 +20,11 @@ library(readxl)
 library(scales)
 library(sf)
 library(rnaturalearth)
+library(dtplyr)
+library(lme4)
+library(lmerTest)
+library(car)
+library(ggeffects)
 ```
 
 # Define printall function
@@ -34,7 +39,7 @@ printall <- function(tibble) {
 
 ```{r}
 db_resurv_RS<-read_tsv(
-  here("data", "clean", "db_resurv_RS_20250318.csv"),
+  here("data", "clean", "db_resurv_RS_20250331.csv"),
   col_types = cols(
     # Dynamically specify EUNIS columns as character
     .default = col_guess(),  # Default guessing for other columns
@@ -102,7 +107,7 @@ db_resurv_RS_short <- db_resurv_RS %>%
          EUNISa_1_descr, EUNISa_2, EUNISa_2_descr, EUNISa_3, EUNISa_3_descr,
          EUNISa_4, EUNISa_4_descr, date, year, biogeo, unit, year_RS, Lon_RS,
          Lat_RS, NDVI_S2, NDMI_S2, NDVI_Landsat, NDMI_Landsat, NDVI, NDMI,
-         canopy_height, S2_data, Landsat_data, CH_data)
+         canopy_height, SOS_DOY, Peak_DOY, EOS_DOY, S2_data, Landsat_data, CH_data, S2_phen_data)
 ```
 
 # Missing data checks
@@ -293,6 +298,166 @@ db_resurv_RS_short %>%
     max = max
     ), na.rm = TRUE))
 ```
+
+## Phenology
+
+### Histograms phenology measures
+
+```{r}
+ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q") & S2_phen_data == T) %>%
+         pivot_longer(cols = c(SOS_DOY, Peak_DOY, EOS_DOY), names_to = "name",
+                      values_to = "value"),
+       aes(x = value)) +
+  geom_histogram(fill = "white", color = "black") +
+  facet_grid(biogeo ~ name, scales = "free_y") +
+  theme_bw()
+```
+
+### Distributions
+
+```{r}
+ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q") & S2_phen_data == T),
+       aes(x = EUNISa_1_descr, y = SOS_DOY, fill = EUNISa_1_descr)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+  geom_point(aes(y = SOS_DOY, color = EUNISa_1_descr),
+             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                 label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5) +
+  labs(y = "SOS_DOY", x = "EUNISa_1_descr") +
+  guides(fill = FALSE, color = FALSE) +
+  theme_bw() + coord_flip()
+ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q") & S2_phen_data == T),
+       aes(x = EUNISa_1_descr, y = Peak_DOY, fill = EUNISa_1_descr)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+  geom_point(aes(y = Peak_DOY, color = EUNISa_1_descr),
+             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                 label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5) +
+  labs(y = "Peak_DOY", x = "EUNISa_1_descr") +
+  guides(fill = FALSE, color = FALSE) +
+  theme_bw() + coord_flip()
+ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q") & S2_phen_data == T),
+       aes(x = EUNISa_1_descr, y = EOS_DOY, fill = EUNISa_1_descr)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+  geom_point(aes(y = EOS_DOY, color = EUNISa_1_descr),
+             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                 label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5) +
+  labs(y = "EOS_DOY", x = "EUNISa_1_descr") +
+  guides(fill = FALSE, color = FALSE) +
+  theme_bw() + coord_flip()
+```
+
+
+```{r}
+ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q") & S2_phen_data == T),
+       aes(x = EUNISa_1_descr, y = SOS_DOY, fill = EUNISa_1_descr)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+  geom_point(aes(y = SOS_DOY, color = EUNISa_1_descr),
+             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                 label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5) +
+  labs(y = "SOS_DOY", x = "EUNISa_1_descr") +
+  guides(fill = FALSE, color = FALSE) +
+  theme_bw() + coord_flip() + facet_wrap(~ biogeo)
+```
+
+### Models
+
+```{r}
+# Convert EUNISa_1 to factor
+db_resurv_RS_short <- db_resurv_RS_short %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1))
+# Set unit PAN for bioregion PAN
+db_resurv_RS_short <- db_resurv_RS_short %>%
+  mutate(unit = if_else(biogeo == "PAN", "PAN", unit))
+# Add plot to include as random effect
+db_resurv_RS_short_S2_phen <- db_resurv_RS_short %>%
+  filter(S2_phen_data == T) %>%
+  mutate(RS_site = `ReSurvey site`, RS_plot = `ReSurvey plot`) %>%
+  lazy_dt() %>%
+  group_by(RS_CODE, RS_site, RS_plot) %>%
+  mutate(plot = .GRP) %>%
+  as_tibble() %>%
+  select(-RS_site, -RS_plot)
+```
+
+### HERE: Careful!
+
+We need to include plot as a random effect on this kind of models.
+For doing this, and probably the previous stuff too, we need to ensure that there is only one observation of each plot per year. So far there are some plots with more than one observation per year.
+
+```{r}
+db_resurv_RS_short_S2_phen %>%
+  group_by(plot) %>%
+  # Count the number of times each year appears
+  count(year) %>%
+  # Filter when a year appears more than once
+  filter(n > 1)
+```
+
+Develop a solution for this after Halle!
+
+So far not including this in models. Do we include plot as a random effect? Nested within unit or not? And year?
+
+Or use interannual means? Then we would have one value per plot - but what about plots where the habitat type changed? (we could tag them as "change").
+
+```{r}
+lmer_SOS_DOY <- lmer(SOS_DOY ~ EUNISa_1 + (1|biogeo/unit),
+                 data = db_resurv_RS_short_S2_phen %>%
+                   # Keep only forests, grasslands, shrublands and wetlands
+                   filter(EUNISa_1 %in% c("T", "R", "S", "Q")))
+lmer_Peak_DOY <- lmer(Peak_DOY ~ EUNISa_1 + (1|biogeo/unit),
+                 data = db_resurv_RS_short_S2_phen %>%
+                   # Keep only forests, grasslands, shrublands and wetlands
+                   filter(EUNISa_1 %in% c("T", "R", "S", "Q")))
+lmer_EOS_DOY <- lmer(EOS_DOY ~ EUNISa_1 + (1|biogeo/unit),
+                 data = db_resurv_RS_short_S2_phen %>%
+                   # Keep only forests, grasslands, shrublands and wetlands
+                   filter(EUNISa_1 %in% c("T", "R", "S", "Q")))
+```
+
+```{r}
+summary(lmer_SOS_DOY)
+summary(lmer_Peak_DOY)
+summary(lmer_EOS_DOY)
+Anova(lmer_SOS_DOY)
+Anova(lmer_Peak_DOY)
+Anova(lmer_EOS_DOY)
+```
+
+
+```{r}
+plot(ggpredict(lm_SOS_DOY))
+plot(ggpredict(lm_Peak_DOY))
+plot(ggpredict(lm_EOS_DOY))
+```
+
+### HERE: ggplot means and error plot for ALP - ALPS with SOS, Peak and EOS together
+
+### HERE: correspondence analyses (CAs), biplot showing the distribution of points, similar to PCA, see if they are grouped by habiat type... (read paper sent by Bea)
 
 # Distributions per bioregion
 
@@ -723,8 +888,6 @@ st_write(st_as_sf(points_halle, coords = c("longitude", "latitude"),
          here("..", "..", "..", "GIS", "MOTIVATE", "shapefiles",
               "points_halle.shp"))
 ```
-
-# HERE: fiddling with map in ArcGIS Pro
 
 # LATER: Rules based on CH
 

@@ -199,3 +199,45 @@ ggsave(
   here("output", "figures", "CH_points_habs.tiff"),
   width = 16, height = 11, units = "cm", dpi = 300)
 
+# Peak DOY
+
+ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q") & S2_phen_data == T),
+       aes(x = EUNISa_1_descr, y = Peak_DOY, fill = EUNISa_1_descr)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+  geom_point(aes(y = Peak_DOY, color = EUNISa_1_descr),
+             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                 label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5) +
+  labs(y = "Date of the maximum NDVI (DOY)", x = "EUNIS level 1") +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  guides(fill = FALSE, color = FALSE) +
+  theme_bw() + coord_flip()
+ggsave(
+  here("output", "figures", "Peak_DOY.tiff"),
+  width = 15, height = 11, units = "cm", dpi = 300)
+
+ggplot(data = db_resurv_RS_short %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         filter(EUNISa_1 %in% c("T", "R", "S", "Q") & S2_phen_data == T),
+       aes(x = EUNISa_1_descr, y = Peak_DOY, fill = EUNISa_1_descr)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+  geom_point(aes(y = Peak_DOY, color = EUNISa_1_descr),
+             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y=mean, geom="point", shape = 20, size = 1) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                 label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5) +
+  labs(y = "Date of the maximum NDVI (DOY)", x = "EUNIS level 1") +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  guides(fill = FALSE, color = FALSE) +
+  theme_bw() + coord_flip() + facet_wrap(~ biogeo)
+ggsave(
+  here("output", "figures", "Peak_DOY_biogeo.tiff"),
+  width = 25, height = 14, units = "cm", dpi = 300)
+

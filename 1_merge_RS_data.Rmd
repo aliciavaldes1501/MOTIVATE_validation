@@ -141,8 +141,7 @@ print(data_RS_S2_phen %>% count(biogeo, unit), n = 100)
 ```{r}
 data_RS_S2_phen <- data_RS_S2_phen %>%
   # Keep the columns we need
-  select(obs_unique, biogeo, unit, SOS_DOY, SOS_Date, Peak_DOY, Peak_Date,
-         EOS_DOY, EOS_Date)
+  select(obs_unique, biogeo, unit, SOS_DOY, Peak_DOY, EOS_DOY, EOS_Date)
   # Remove Lat and Lon and year, in case there is difference with
   # those in the ReSurvey database due to updates based on Ilona's info,
   # we have Lat_RS, Lon_RS and year_RS from data_RS_S2
@@ -461,13 +460,15 @@ db_resurv_RS <- db_resurv %>%
   left_join(data_RS_CH_ID %>% select(-obs_unique_id)) %>%
   mutate(S2_data = !is.na(NDVI_S2) & !is.na(NDMI_S2), 
          Landsat_data = !is.na(NDVI_Landsat) & !is.na(NDMI_Landsat),
-         CH_data = !is.na(canopy_height))
+         CH_data = !is.na(canopy_height),
+         S2_phen_data = !is.na(SOS_DOY))
 ```
 
 ```{r}
 db_resurv_RS %>% count(S2_data)
 db_resurv_RS %>% count(Landsat_data)
 db_resurv_RS %>% count(CH_data)
+db_resurv_RS %>% count(S2_phen_data)
 ```
 
 # Save to clean data
@@ -475,7 +476,7 @@ db_resurv_RS %>% count(CH_data)
 Save clean file for analyses (to be updated continuously due to updates in ReSurvey database and updates on RS data).
 
 ```{r}
-write_tsv(db_resurv_RS,here("data", "clean","db_resurv_RS_20250327.csv"))
+write_tsv(db_resurv_RS,here("data", "clean","db_resurv_RS_20250331.csv"))
 ```
 
 # Session info
