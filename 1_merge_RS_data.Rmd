@@ -12,23 +12,29 @@ This R script is used to merge RS data downloaded the Google Drive folder shared
 ```{r}
 library(tidyverse)
 library(here)
+library(lubridate)
 ```
 
 # Read files with RS data from Bea
 
 ## S2 
 
-### NDVI & NDMI
+### NDVI, NDMI & other indices
 
-### NOTE: To be updated with files in folders "New_filter"
+### NOTE: Updated with files in folders "New_filter" (ATL-BEN y CON_NOR different number, Bea is into this)
+### NOTE: So far excluding ALP-BAL because csv file is wrong
 
 ```{r}
 # Set the folder path
 folder_path <- "C:/Data/MOTIVATE/MOTIVATE_RS_data/S2"
 
 # List only CSV files that contain "max_Filtered" in their filename
-csv_files <- list.files(folder_path, pattern = "max_Filtered.*\\.csv$",
+csv_files <- list.files(folder_path,
+                        pattern = "Sentinel_Mean_Plot_Year_Allmetrics.*\\.csv$",
                         full.names = TRUE, recursive = TRUE)
+# So far remove this one that is wrong
+csv_files <- setdiff(csv_files,
+                     "C:/Data/MOTIVATE/MOTIVATE_RS_data/S2/ALP/New_filter/ALP_BAL_Sentinel_Mean_Plot_Year_Allmetrics.csv")
 
 # Function to read each file and extract info from the filename
 read_and_label <- function(file_path) {
@@ -71,13 +77,16 @@ print(data_RS_S2)
 print(data_RS_S2 %>% count(biogeo, unit), n = 100)
 ```
 
-#### Data cleaning S2 NDVI & NDMI
+#### Data cleaning
+
+Keep all indices and metrics in case they are useful.
 
 ```{r}
 data_RS_S2 <- data_RS_S2 %>%
   # Keep the columns we need
   select(obs_unique, biogeo, unit, year, source, Lat_update, Lon_update,
-         NDVI, NDMI) %>%
+         starts_with("NDVI"), starts_with("NDMI"), starts_with("NDWI"),
+         starts_with("EVI"), starts_with("SAVI")) %>%
   # Rename Lat and Lon, these are only kept in case there is difference with
   # those in the ReSurvey database due to updates based on Ilona's info
   rename(Lat_RS = Lat_update, Lon_RS = Lon_update) %>%
@@ -85,14 +94,16 @@ data_RS_S2 <- data_RS_S2 %>%
   rename(year_RS = year)
 ```
 
-### SOS, Peak and EOS
+### Phenology S2
+
+Manually renamed all files as REGION_SUBREGION_Phenology.
 
 ```{r}
 # Set the folder path
 folder_path <- "C:/Data/MOTIVATE/MOTIVATE_RS_data/S2"
 
-# List only CSV files that contain "NDVI_Phenology" in their filename
-csv_files <- list.files(folder_path, pattern = "NDVI_Phenology.*\\.csv$",
+# List only CSV files that contain "Phenology" in their filename
+csv_files <- list.files(folder_path, pattern = "Phenology.*\\.csv$",
                         full.names = TRUE, recursive = TRUE)
 
 # Function to read each file and extract info from the filename
@@ -102,7 +113,7 @@ read_and_label <- function(file_path) {
   # Extract region and subregion from the filename
   # Updated regular expression to handle the case where subregion is missing
   components <- str_match(file_name,
-                          "^[0-9_]*([^_]+)_([^_]+)_NDVI_Phenology.*?_(.*?).csv")
+                          "^[0-9_]*([^_]+)_([^_]+)_Phenology.csv")
   
   # Extract the biogeo and unit, handling missing subregion (unit)
   biogeo <- components[2]
@@ -112,9 +123,9 @@ read_and_label <- function(file_path) {
   
   # Check if biogeo is missing, and if so,
   # assign the first part of the filename (region name)
-  if (is.na(biogeo) && grepl("_NDVI_Phenology", file_name)) {
+  if (is.na(biogeo) && grepl("_Phenology", file_name)) {
     # Capture the first part (biogeo) directly
-    biogeo <- str_match(file_name, "^[0-9_]*([^_]+)_NDVI_Phenology")[2]
+    biogeo <- str_match(file_name, "^[0-9_]*([^_]+)_Phenology")[2]
   }
   
   # If biogeo is still NA, print a warning
@@ -136,22 +147,32 @@ print(data_RS_S2_phen)
 print(data_RS_S2_phen %>% count(biogeo, unit), n = 100)
 ```
 
-#### Data cleaning S2 SOS, Peak and EOS
+#### Data cleaning
 
 ```{r}
 data_RS_S2_phen <- data_RS_S2_phen %>%
-  # Keep the columns we need
-  select(obs_unique, biogeo, unit, SOS_DOY, Peak_DOY, EOS_DOY, EOS_Date)
+  # Keep the columns we need:
+  # Dates were wrongly exported from GEE - removed them and recalculated later.
   # Remove Lat and Lon and year, in case there is difference with
   # those in the ReSurvey database due to updates based on Ilona's info,
   # we have Lat_RS, Lon_RS and year_RS from data_RS_S2
+  select(obs_unique, biogeo, unit, SOS_DOY, NDVI_at_SOS, Peak_DOY, NDVI_at_Peak,
+         EOS_DOY, NDVI_at_EOS, Season_Length, year) %>%
+  # make_date() creates a date at the start of the year (January 1st). 
+  # By adding days(DOY - 1), we correctly position the date within the year.
+  mutate(SOS_date = make_date(year) + days(SOS_DOY - 1),
+         Peak_date = make_date(year) + days(Peak_DOY - 1),
+         EOS_date = make_date(year) + days(EOS_DOY - 1)) %>%
+  # Remove year
+  select(-year)
 ```
 
 ## Landsat
 
-### NDVI, NDMI & other stuff
-
+### HERE: Do not use so far cause metrics based only in July, not all year!
+### NDVI, NDMI & other indices
 ### NOTE: some regions missing (at least CON)
+### NOTE: So far excluding ALP-BAL because csv file is wrong
 
 ```{r}
 # Set the folder path
@@ -246,21 +267,24 @@ print(data_RS_Landsat)
 print(data_RS_Landsat %>% count(biogeo, unit), n = 100)
 ```
 
-#### Data cleaning Landsat NDVI & NDMI
+#### Data cleaning
+
+Keep all indices and metrics in case they are useful.
 
 ```{r}
 data_RS_Landsat <- data_RS_Landsat %>%
   # Keep the columns we need
   select(obs_unique, biogeo, unit, year, source, Lat_update, Lon_update,
-         NDVI_max, NDMI_max) %>% # Keep only these two so far
-  # Rename those as NDVI and NDMI to agree with S2 data
-  rename(NDVI = NDVI_max, NDMI = NDMI_max) %>%
-  # Rename Lat and Lon, these are only kept in case there is differrence with
+         starts_with("NDVI"), starts_with("NDMI"), starts_with("NDWI"),
+         starts_with("EVI"), starts_with("SAVI")) %>%
+  # Rename Lat and Lon, these are only kept in case there is difference with
   # those in the ReSurvey database due to updates based on Ilona's info
   rename(Lat_RS = Lat_update, Lon_RS = Lon_update) %>%
   # Same for year
   rename(year_RS = year)
 ```
+
+### TO ADD: Phenology Landsat
 
 ## Canopy height
 
@@ -390,14 +414,22 @@ No parsing issues!
 
 # Merge RS data to the ReSurvey database
 
-For some points, there is data (NDVI and NDMI so far) both from S2 and Landsat. In those cases, use the S2 data because it is more precise (10 m vs 30 m).
+For some points, there is data both from S2 and Landsat. In those cases, use the S2 data because it is more precise (10 m vs 30 m).
 
 ```{r}
 data_RS_S2_ID <- data_RS_S2_ID %>%
-  rename(NDVI_S2 = NDVI, NDMI_S2 = NDMI) %>%
+  rename_with(~ paste0(., "_S2"), starts_with("NDVI")) %>%
+  rename_with(~ paste0(., "_S2"), starts_with("NDMI")) %>%
+  rename_with(~ paste0(., "_S2"), starts_with("NDWI")) %>%
+  rename_with(~ paste0(., "_S2"), starts_with("EVI")) %>%
+  rename_with(~ paste0(., "_S2"), starts_with("SAVI")) %>%
   select(-source)
 data_RS_Landsat_ID <- data_RS_Landsat_ID %>%
-  rename(NDVI_Landsat = NDVI, NDMI_Landsat = NDMI) %>%
+  rename_with(~ paste0(., "_Landsat"), starts_with("NDVI")) %>%
+  rename_with(~ paste0(., "_Landsat"), starts_with("NDMI")) %>%
+  rename_with(~ paste0(., "_Landsat"), starts_with("NDWI")) %>%
+  rename_with(~ paste0(., "_Landsat"), starts_with("EVI")) %>%
+  rename_with(~ paste0(., "_Landsat"), starts_with("SAVI")) %>%
   select(-source)
 ```
 
@@ -409,59 +441,59 @@ data_RS <- data_RS_S2_ID %>%
   full_join(data_RS_Landsat_ID)
 ```
 
-Number of observations with NDVI data from both S2 and Landsat:
+Number of observations with NDVI_max data from both S2 and Landsat:
 
 ```{r}
-nrow(data_RS %>% filter(!is.na(NDVI_S2) & !is.na(NDVI_Landsat)))
+nrow(data_RS %>% filter(!is.na(NDVI_max_S2) & !is.na(NDVI_max_Landsat)))
 ```
 
-Send points in .csv to Bea.
+Difference between NDVI_max values from S2 and Landsat:
 
 ```{r}
-write.csv(data_RS %>% filter(!is.na(NDVI_S2) & !is.na(NDVI_Landsat)),
-          file = here("data", "clean", "points_NDVI_S2_Landsat.csv"))
+data_RS %>% filter(!is.na(NDVI_max_S2) & !is.na(NDVI_max_Landsat)) %>%
+  mutate(diff_NDVI_max = abs(NDVI_max_S2 - NDVI_max_Landsat)) %>%
+  ggplot(aes(x = diff_NDVI_max, fill = paste(biogeo, unit, sep = "-"))) +
+  geom_histogram(color = "black") + 
+  facet_wrap(~ paste(biogeo, unit, sep = "-")) + theme(legend.position = "none")
+data_RS %>% filter(!is.na(NDMI_max_S2) & !is.na(NDMI_max_Landsat)) %>%
+  mutate(diff_NDMI_max = abs(NDMI_max_S2 - NDMI_max_Landsat)) %>%
+  ggplot(aes(x = diff_NDMI_max, fill = paste(biogeo, unit, sep = "-"))) +
+  geom_histogram(color = "black") + 
+  facet_wrap(~ paste(biogeo, unit, sep = "-")) + theme(legend.position = "none")
 ```
 
-Difference between NDVI values from S2 and Landsat:
+There is a large difference between NDVI values from S2 and Landsat. So far, use the S2 data, but checking with Bea / Jose.
 
-```{r}
-data_RS %>% filter(!is.na(NDVI_S2) & !is.na(NDVI_Landsat)) %>%
-  mutate(diff_NDVI = NDVI_S2 - NDVI_Landsat) %>%
-  ggplot(aes(x = diff_NDVI)) + geom_histogram(color = "black", fill = "white")
-data_RS %>% filter(!is.na(NDMI_S2) & !is.na(NDMI_Landsat)) %>%
-  mutate(diff_NDMI = NDMI_S2 - NDMI_Landsat) %>%
-  ggplot(aes(x = diff_NDMI)) + geom_histogram(color = "black", fill = "white")
-```
-
-There is a large difference between NDVI values from S2 and Landsat. So far, use the S2 data, but check with Bea.
-
-When NDVI and NDMI values are available from both satellites, use S2:
+When values are available from both satellites, use S2:
 
 ```{r}
 data_RS <- data_RS %>%
-  mutate(NDVI =
-           case_when(
-             is.na(NDVI_S2) & is.na(NDVI_Landsat) ~ NA_real_,
-             is.na(NDVI_Landsat) ~ NDVI_S2,
-             is.na(NDVI_S2) ~ NDVI_Landsat,
-             TRUE ~ NDVI_S2),
-         NDMI = 
-           case_when(
-             is.na(NDMI_S2) & is.na(NDMI_Landsat) ~ NA_real_,
-             is.na(NDMI_Landsat) ~ NDMI_S2,
-             is.na(NDMI_S2) ~ NDMI_Landsat,
-             TRUE ~ NDMI_S2),
-         )
+  mutate(across(
+    matches("^(NDVI|NDMI|NDWI|EVI|SAVI)_(max|median|min|mode|p10|p90)_S2$"),
+    ~ case_when(
+      # If both the current column and the corresponding Landsat column are NA,
+      # set to NA_real_
+      is.na(.x) & is.na(get(sub("_S2$", "_Landsat", cur_column()))) ~ NA_real_,
+      # If the corresponding Landsat column is NA, use the current column's value
+      is.na(get(sub("_S2$", "_Landsat", cur_column()))) ~ .x,
+      # If the current column is NA, use the corresponding Landsat column's value
+      is.na(.x) ~ get(sub("_S2$", "_Landsat", cur_column())),
+      # Otherwise, use the current column's value
+      TRUE ~ .x
+      ), .names = "{col}_combined")) %>%
+  rename_with(~ sub("_S2_combined$", "", .), matches("_S2_combined$"))
 ```
 
 ```{r}
 db_resurv_RS <- db_resurv %>%
   left_join(data_RS %>% select(-obs_unique_id)) %>%
   left_join(data_RS_CH_ID %>% select(-obs_unique_id)) %>%
-  mutate(S2_data = !is.na(NDVI_S2) & !is.na(NDMI_S2), 
-         Landsat_data = !is.na(NDVI_Landsat) & !is.na(NDMI_Landsat),
+  mutate(S2_data = !is.na(NDVI_max_S2) & !is.na(NDMI_max_S2), 
+         Landsat_data = !is.na(NDVI_max_Landsat) & !is.na(NDMI_max_Landsat),
          CH_data = !is.na(canopy_height),
-         S2_phen_data = !is.na(SOS_DOY))
+         S2_phen_data = !is.na(SOS_DOY)) %>%
+  # So far, remove cols for _S2 and _Landsat
+  select(-matches("_(S2|Landsat)$"))
 ```
 
 ```{r}
@@ -476,7 +508,7 @@ db_resurv_RS %>% count(S2_phen_data)
 Save clean file for analyses (to be updated continuously due to updates in ReSurvey database and updates on RS data).
 
 ```{r}
-write_tsv(db_resurv_RS,here("data", "clean","db_resurv_RS_20250331.csv"))
+write_tsv(db_resurv_RS,here("data", "clean","db_resurv_RS_20250505.csv"))
 ```
 
 # Session info
