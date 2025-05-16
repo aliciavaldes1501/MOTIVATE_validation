@@ -36,6 +36,7 @@ library(ggparty)
 library(caret)
 library(moreparty)
 library(randomForest)
+library(pROC)
 ```
 
 # Define printall function
@@ -139,7 +140,6 @@ db_resurv_RS <- db_resurv_RS %>%
     TRUE ~ NA_character_),
     EUNIS1_conf = !is.na(EUNIS1_conf_type))
 ```
-
 
 ## Tibble with selected columns
 
@@ -378,22 +378,38 @@ distr_plot <- function(data, y_vars, y_labels) {
 
 ## NDVI, NDMI, NDWI, SAVI and EVI
 
-Histograms to check that values are ok:
+Ranges of min and max:
 
 ```{r}
-hist_NDVI <- plot_histogram(db_resurv_RS_short_PLOT, "NDVI_max", "NDVI max")
-hist_NDMI <- plot_histogram(db_resurv_RS_short_PLOT, "NDMI_max", "NDMI max")
-hist_NDWI <- plot_histogram(db_resurv_RS_short_PLOT, "NDWI_max", "NDWI max")
-hist_SAVI <- plot_histogram(db_resurv_RS_short_PLOT, "SAVI_max", "SAVI max")
-hist_EVI <- plot_histogram(db_resurv_RS_short_PLOT, "EVI_max", "EVI max")
-hist_NDVI
-hist_NDMI
-hist_NDWI
-hist_SAVI
-hist_EVI # Some values wrong!
-hist_EVI_1 <- plot_histogram(db_resurv_RS_short_PLOT %>% filter(EVI_max <= 1),
-                             "EVI_max", "EVI max")
-hist_EVI_1
+range(db_resurv_RS_short_PLOT$NDVI_max, na.rm = T)
+range(db_resurv_RS_short_PLOT$NDMI_max, na.rm = T)
+range(db_resurv_RS_short_PLOT$NDWI_max, na.rm = T)
+range(db_resurv_RS_short_PLOT$SAVI_max, na.rm = T)
+range(db_resurv_RS_short_PLOT$EVI_max, na.rm = T)
+range(db_resurv_RS_short_PLOT$NDVI_min, na.rm = T)
+range(db_resurv_RS_short_PLOT$NDMI_min, na.rm = T)
+range(db_resurv_RS_short_PLOT$NDWI_min, na.rm = T)
+range(db_resurv_RS_short_PLOT$SAVI_min, na.rm = T)
+range(db_resurv_RS_short_PLOT$EVI_min, na.rm = T)
+```
+
+Histograms to check that max and min values are ok:
+
+```{r}
+plot_histogram(db_resurv_RS_short_PLOT, "NDVI_max", "NDVI max")
+plot_histogram(db_resurv_RS_short_PLOT, "NDMI_max", "NDMI max")
+plot_histogram(db_resurv_RS_short_PLOT, "NDWI_max", "NDWI max")
+plot_histogram(db_resurv_RS_short_PLOT, "SAVI_max", "SAVI max")
+plot_histogram(db_resurv_RS_short_PLOT %>% 
+                 # Some values wrong!
+                 filter(EVI_max <= 1), "EVI_max", "EVI max")
+plot_histogram(db_resurv_RS_short_PLOT, "NDVI_min", "NDVI min")
+plot_histogram(db_resurv_RS_short_PLOT, "NDMI_min", "NDMI min")
+plot_histogram(db_resurv_RS_short_PLOT, "NDWI_min", "NDWI min")
+plot_histogram(db_resurv_RS_short_PLOT, "SAVI_min", "SAVI min")
+plot_histogram(db_resurv_RS_short_PLOT %>% 
+                 # Some values wrong!
+                 filter(EVI_min >= -1 & EVI_min <= 1), "EVI_min", "EVI min")
 ```
 
 ```{r}
@@ -406,11 +422,11 @@ db_resurv_RS_short_PLOT %>%
   count(biogeo, unit)
 ```
 
-So far, remove observations with EVI_max > 1 from stuff using EVI values. 
+So far, remove observations with EVI_max > 1 and EVI_min <-1 or > 1 from stuff using EVI values. 
 
 Distribution plots:
 
-```{r}
+```{r message=FALSE, warning=FALSE}
 distr_plot(db_resurv_RS_short_PLOT,
            c("NDVI_max", "NDVI_p90", "NDVI_min", "NDVI_p10"), 
            c("NDVI max", "NDVI p90", "NDVI min", "NDVI p10"))
@@ -423,17 +439,19 @@ distr_plot(db_resurv_RS_short_PLOT,
 distr_plot(db_resurv_RS_short_PLOT,
            c("SAVI_max", "SAVI_p90", "SAVI_min", "SAVI_p10"), 
            c("SAVI max", "SAVI p90", "SAVI min", "SAVI p10"))
-distr_plot(db_resurv_RS_short_PLOT %>% filter(EVI_max <= 1),
+distr_plot(db_resurv_RS_short_PLOT %>%
+             filter(EVI_max <= 1) %>%
+             filter(EVI_min >= -1 & EVI_min <= 1),
            c("EVI_max", "EVI_p90", "EVI_min", "EVI_p10"), 
            c("EVI max", "EVI p90", "EVI min", "EVI p10"))
 ```
 
+Some weird values of NDVI_min, NDVI_p10, NDMI_min, NDMI_p10, NDWI_max, NDWI_p90, NDWI_min, NDWI_p10 --> Check with new values for all year.
+
 ## CH
 
 ```{r}
-plot_distr_CH <- distr_plot(db_resurv_RS_short_PLOT, "canopy_height",
-                            "Canopy height (m)")
-plot_distr_CH
+distr_plot(db_resurv_RS_short_PLOT, "canopy_height", "Canopy height (m)")
 ```
  
 ### Show habitats with CH categories
@@ -536,94 +554,79 @@ ggplot(data = db_resurv_RS_short_PLOT %>%
 ### Distributions
 
 ```{r}
-plot_distr_SOS_DOY <- distr_plot(db_resurv_RS_short_PLOT, "SOS_DOY",
-                                 "SOS DOY")
-plot_distr_Peak_DOY <- distr_plot(db_resurv_RS_short_PLOT, "Peak_DOY",
-                                  "Peak DOY")
-plot_distr_EOS_DOY <- distr_plot(db_resurv_RS_short_PLOT, "EOS_DOY",
-                                 "EOS DOY")
-plot_distr_NDVI_at_SOS <- distr_plot(db_resurv_RS_short_PLOT, "NDVI_at_SOS",
-                                     "NDVI at SOS")
-plot_distr_NDVI_at_Peak <- distr_plot(db_resurv_RS_short_PLOT, "NDVI_at_Peak",
-                                      "NDVI at Peak")
-plot_distr_NDVI_at_EOS <- distr_plot(db_resurv_RS_short_PLOT, "NDVI_at_EOS",
-                                     "NDVI at EOS")
-plot_distr_diff_Peak_SOS <- distr_plot(db_resurv_RS_short_PLOT, "diff_Peak_SOS",
-                                       "Difference Peak-SOS")
-plot_distr_diff_Peak_EOS <- distr_plot(db_resurv_RS_short_PLOT, "diff_Peak_EOS",
-                                       "Difference Peak-EOS")
-plot_distr_Season_Length <- distr_plot(db_resurv_RS_short_PLOT, "Season_Length",
-                                       "Season Length")
-plot_distr_SOS_DOY
-plot_distr_Peak_DOY
-plot_distr_EOS_DOY
-plot_distr_NDVI_at_SOS
-plot_distr_NDVI_at_Peak
-plot_distr_NDVI_at_EOS
-plot_distr_diff_Peak_SOS
-plot_distr_diff_Peak_EOS
-plot_distr_Season_Length
+distr_plot(db_resurv_RS_short_PLOT,
+           c("SOS_DOY","Peak_DOY", "EOS_DOY",
+             "NDVI_at_SOS", "NDVI_at_Peak", "NDVI_at_EOS",
+             "diff_Peak_SOS","diff_Peak_EOS", "Season_Length"),
+           c("SOS DOY", "Peak DOY", "EOS DOY",
+             "NDVI at SOS", "NDVI at Peak", "NDVI at EOS",
+             "Difference Peak-SOS", "Difference Peak-EOS", "Season Length"))
 ```
 
 # Distributions per bioregion
 
 ```{r}
 # Define a function to create plots with violin + boxplot + points
-distr_plot_biogeo <- function(data, y_var, y_label) {
-  ggplot(data = data %>%
-           filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
-         aes(x = EUNISa_1_descr, y = !!sym(y_var), fill = EUNISa_1_descr)) +
-    geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
-    geom_point(aes(y = !!sym(y_var), color = EUNISa_1_descr),
-               position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
-    geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
-    stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
-    stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
-                                                   label = length(x)),
-                 geom = "text", aes(label = ..label..), vjust = 0.5) +
-    labs(y = y_label, x = "EUNISa_1_descr") +
-    scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
-    guides(fill = FALSE, color = FALSE) +
-    theme_bw() + coord_flip() + facet_wrap(~ biogeo)
+distr_plot_biogeo <- function(data, y_vars, y_labels) {
+  plots <- list()
+  
+  for (i in seq_along(y_vars)) {
+    y_var <- y_vars[[i]]
+    y_label <- y_labels[[i]]
+    
+    p <- ggplot(data = data %>%
+                  filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
+                aes(x = EUNISa_1_descr, y = !!sym(y_var), fill = EUNISa_1_descr)) +
+      geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+      geom_point(aes(y = !!sym(y_var), color = EUNISa_1_descr),
+                 position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+      geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+      stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
+      stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                     label = length(x)),
+                   geom = "text", aes(label = ..label..), vjust = 0.5) +
+      labs(y = y_label, x = "EUNISa_1_descr") +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+      guides(fill = FALSE, color = FALSE) +
+      theme_bw() + coord_flip() + facet_wrap(~ biogeo)
+    
+    plots[[y_var]] <- p
+  }
+  
+  return(plots)
 }
 ```
 
-## Max. NDVI, NDMI, NDWI, SAVI and EVI
+## NDVI, NDMI, NDWI, SAVI and EVI
 
 Distribution plots:
 
-```{r}
-plot_distr_NDVI_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)),
-                                            "NDVI_max", "NDVI max")
-plot_distr_NDMI_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)),
-                                            "NDMI_max", "NDMI max")
-plot_distr_NDWI_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)),
-                                            "NDWI_max", "NDWI max")
-plot_distr_SAVI_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)),
-                                            "SAVI_max", "SAVI max")
-plot_distr_EVI_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)) %>%
-                                             filter(EVI_max <= 1),
-                                           "EVI_max", "EVI max")
-plot_distr_NDVI_biogeo
-plot_distr_NDMI_biogeo
-plot_distr_NDWI_biogeo
-plot_distr_SAVI_biogeo
-plot_distr_EVI_biogeo
+```{r message=FALSE, warning=FALSE}
+distr_plot_biogeo(db_resurv_RS_short_PLOT %>% filter(!is.na(biogeo)),
+           c("NDVI_max", "NDVI_p90", "NDVI_min", "NDVI_p10"), 
+           c("NDVI max", "NDVI p90", "NDVI min", "NDVI p10"))
+distr_plot_biogeo(db_resurv_RS_short_PLOT %>% filter(!is.na(biogeo)),
+           c("NDMI_max", "NDMI_p90", "NDMI_min", "NDMI_p10"), 
+           c("NDMI max", "NDMI p90", "NDMI min", "NDMI p10"))
+distr_plot_biogeo(db_resurv_RS_short_PLOT %>% filter(!is.na(biogeo)),
+           c("NDWI_max", "NDWI_p90", "NDWI_min", "NDWI_p10"), 
+           c("NDWI max", "NDWI p90", "NDWI min", "NDWI p10"))
+distr_plot_biogeo(db_resurv_RS_short_PLOT %>% filter(!is.na(biogeo)),
+           c("SAVI_max", "SAVI_p90", "SAVI_min", "SAVI_p10"), 
+           c("SAVI max", "SAVI p90", "SAVI min", "SAVI p10"))
+distr_plot_biogeo(db_resurv_RS_short_PLOT %>% filter(!is.na(biogeo)) %>%
+             filter(EVI_max <= 1) %>%
+             filter(EVI_min >= -1 & EVI_min <= 1),
+           c("EVI_max", "EVI_p90", "EVI_min", "EVI_p10"), 
+           c("EVI max", "EVI p90", "EVI min", "EVI p10"))
 ```
 
-BOR missing because there is no EUNIS info for those that have RS info.
+BOR missing in EVI plots because EVI >= 1.
 
 ## CH
 
 ```{r}
-plot_distr_CH_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT,
-                                          "canopy_height", "Canopy height (m)")
-plot_distr_CH_biogeo
+distr_plot_biogeo(db_resurv_RS_short_PLOT, "canopy_height", "Canopy height (m)")
 ```
 
 In this plot, those with biogeo = NA are those that do not have S2 or Landsat data (and thus biogeo has not been assigned), but have CH data. We should later assign a biogeo based on location. 
@@ -631,107 +634,32 @@ In this plot, those with biogeo = NA are those that do not have S2 or Landsat da
 ## Phenology
 
 ```{r}
-plot_distr_SOS_DOY_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)),
-                                               "SOS_DOY", "SOS DOY")
-plot_distr_Peak_DOY_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)),
-                                                "Peak_DOY", "Peak DOY")
-plot_distr_EOS_DOY_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)),
-                                               "EOS_DOY", "EOS DOY")
-plot_distr_NDVI_at_SOS_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)),
-                                               "NDVI_at_SOS", "NDVI at SOS")
-plot_distr_NDVI_at_Peak_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)),
-                                                "NDVI_at_Peak", "NDVI at Peak")
-plot_distr_NDVI_at_EOS_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)),
-                                               "NDVI_at_EOS", "NDVI at EOS")
-plot_distr_diff_Peak_SOS_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)),
-                                               "diff_Peak_SOS", "Difference Peak-SOS")
-plot_distr_diff_Peak_EOS_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)),
-                                               "diff_Peak_EOS", "Difference Peak-EOS")
-plot_distr_Season_Length_biogeo <- distr_plot_biogeo(db_resurv_RS_short_PLOT %>%
-                                              filter(!is.na(biogeo)),
-                                               "Season_Length", "Season Length")
-
-plot_distr_SOS_DOY_biogeo
-plot_distr_Peak_DOY_biogeo
-plot_distr_EOS_DOY_biogeo
-plot_distr_NDVI_at_SOS_biogeo
-plot_distr_NDVI_at_Peak_biogeo
-plot_distr_NDVI_at_EOS_biogeo
-plot_distr_diff_Peak_SOS_biogeo
-plot_distr_diff_Peak_EOS_biogeo
-plot_distr_Season_Length_biogeo
+distr_plot_biogeo(db_resurv_RS_short_PLOT %>% filter(!is.na(biogeo)),
+                  c("SOS_DOY", "Peak_DOY", "EOS_DOY",
+                    "NDVI_at_SOS", "NDVI_at_Peak", "NDVI_at_EOS",
+                    "diff_Peak_SOS", "diff_Peak_EOS", "Season_Length"),
+                  c("SOS DOY", "Peak DOY", "EOS DOY",
+                    "NDVI at SOS", "NDVI at Peak", "NDVI at EOS",
+                    "Difference Peak-SOS", "Difference Peak-EOS",
+                    "Season Length"))
 ```
 
-BOR missing because there is no EUNIS info for those that have RS info.
+BOR missing because there is no phenology info for EUNISa_1 %in% c("T", "R", "S", "Q").
 
 # HERE: Verify SOS-Peak_EOS ODY
 
-ERRORS! Double-check and send to Bea:
+ERRORS! Bea is checking this:
 
 ```{r}
 db_resurv_RS_short_PLOT %>% filter(SOS_DOY > Peak_DOY)
 db_resurv_RS_short_PLOT %>% filter(Peak_DOY > EOS_DOY)
 db_resurv_RS_short_PLOT %>% filter(SOS_DOY > EOS_DOY)
 ```
+
 ```{r}
 db_resurv_RS_short_PLOT %>% filter(NDVI_at_Peak < NDVI_at_SOS)
 db_resurv_RS_short_PLOT %>% filter(NDVI_at_Peak < NDVI_at_EOS)
-```
-
-# Comparison differential GPS vs. other points
-
-```{r}
-# Define function
-distr_plot_GPS <- function(data, y_var, y_label) {
-  ggplot(data = data %>%
-           filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
-           mutate(GPS = 
-                    ifelse(
-                      is.na(`Location method`) |
-                        `Location method` != "Location with differential GPS",
-                      "Other",
-                      "Differential GPS")),
-         aes(x = EUNISa_1_descr, y = !!sym(y_var), fill = EUNISa_1_descr)) +
-    geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
-    geom_point(aes(y = !!sym(y_var), color = EUNISa_1_descr),
-               position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
-    geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
-    stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
-    stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
-                                                   label = length(x)),
-                 geom = "text", aes(label = ..label..), vjust = 0.5) +
-    labs(y = y_label, x = "EUNIS level 1") +
-    scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
-    guides(fill = FALSE, color = FALSE) +
-    theme_bw() + coord_flip() + facet_wrap(~ GPS)
-}
-```
-
-```{r}
-plot_distr_NDVI_GPS <- distr_plot_GPS(db_resurv_RS_short_PLOT,
-                                      "NDVI_max", "NDVI max")
-plot_distr_NDMI_GPS <- distr_plot_GPS(db_resurv_RS_short_PLOT,
-                                      "NDMI_max", "NDMI max")
-plot_distr_NDWI_GPS <- distr_plot_GPS(db_resurv_RS_short_PLOT,
-                                      "NDWI_max", "NDWI max")
-plot_distr_SAVI_GPS <- distr_plot_GPS(db_resurv_RS_short_PLOT,
-                                      "SAVI_max", "SAVI max")
-plot_distr_EVI_GPS <- distr_plot_GPS(db_resurv_RS_short_PLOT %>%
-                                       filter(EVI_max <= 1),
-                                      "EVI_max", "EVI max")
-plot_distr_NDVI_GPS
-plot_distr_NDMI_GPS
-plot_distr_NDWI_GPS
-plot_distr_SAVI_GPS
-plot_distr_EVI_GPS
+db_resurv_RS_short_PLOT %>% filter(NDVI_at_Peak < NDVI_max)
 ```
 
 # Including PLOT (USE LATER?)
@@ -924,83 +852,95 @@ Convert to shp to look at these in GIS:
 #          "C:/GIS/MOTIVATE/shapefiles/resurv_not_val_diff_GPS.shp")
 ```
 
-# Distributions from diff GPS points without rules broken so far
+# Maps
 
-Create tibble with differential GPS points without rules broken so far:
-
-```{r}
-diff_GPS_valid <- db_resurv_RS_short_PLOT_terrestrial %>%
-  filter(`Location method` == "Location with differential GPS" &
-           valid_1 == "No rules broken so far") 
-```
-
-## Max. and min. NDVI, NDMI, NDWI, SAVI and EVI
+## Points GPS
 
 ```{r}
-plot_distr_NDVI_max_diff_GPS_valid <- distr_plot(diff_GPS_valid,
-                                             "NDVI_max", "NDVI max")
-plot_distr_NDMI_max_diff_GPS_valid <- distr_plot(diff_GPS_valid,
-                                             "NDMI_max", "NDMI max")
-plot_distr_NDWI_max_diff_GPS_valid <- distr_plot(diff_GPS_valid,
-                                             "NDWI_max", "NDWI max")
-plot_distr_SAVI_max_diff_GPS_valid <- distr_plot(diff_GPS_valid,
-                                             "SAVI_max", "SAVI max")
-plot_distr_EVI_max_diff_GPS_valid <- distr_plot(diff_GPS_valid %>%
-                                              filter(EVI_max <= 1),
-                                            "EVI_max", "EVI max")
-plot_distr_NDVI_max_diff_GPS_valid
-plot_distr_NDMI_max_diff_GPS_valid
-plot_distr_NDWI_max_diff_GPS_valid
-plot_distr_SAVI_max_diff_GPS_valid
-plot_distr_EVI_max_diff_GPS_valid
+# Calculate the extent of the points
+points_GPS_extent <- db_resurv_RS_short_PLOT %>%
+  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  filter(S2_data == T | Landsat_data == T ) %>%
+  filter(`Location method` == "Location with differential GPS" |
+           `Location method` == "Location with GPS") %>%
+  summarise(lon_min = min(Lon_updated, na.rm = TRUE),
+            lon_max = max(Lon_updated, na.rm = TRUE),
+            lat_min = min(Lat_updated, na.rm = TRUE),
+            lat_max = max(Lat_updated, na.rm = TRUE))
+
+# Add padding to the extent (adjust as needed)
+padding <- 2  # Adjust padding to your preference
+x_limits <- c(points_GPS_extent$lon_min - padding,
+              points_GPS_extent$lon_max + padding)
+y_limits <- c(points_GPS_extent$lat_min - padding,
+              points_GPS_extent$lat_max + padding)
+
+# Create the zoomed map
+ggplot() +
+  geom_sf(data = world, fill = "lightblue", color = "gray") +
+  geom_point(data = db_resurv_RS_short_PLOT %>%
+               filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+               filter(S2_data == T | Landsat_data == T ) %>%
+               filter(`Location method` == "Location with differential GPS" |
+           `Location method` == "Location with GPS"),
+             aes(x = Lon_updated, y = Lat_updated, color = EUNISa_1),
+             size = 1) +
+  coord_sf(xlim = x_limits, ylim = y_limits) +
+  theme_minimal()
 ```
+
+Number of differential GPS points by Country:
 
 ```{r}
-plot_distr_NDVI_min_diff_GPS_valid <- distr_plot(diff_GPS_valid,
-                                             "NDVI_min", "NDVI min")
-plot_distr_NDMI_min_diff_GPS_valid <- distr_plot(diff_GPS_valid,
-                                             "NDMI_min", "NDMI min")
-plot_distr_NDWI_min_diff_GPS_valid <- distr_plot(diff_GPS_valid,
-                                             "NDWI_min", "NDWI min")
-plot_distr_SAVI_min_diff_GPS_valid <- distr_plot(diff_GPS_valid,
-                                             "SAVI_min", "SAVI min")
-plot_distr_EVI_min_diff_GPS_valid <- distr_plot(diff_GPS_valid %>%
-                                                  # Some values wrong!
-                                                  # EVI should not be lower than -1
-                                                  filter(EVI_min >= -1),
-                                                "EVI_min", "EVI min")
-plot_distr_NDVI_min_diff_GPS_valid
-plot_distr_NDMI_min_diff_GPS_valid
-plot_distr_NDWI_min_diff_GPS_valid
-plot_distr_SAVI_min_diff_GPS_valid
-plot_distr_EVI_min_diff_GPS_valid
+db_resurv_RS_short_PLOT %>%
+  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  filter(S2_data == T | Landsat_data == T ) %>%
+  filter(`Location method` == "Location with differential GPS" |
+           `Location method` == "Location with GPS") %>%
+  count(Country)
 ```
 
-## CH
+## Points ReSurvey
 
 ```{r}
-plot_distr_CH_diff_GPS_valid <- distr_plot(diff_GPS_valid, "canopy_height",
-                                           "Canopy height (m)")
-plot_distr_CH_diff_GPS_valid
+# Calculate the extent of the points
+points_resurvey_extent <- db_resurv_RS_short_PLOT %>%
+  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  filter(S2_data == T | Landsat_data == T ) %>%
+  summarise(lon_min = min(Lon_updated, na.rm = TRUE),
+            lon_max = max(Lon_updated, na.rm = TRUE),
+            lat_min = min(Lat_updated, na.rm = TRUE),
+            lat_max = max(Lat_updated, na.rm = TRUE))
+
+# Add padding to the extent (adjust as needed)
+padding <- 2  # Adjust padding to your preference
+x_limits <- c(points_resurvey_extent$lon_min - padding,
+              points_resurvey_extent$lon_max + padding)
+y_limits <- c(points_resurvey_extent$lat_min - padding,
+              points_resurvey_extent$lat_max + padding)
+
+# Create the zoomed map
+ggplot() +
+  geom_sf(data = world, fill = "lightblue", color = "gray") +
+  geom_point(data = db_resurv_RS_short_PLOT %>%
+               filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+               filter(S2_data == T | Landsat_data == T ),
+             aes(x = Lon_updated, y = Lat_updated, color = EUNISa_1),
+             size = 1) +
+  coord_sf(xlim = x_limits, ylim = y_limits) +
+  theme_minimal()
 ```
 
-## Phenology
+Number of ReSurvey points by Country:
 
 ```{r}
-plot_distr_SOS_DOY_diff_GPS_valid <- distr_plot(diff_GPS_valid,
-                                                "SOS_DOY", "SOS DOY")
-plot_distr_Peak_DOY_diff_GPS_valid <- distr_plot(diff_GPS_valid,
-                                                 "Peak_DOY", "Peak DOY")
-plot_distr_EOS_DOY_diff_GPS_valid <- distr_plot(diff_GPS_valid,
-                                                "EOS_DOY", "EOS DOY")
-plot_distr_SOS_DOY_diff_GPS_valid
-plot_distr_Peak_DOY_diff_GPS_valid
-plot_distr_EOS_DOY_diff_GPS_valid
+db_resurv_RS_short_PLOT %>%
+  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  filter(S2_data == T | Landsat_data == T ) %>%
+  count(Country)
 ```
 
-Not very conclusive...
-
-# Distributions from GPS (diff or not) points without rules broken so far
+# Distributions from GPS points without rules broken so far
 
 Create tibble with differential GPS points without rules broken so far:
 
@@ -1011,130 +951,51 @@ all_GPS_valid <- db_resurv_RS_short_PLOT_terrestrial %>%
            valid_1 == "No rules broken so far") 
 ```
 
-## Max. and min. NDVI, NDMI, NDWI, SAVI and EVI
+## NDVI, NDMI, NDWI, SAVI and EVI
 
 ```{r}
-plot_distr_NDVI_max_all_GPS_valid <- distr_plot(all_GPS_valid,
-                                             "NDVI_max", "NDVI max")
-plot_distr_NDMI_max_all_GPS_valid <- distr_plot(all_GPS_valid,
-                                             "NDMI_max", "NDMI max")
-plot_distr_NDWI_max_all_GPS_valid <- distr_plot(all_GPS_valid,
-                                             "NDWI_max", "NDWI max")
-plot_distr_SAVI_max_all_GPS_valid <- distr_plot(all_GPS_valid,
-                                             "SAVI_max", "SAVI max")
-plot_distr_EVI_max_all_GPS_valid <- distr_plot(all_GPS_valid %>%
-                                              filter(EVI_max <= 1),
-                                            "EVI_max", "EVI max")
-plot_distr_NDVI_max_all_GPS_valid
-plot_distr_NDMI_max_all_GPS_valid
-plot_distr_NDWI_max_all_GPS_valid
-plot_distr_SAVI_max_all_GPS_valid
-plot_distr_EVI_max_all_GPS_valid
-```
-
-```{r}
-plot_distr_NDVI_min_all_GPS_valid <- distr_plot(all_GPS_valid,
-                                             "NDVI_min", "NDVI min")
-plot_distr_NDMI_min_all_GPS_valid <- distr_plot(all_GPS_valid,
-                                             "NDMI_min", "NDMI min")
-plot_distr_NDWI_min_all_GPS_valid <- distr_plot(all_GPS_valid,
-                                             "NDWI_min", "NDWI min")
-plot_distr_SAVI_min_all_GPS_valid <- distr_plot(all_GPS_valid,
-                                             "SAVI_min", "SAVI min")
-plot_distr_EVI_min_all_GPS_valid <- distr_plot(all_GPS_valid %>%
-                                                  # Some values wrong!
-                                                  # EVI should not be lower than -1
-                                                  filter(EVI_min >= -1),
-                                                "EVI_min", "EVI min")
-plot_distr_NDVI_min_all_GPS_valid
-plot_distr_NDMI_min_all_GPS_valid
-plot_distr_NDWI_min_all_GPS_valid
-plot_distr_SAVI_min_all_GPS_valid
-plot_distr_EVI_min_all_GPS_valid
+distr_plot(all_GPS_valid,
+           c("NDVI_max", "NDVI_p90", "NDVI_min", "NDVI_p10"), 
+           c("NDVI max", "NDVI p90", "NDVI min", "NDVI p10"))
+distr_plot(all_GPS_valid,
+           c("NDMI_max", "NDMI_p90", "NDMI_min", "NDMI_p10"), 
+           c("NDMI max", "NDMI p90", "NDMI min", "NDMI p10"))
+distr_plot(all_GPS_valid,
+           c("NDWI_max", "NDWI_p90", "NDWI_min", "NDWI_p10"), 
+           c("NDWI max", "NDWI p90", "NDWI min", "NDWI p10"))
+distr_plot(all_GPS_valid,
+           c("SAVI_max", "SAVI_p90", "SAVI_min", "SAVI_p10"), 
+           c("SAVI max", "SAVI p90", "SAVI min", "SAVI p10"))
+distr_plot(all_GPS_valid %>%
+             filter(EVI_max <= 1) %>%
+             filter(EVI_min >= -1 & EVI_min <= 1),
+           c("EVI_max", "EVI_p90", "EVI_min", "EVI_p10"), 
+           c("EVI max", "EVI p90", "EVI min", "EVI p10"))
 ```
 
 ## CH
 
 ```{r}
-plot_distr_CH_all_GPS_valid <- distr_plot(all_GPS_valid, "canopy_height",
-                                           "Canopy height (m)")
-plot_distr_CH_all_GPS_valid
+distr_plot(all_GPS_valid, "canopy_height", "Canopy height (m)")
 ```
 
 ## Phenology
 
 ```{r}
-plot_distr_SOS_DOY_all_GPS_valid <- distr_plot(all_GPS_valid,
-                                                "SOS_DOY", "SOS DOY")
-plot_distr_Peak_DOY_all_GPS_valid <- distr_plot(all_GPS_valid,
-                                                 "Peak_DOY", "Peak DOY")
-plot_distr_EOS_DOY_all_GPS_valid <- distr_plot(all_GPS_valid,
-                                                "EOS_DOY", "EOS DOY")
-plot_distr_SOS_DOY_all_GPS_valid
-plot_distr_Peak_DOY_all_GPS_valid
-plot_distr_EOS_DOY_all_GPS_valid
+distr_plot(all_GPS_valid,
+           c("SOS_DOY","Peak_DOY", "EOS_DOY",
+             "NDVI_at_SOS", "NDVI_at_Peak", "NDVI_at_EOS",
+             "diff_Peak_SOS","diff_Peak_EOS", "Season_Length"),
+           c("SOS DOY", "Peak DOY", "EOS DOY",
+             "NDVI at SOS", "NDVI at Peak", "NDVI at EOS",
+             "Difference Peak-SOS", "Difference Peak-EOS", "Season Length"))
 ```
 
-# Combined plot
+# GPS valid points above p20 of NDVI_max and NDMI_min for each habitat
 
-```{r}
-grid.arrange(
-  plot_distr_NDVI_max_diff_GPS_valid, plot_distr_NDVI_max_all_GPS_valid,
-  plot_distr_NDMI_min_diff_GPS_valid, plot_distr_NDMI_min_all_GPS_valid,
-  ncol = 2)
-```
+# HERE! 
 
-# Diff GPS valid points above p20 of NDVI_max and NDMI_min for each habitat
-
-```{r}
-percentiles_diff_GPS <- diff_GPS_valid %>%
-  group_by(EUNISa_1) %>%
-  summarize(percentile_20_NDVI_max = quantile(NDVI_max, probs = 0.20, na.rm = T),
-            percentile_20_NDMI_min = quantile(NDMI_min, probs = 0.20, na.rm = T))
-
-diff_GPS_valid <- diff_GPS_valid %>%
-  left_join(percentiles_diff_GPS, by = "EUNISa_1") %>%
-  mutate(category_NDVI_max = case_when(
-    NDVI_max < percentile_20_NDVI_max ~ "below_20th",
-    NDVI_max >= percentile_20_NDVI_max ~ "above_20th"),
-  category_NDMI_min = case_when(
-    NDMI_min < percentile_20_NDMI_min ~ "below_20th",
-    NDMI_min >= percentile_20_NDMI_min ~ "above_20th"))
-
-ggplot(data = diff_GPS_valid,
-       aes(x = EUNISa_1_descr, y = NDVI_max)) +
-  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8,
-                   fill = "lightblue") +
-  geom_point(aes(color = category_NDVI_max),
-             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
-  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
-  stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
-  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1, label = length(x)),
-               geom = "text", aes(label = ..label..), vjust = 0.5) +
-  labs(y = "NDVI max", x = "EUNIS level 1") +
-  guides(fill = FALSE, color = FALSE) +
-  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
-  scale_color_manual(values = c("below_20th" = "grey", "above_20th" = "lightblue")) +
-  theme_bw() + coord_flip()
-
-ggplot(data = diff_GPS_valid,
-       aes(x = EUNISa_1_descr, y = NDMI_min)) +
-  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8,
-                   fill = "lightblue") +
-  geom_point(aes(color = category_NDMI_min),
-             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
-  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
-  stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
-  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1, label = length(x)),
-               geom = "text", aes(label = ..label..), vjust = 0.5) +
-  labs(y = "NDMI min", x = "EUNIS level 1") +
-  guides(fill = FALSE, color = FALSE) +
-  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
-  scale_color_manual(values = c("below_20th" = "grey", "above_20th" = "lightblue")) +
-  theme_bw() + coord_flip()
-```
-
-# GPS (diff or not) valid points above p20 of NDVI_max and NDMI_min for each habitat
+Chosen NDVI_min because it was important in RF models, but let's see with new data!
 
 ```{r}
 percentiles_all_GPS <- all_GPS_valid %>%
@@ -1283,14 +1144,13 @@ SurrogateTree --> does not work
 
 ```{r}
 varimp_rf_cforest1 <- party::varimp(rf_cforest1, conditional = F) 
-# conditional = T adjusts for correlations between predictor variables
-# Takes long!
 ```
 
-```{r}
-# party::varimp(rf_cforest1, conditional = T) 
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest1 <- party::varimp(rf_cforest1, conditional = T)
 # conditional = T adjusts for correlations between predictor variables
 # Takes long!
+save(varimp_rf_cond_cforest1, file = "objects/varimp_rf_cond_cforest1.Rdata")
 ```
 
 Variable Importance Plot
@@ -1318,6 +1178,52 @@ single_tree1 <- ctree(EUNISa_1 ~ NDVI_max + NDVI_min + NDMI_max + NDMI_min +
 autoplot(single_tree1)
 ```
 
+ROC curves:
+
+```{r}
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest1, newdata = test_data1, type = "prob")
+
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
+
+# Step 2: Prepare actual class labels
+actual <- factor(test_data1$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc1 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc1
+```
+
+
 ## All GPS points within IQ range
 
 Filter the data to get only GPS-points within IQ range of NDVI_max and NDMI_min.
@@ -1329,7 +1235,9 @@ IQ_ranges <- all_GPS_valid %>%
     Q1_NDVI_max = quantile(NDVI_max, 0.25, na.rm = T),
     Q1_NDMI_min = quantile(NDMI_min, 0.25, na.rm = T),
     Q3_NDVI_max = quantile(NDVI_max, 0.75, na.rm = T),
-    Q3_NDMI_min = quantile(NDMI_min, 0.75, na.rm = T)
+    Q3_NDMI_min = quantile(NDMI_min, 0.75, na.rm = T),
+    IQR_NDVI_max = IQR(NDVI_max, na.rm = TRUE),
+    IQR_NDMI_min = IQR(NDMI_min, na.rm = TRUE)
     )
 
 # Join the IQ ranges back to the original data
@@ -1394,6 +1302,13 @@ confusionMatrix(predictions_rf_cforest2, test_data2$EUNISa_1)
 varimp_rf_cforest2 <- party::varimp(rf_cforest2, conditional = F) 
 ```
 
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest2 <- party::varimp(rf_cforest2, conditional = T)
+# conditional = T adjusts for correlations between predictor variables
+# Takes long!
+save(varimp_rf_cond_cforest2, file = "objects/varimp_rf_cond_cforest2.Rdata")
+```
+
 Variable Importance Plot
 
 ```{r}
@@ -1406,29 +1321,61 @@ ggplot(varimp_rf_cforest2_df,
   labs(title = "Variable Importance", x = "Variables", y = "Importance")
 ```
 
-## All GPS points within mean +/- SD
-
-Filter the data to get only GPS-points within mean +/- SD of NDVI_max and NDMI_min.
+ROC curves:
 
 ```{r}
-mean_sd <- all_GPS_valid %>%
-  group_by(EUNISa_1) %>%
-  summarize(
-    mean_NDVI_max = mean(all_GPS_valid$NDVI_max, na.rm = T),
-    mean_NDMI_min = mean(all_GPS_valid$NDMI_min, na.rm = T),
-    sd_NDVI_max = sd(all_GPS_valid$NDVI_max, na.rm = T),
-    sd_NDMI_min = sd(all_GPS_valid$NDMI_min, na.rm = T)
-    )
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest1, newdata = test_data1, type = "prob")
 
-# Join the IQ ranges back to the original data
-all_GPS_valid <- all_GPS_valid %>%
-  left_join(mean_sd, by = "EUNISa_1")
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
 
-# Filter rows within the specified range for both variables
+# Step 2: Prepare actual class labels
+actual <- factor(test_data1$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc2 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc2
+```
+
+## All GPS points within 1.5 * IQ range
+
+Filter the data to get only GPS-points within 1.5 * IQ range of NDVI_max and NDMI_min.
+
+```{r}
+# Filter rows within the 1.5 * IQR range for both variables
 filtered_data3 <- all_GPS_valid %>%
   filter(
-    (NDVI_max >= (mean_NDVI_max - sd_NDVI_max) & NDVI_max <= (mean_NDVI_max + sd_NDVI_max)) &
-      (NDMI_min >= (mean_NDMI_min - sd_NDMI_min) & NDMI_min <= (mean_NDMI_min + sd_NDMI_min))
+    (NDVI_max >= (Q1_NDVI_max - 1.5 * IQR_NDVI_max) & NDVI_max <= (Q3_NDVI_max + 1.5 * IQR_NDVI_max)) &
+      (NDMI_min >= (Q1_NDMI_min - 1.5 * IQR_NDMI_min) & NDMI_min <= (Q3_NDMI_min + 1.5 * IQR_NDMI_min))
     ) %>%
   filter(!is.na(NDVI_max) & !is.na(NDMI_max) & !is.na(NDWI_max) &
            !is.na(SAVI_max) & !is.na(EVI_max) & !is.na(NDVI_min) &
@@ -1482,6 +1429,13 @@ confusionMatrix(predictions_rf_cforest3, test_data3$EUNISa_1)
 varimp_rf_cforest3 <- party::varimp(rf_cforest3, conditional = F) 
 ```
 
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest3 <- party::varimp(rf_cforest3, conditional = T)
+# conditional = T adjusts for correlations between predictor variables
+# Takes long!
+save(varimp_rf_cond_cforest3, file = "objects/varimp_rf_cond_cforest3.Rdata")
+```
+
 Variable Importance Plot
 
 ```{r}
@@ -1494,16 +1448,74 @@ ggplot(varimp_rf_cforest3_df,
   labs(title = "Variable Importance", x = "Variables", y = "Importance")
 ```
 
-## All GPS points above p20 and below p80
-
-Filter the data to get only GPS-points above p20 and below p80 of NDVI_max and NDMI_min.
+ROC curves:
 
 ```{r}
-# Filter rows above the 20th percentile and below the 80th percentile for both variables
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest1, newdata = test_data1, type = "prob")
+
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
+
+# Step 2: Prepare actual class labels
+actual <- factor(test_data1$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc3 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc3
+```
+
+## All GPS points within mean +/- SD
+
+Filter the data to get only GPS-points within mean +/- SD of NDVI_max and NDMI_min.
+
+```{r}
+mean_sd <- all_GPS_valid %>%
+  group_by(EUNISa_1) %>%
+  summarize(
+    mean_NDVI_max = mean(all_GPS_valid$NDVI_max, na.rm = T),
+    mean_NDMI_min = mean(all_GPS_valid$NDMI_min, na.rm = T),
+    sd_NDVI_max = sd(all_GPS_valid$NDVI_max, na.rm = T),
+    sd_NDMI_min = sd(all_GPS_valid$NDMI_min, na.rm = T)
+    )
+
+# Join the IQ ranges back to the original data
+all_GPS_valid <- all_GPS_valid %>%
+  left_join(mean_sd, by = "EUNISa_1")
+
+# Filter rows within the specified range for both variables
 filtered_data4 <- all_GPS_valid %>%
   filter(
-    (NDVI_max >= percentile_20_NDVI_max & NDVI_max <= percentile_80_NDVI_max) &
-    (NDMI_min >= percentile_20_NDMI_min & NDMI_min <= percentile_80_NDMI_min)
+    (NDVI_max >= (mean_NDVI_max - sd_NDVI_max) & NDVI_max <= (mean_NDVI_max + sd_NDVI_max)) &
+      (NDMI_min >= (mean_NDMI_min - sd_NDMI_min) & NDMI_min <= (mean_NDMI_min + sd_NDMI_min))
     ) %>%
   filter(!is.na(NDVI_max) & !is.na(NDMI_max) & !is.na(NDWI_max) &
            !is.na(SAVI_max) & !is.na(EVI_max) & !is.na(NDVI_min) &
@@ -1553,7 +1565,202 @@ Confusion matrix:
 confusionMatrix(predictions_rf_cforest4, test_data4$EUNISa_1)
 ```
 
-# HERE: Compare RF 1-4
+```{r}
+varimp_rf_cforest4 <- party::varimp(rf_cforest4, conditional = F) 
+```
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest4 <- party::varimp(rf_cforest4, conditional = T)
+# conditional = T adjusts for correlations between predictor variables
+# Takes long!
+save(varimp_rf_cond_cforest4, file = "objects/varimp_rf_cond_cforest4.Rdata")
+```
+
+Variable Importance Plot
+
+```{r}
+varimp_rf_cforest4_df <- data.frame(Variable = names(varimp_rf_cforest4),
+                                    Importance = varimp_rf_cforest4)
+ggplot(varimp_rf_cforest4_df,
+       aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  coord_flip() + theme_minimal() +
+  labs(title = "Variable Importance", x = "Variables", y = "Importance")
+```
+
+ROC curves:
+
+```{r}
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest1, newdata = test_data1, type = "prob")
+
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
+
+# Step 2: Prepare actual class labels
+actual <- factor(test_data1$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc4 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc4
+```
+
+## All GPS points above p20 and below p80
+
+Filter the data to get only GPS-points above p20 and below p80 of NDVI_max and NDMI_min.
+
+```{r}
+# Filter rows above the 20th percentile and below the 80th percentile for both variables
+filtered_data5 <- all_GPS_valid %>%
+  filter(
+    (NDVI_max >= percentile_20_NDVI_max & NDVI_max <= percentile_80_NDVI_max) &
+    (NDMI_min >= percentile_20_NDMI_min & NDMI_min <= percentile_80_NDMI_min)
+    ) %>%
+  filter(!is.na(NDVI_max) & !is.na(NDMI_max) & !is.na(NDWI_max) &
+           !is.na(SAVI_max) & !is.na(EVI_max) & !is.na(NDVI_min) &
+           !is.na(NDMI_min) & !is.na(NDWI_min) & !is.na(SAVI_min) &
+           !is.na(EVI_min)) %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  filter(EVI_max <= 1 & EVI_min >= -1)
+```
+
+Split into training and test data sets.
+
+```{r}
+train_indices5 <- sample(1:nrow(filtered_data5), 0.7 * nrow(filtered_data5))
+train_data5 <- filtered_data5[train_indices5, ]
+test_data5 <- filtered_data5[-train_indices5, ]
+```
+
+Number of points per category for filtered data:
+
+```{r}
+filtered_data5 %>% count(EUNISa_1)
+```
+
+```{r}
+rf_cforest5 <- party::cforest(EUNISa_1 ~ NDVI_max + NDVI_min + NDMI_max +
+                                NDMI_min + NDWI_max + NDWI_min + EVI_max +
+                                EVI_min + SAVI_max + SAVI_min + canopy_height, 
+                              data = train_data5,
+                              controls = cforest_control(
+                                mtry = 3,
+                                # mtry = sqrt(11)
+                                # Default mtry = 5
+                                # Bagging: mtry = NULL
+                                # or = number of input variables
+                                ntree = 500) # Default, try increasing
+                              ) 
+```
+
+```{r}
+predictions_rf_cforest5 <- predict(rf_cforest5, newdata = test_data5,
+                                   OOB = TRUE, type = "response")
+```
+
+Confusion matrix:
+
+```{r}
+confusionMatrix(predictions_rf_cforest5, test_data5$EUNISa_1)
+```
+
+```{r}
+varimp_rf_cforest5 <- party::varimp(rf_cforest5, conditional = F) 
+```
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest5 <- party::varimp(rf_cforest5, conditional = T)
+# conditional = T adjusts for correlations between predictor variables
+# Takes long!
+save(varimp_rf_cond_cforest5, file = "objects/varimp_rf_cond_cforest4.Rdata")
+```
+
+Variable Importance Plot
+
+```{r}
+varimp_rf_cforest5_df <- data.frame(Variable = names(varimp_rf_cforest5),
+                                    Importance = varimp_rf_cforest5)
+ggplot(varimp_rf_cforest5_df,
+       aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  coord_flip() + theme_minimal() +
+  labs(title = "Variable Importance", x = "Variables", y = "Importance")
+```
+
+ROC curves:
+
+```{r}
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest1, newdata = test_data1, type = "prob")
+
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
+
+# Step 2: Prepare actual class labels
+actual <- factor(test_data1$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc5 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc5
+```
+
+# HERE: Compare RF 1-5
 
 # Cordillera data
 
@@ -1627,221 +1834,15 @@ cordillera <- bind_rows(
     )
 ```
 
-## Max. and min. NDVI, NDMI
+## NDVI, NDMI
 
 ```{r}
-plot_distr_NDVI_max_cordi <- distr_plot(cordillera,
-                                             "NDVI_max", "NDVI max")
-plot_distr_NDVI_min_cordi <- distr_plot(cordillera,
-                                             "NDVI_min", "NDVI min")
-plot_distr_NDMI_max_cordi <- distr_plot(cordillera,
-                                             "NDMI_max", "NDMI max")
-plot_distr_NDMI_min_cordi <- distr_plot(cordillera,
-                                             "NDMI_min", "NDMI min")
-plot_distr_NDVI_max_cordi
-plot_distr_NDVI_min_cordi
-plot_distr_NDMI_max_cordi
-plot_distr_NDMI_min_cordi
-```
-
-# OLD from here
-
-### Plots NDVI and NDMI
-
-```{r}
-ggplot(data = cordi %>% filter(!is.na(NDVI_max)) %>%
-         # Keep only forests, grasslands, shrublands and wetlands
-         filter(EUNIS_1 %in% c("T", "R", "S", "Q")),
-       aes(x = EUNIS_1, y = NDVI_max, fill = EUNIS_1)) +
-  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
-  geom_point(aes(y = NDVI_max, color = EUNIS_1),
-             position = position_jitter(width = 0.15), size = 3,
-             alpha = 0.5) +
-  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
-  stat_summary(fun.y=mean, geom="point", shape = 20, size = 3) +
-  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
-                                                 label = length(x)),
-               geom = "text", aes(label = ..label..), vjust = 0.5) +
-  guides(fill = FALSE, color = FALSE) + theme_bw() + coord_flip()
-ggsave(here("output", "figures", "cordi_NDVI_max.tiff"),
-       width = 21, height = 29.7, units = "cm", dpi = 300)
-ggplot(data = cordi %>% filter(!is.na(NDMI_max)) %>%
-         # Keep only forests, grasslands, shrublands and wetlands
-         filter(EUNIS_1 %in% c("T", "R", "S", "Q")),
-       aes(x = EUNIS_1, y = NDMI_max, fill = EUNIS_1)) +
-  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
-  geom_point(aes(y = NDMI_max, color = EUNIS_1),
-             position = position_jitter(width = 0.15), size = 3,
-             alpha = 0.5) +
-  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
-  stat_summary(fun.y=mean, geom="point", shape = 20, size = 3) +
-  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
-                                                 label = length(x)),
-               geom = "text", aes(label = ..label..), vjust = 0.5) +
-  guides(fill = FALSE, color = FALSE) + theme_bw() + coord_flip()
-ggsave(here("output", "figures", "cordi_NDMI_max.tiff"),
-       width = 21, height = 29.7, units = "cm", dpi = 300)
-```
-
-### Maps
-
-```{r}
-# Load world boundaries
-world <- ne_countries(scale = "medium", returnclass = "sf")
-```
-
-```{r}
-# Calculate the extent of the points
-points_cordi_extent <- cordi %>% filter(EUNIS_1 %in% c("T", "R", "S", "Q")) %>%
-  summarise(lon_min = min(longitude, na.rm = TRUE),
-            lon_max = max(longitude, na.rm = TRUE),
-            lat_min = min(latitude, na.rm = TRUE),
-            lat_max = max(latitude, na.rm = TRUE))
-
-# Add padding to the extent (adjust as needed)
-padding <- 3  # Adjust padding to your preference
-x_limits <- c(points_cordi_extent$lon_min - padding,
-              points_cordi_extent$lon_max + padding)
-y_limits <- c(points_cordi_extent$lat_min - padding,
-              points_cordi_extent$lat_max + padding)
-
-# Create the zoomed map
-ggplot() +
-  geom_sf(data = world, fill = "lightblue", color = "gray") +
-  geom_point(data = cordi %>% filter(EUNIS_1 %in% c("T", "R", "S", "Q")),
-             aes(x = longitude, y = latitude, color = EUNIS_1),
-             size = 1) +
-  coord_sf(xlim = x_limits, ylim = y_limits) +
-  theme_minimal()
-```
-
-## Points differential GPS
-
-### Maps
-
-```{r}
-# Calculate the extent of the points
-points_GPS_extent <- db_resurv_RS_short_PLOT %>%
-  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
-  filter(S2_data == T | Landsat_data == T ) %>%
-  filter(`Location method` == "Location with differential GPS") %>%
-  summarise(lon_min = min(Lon_updated, na.rm = TRUE),
-            lon_max = max(Lon_updated, na.rm = TRUE),
-            lat_min = min(Lat_updated, na.rm = TRUE),
-            lat_max = max(Lat_updated, na.rm = TRUE))
-
-# Add padding to the extent (adjust as needed)
-padding <- 2  # Adjust padding to your preference
-x_limits <- c(points_GPS_extent$lon_min - padding,
-              points_GPS_extent$lon_max + padding)
-y_limits <- c(points_GPS_extent$lat_min - padding,
-              points_GPS_extent$lat_max + padding)
-
-# Create the zoomed map
-ggplot() +
-  geom_sf(data = world, fill = "lightblue", color = "gray") +
-  geom_point(data = db_resurv_RS_short_PLOT %>%
-               filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
-               filter(S2_data == T | Landsat_data == T ) %>%
-               filter(`Location method` == "Location with differential GPS"),
-             aes(x = Lon_updated, y = Lat_updated, color = EUNISa_1),
-             size = 1) +
-  coord_sf(xlim = x_limits, ylim = y_limits) +
-  theme_minimal()
-```
-
-Number of differential GPS points by Country:
-
-```{r}
-db_resurv_RS_short_PLOT %>%
-  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
-  filter(S2_data == T | Landsat_data == T ) %>%
-  filter(`Location method` == "Location with differential GPS") %>%
-  count(Country)
-```
-
-## Points ReSurvey
-
-### Maps
-
-```{r}
-# Calculate the extent of the points
-points_resurvey_extent <- db_resurv_RS_short_PLOT %>%
-  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
-  filter(S2_data == T | Landsat_data == T ) %>%
-  summarise(lon_min = min(Lon_updated, na.rm = TRUE),
-            lon_max = max(Lon_updated, na.rm = TRUE),
-            lat_min = min(Lat_updated, na.rm = TRUE),
-            lat_max = max(Lat_updated, na.rm = TRUE))
-
-# Add padding to the extent (adjust as needed)
-padding <- 2  # Adjust padding to your preference
-x_limits <- c(points_resurvey_extent$lon_min - padding,
-              points_resurvey_extent$lon_max + padding)
-y_limits <- c(points_resurvey_extent$lat_min - padding,
-              points_resurvey_extent$lat_max + padding)
-
-# Create the zoomed map
-ggplot() +
-  geom_sf(data = world, fill = "lightblue", color = "gray") +
-  geom_point(data = db_resurv_RS_short_PLOT %>%
-               filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
-               filter(S2_data == T | Landsat_data == T ),
-             aes(x = Lon_updated, y = Lat_updated, color = EUNISa_1),
-             size = 1) +
-  coord_sf(xlim = x_limits, ylim = y_limits) +
-  theme_minimal()
-```
-
-Number of ReSurvey points by Country:
-
-```{r}
-db_resurv_RS_short_PLOT %>%
-  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
-  filter(S2_data == T | Landsat_data == T ) %>%
-  count(Country)
-```
-
-## Join
-
-```{r}
-points_halle <- bind_rows(
-  cordi %>% filter(EUNIS_1 %in% c("T", "R", "S", "Q")) %>%
-    select(longitude, latitude, NDVI_max, NDMI_max, EUNIS_1) %>%
-    rename(EUNIS = EUNIS_1) %>%
-    mutate(point_type = "Cordillera"),
-  db_resurv_RS_short_PLOT %>%
-    filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
-    filter(S2_data == T | Landsat_data == T ) %>%
-    filter(`Location method` == "Location with differential GPS") %>%
-    select(Lon_updated, Lat_updated, NDVI_max, NDMI_max, EUNISa_1) %>%
-    rename(longitude = Lon_updated, latitude = Lat_updated,
-           EUNIS = EUNISa_1) %>%
-    mutate(point_type = "ReSurvey differential GPS"),
-  db_resurv_RS_short_PLOT %>%
-    filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
-    filter(S2_data == T | Landsat_data == T ) %>%
-    select(Lon_updated, Lat_updated, NDVI_max, NDMI_max, EUNISa_1) %>%
-    rename(longitude = Lon_updated, latitude = Lat_updated,
-           EUNIS = EUNISa_1) %>%
-    mutate(point_type = "ReSurvey")
-)
-```
-
-```{r}
-ggplot(data = points_halle,
-       aes(x = point_type, y = NDVI_max, fill = point_type)) +
-  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
-  geom_point(aes(y = NDVI_max, color = point_type),
-             position = position_jitter(width = 0.15), size = 3,
-             alpha = 0.5) +
-  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
-  stat_summary(fun.y=mean, geom="point", shape = 20, size = 3) +
-  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
-                                                 label = length(x)),
-               geom = "text", aes(label = ..label..), vjust = 0.5) +
-  guides(fill = FALSE, color = FALSE) + theme_bw() + coord_flip() +
-  facet_wrap(~ EUNIS)
+distr_plot(cordillera,
+           c("NDVI_max", "NDVI_p90", "NDVI_min", "NDVI_p10"), 
+           c("NDVI max", "NDVI p90", "NDVI min", "NDVI p10"))
+distr_plot(cordillera,
+           c("NDMI_max", "NDMI_p90", "NDMI_min", "NDMI_p10"), 
+           c("NDMI max", "NDMI p90", "NDMI min", "NDMI p10"))
 ```
 
 # Session info
