@@ -57,7 +57,7 @@ source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/f
 
 ```{r}
 db_resurv_RS<-read_tsv(
-  here("data", "clean", "db_resurv_RS_20250505.csv"),
+  here("data", "clean", "db_resurv_RS_20250610.csv"),
   col_types = cols(
     # Dynamically specify EUNIS columns as character
     .default = col_guess(),  # Default guessing for other columns
@@ -173,7 +173,7 @@ db_resurv_RS_short <- db_resurv_RS_short %>%
 db_resurv_RS_short %>% count(year_diff)
 ```
 
-2 with different year. RS indices would need to be calculated again for those.
+None with different year so far.
 
 ## Flag when coordinates are different between RS data and ReSurvey db
 
@@ -196,7 +196,7 @@ db_resurv_RS_short %>% count(Lon_diff)
 db_resurv_RS_short %>% count(Lat_diff)
 ```
 
-Very few with large differences (2 for longitude, 6 for latitude). RS indices would need to be calculated again for those.
+Very few with large differences (3 for longitude, 5 for latitude). RS indices would need to be calculated again for those.
 
 If year_diff is TRUE or Lon_diff is LARGE or Lat_diff is LARGE --> RS indices need to be recalculated. So far, remove those rows from db_resurv_RS_short.
 
@@ -219,7 +219,7 @@ db_resurv_RS_short_PLOT <- db_resurv_RS_short %>%
   mutate(RS_site = `ReSurvey site`, RS_plot = `ReSurvey plot`) %>%
   # Convert to data.table for faster processing
   lazy_dt() %>%
-  # Group by the 3 vars that uniquely identify each pl ot
+  # Group by the 3 vars that uniquely identify each plot
   group_by(RS_CODE, RS_site, RS_plot) %>%
   # Create a new variable PLOT for each group
   mutate(PLOT = .GRP) %>%
@@ -329,7 +329,7 @@ Save clean file for analyses (to be updated continuously due to updates in ReSur
 
 ```{r}
 write_tsv(db_resurv_RS_short_PLOT,
-          here("data", "clean","db_resurv_RS_short_PLOT_20250505.csv"))
+          here("data", "clean","db_resurv_RS_short_PLOT_20250523.csv"))
 ```
 
 # Distributions all bioregions
@@ -373,8 +373,6 @@ distr_plot <- function(data, y_vars, y_labels) {
   }
 }
 ```
-
-## HERE: Metrics calculated only for July, not for all year!
 
 ## NDVI, NDMI, NDWI, SAVI and EVI
 
@@ -446,7 +444,7 @@ distr_plot(db_resurv_RS_short_PLOT %>%
            c("EVI max", "EVI p90", "EVI min", "EVI p10"))
 ```
 
-Some weird values of NDVI_min, NDVI_p10, NDMI_min, NDMI_p10, NDWI_max, NDWI_p90, NDWI_min, NDWI_p10 --> Check with new values for all year.
+Some weird values --> Check.
 
 ## CH
 
@@ -621,8 +619,6 @@ distr_plot_biogeo(db_resurv_RS_short_PLOT %>% filter(!is.na(biogeo)) %>%
            c("EVI max", "EVI p90", "EVI min", "EVI p10"))
 ```
 
-BOR missing in EVI plots because EVI >= 1.
-
 ## CH
 
 ```{r}
@@ -796,7 +792,7 @@ nrow(db_resurv_RS_short_PLOT_terrestrial %>% filter(valid_1_count > 0))/
   nrow(db_resurv_RS_short_PLOT_terrestrial)
 ```
 
-But be aware that there are still many missing RS data, e.g. Landsat data for bioregion CON (many points).
+But be aware that there are still MANY missing RS data.
 
 ```{r}
 ggplot(db_resurv_RS_short_PLOT_terrestrial %>%
@@ -857,6 +853,9 @@ Convert to shp to look at these in GIS:
 ## Points GPS
 
 ```{r}
+# Load world boundaries
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
 # Calculate the extent of the points
 points_GPS_extent <- db_resurv_RS_short_PLOT %>%
   filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
@@ -889,7 +888,7 @@ ggplot() +
   theme_minimal()
 ```
 
-Number of differential GPS points by Country:
+Number of GPS points by Country:
 
 ```{r}
 db_resurv_RS_short_PLOT %>%
@@ -1052,7 +1051,127 @@ Using the conditional inference version of random forest (cforest in package par
 Hothorn, T., Hornik, K. and Zeileis, A. (2006) Unbiased Recursive Portioning: A Conditional Inference Framework. Journal of Computational and Graphical Statistics, 15, 651-
 674. http://dx.doi.org/10.1198/106186006X133933
 
-## All GPS points above p20
+## All GPS points
+
+```{r}
+filtered_data0 <- all_GPS_valid %>%
+  filter(!is.na(NDVI_max) & !is.na(NDMI_max) & !is.na(NDWI_max) &
+           !is.na(SAVI_max) & !is.na(EVI_max) & !is.na(NDVI_min) &
+           !is.na(NDMI_min) & !is.na(NDWI_min) & !is.na(SAVI_min) &
+           !is.na(EVI_min)) %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  filter(EVI_max <= 1 & EVI_min >= -1)
+```
+
+Split into training and test data sets.
+
+```{r}
+train_indices0 <- sample(1:nrow(filtered_data0), 0.7 * nrow(filtered_data0))
+train_data0 <- filtered_data0[train_indices0, ]
+test_data0 <- filtered_data0[-train_indices0, ]
+```
+
+Number of points per category for filtered data:
+
+```{r}
+filtered_data0 %>% count(EUNISa_1)
+```
+
+```{r}
+rf_cforest0 <- party::cforest(EUNISa_1 ~ NDVI_max + NDVI_min + NDMI_max +
+                                NDMI_min + NDWI_max + NDWI_min + EVI_max +
+                                EVI_min + SAVI_max + SAVI_min + canopy_height, 
+                              data = train_data0,
+                              controls = cforest_control(
+                                mtry = 3,
+                                # mtry = sqrt(11)
+                                # Default mtry = 5
+                                # Bagging: mtry = NULL
+                                # or = number of input variables
+                                ntree = 500) # Default, try increasing
+                              ) 
+```
+
+```{r}
+predictions_rf_cforest0 <- predict(rf_cforest0, newdata = test_data0,
+                                   OOB = TRUE, type = "response")
+```
+
+Confusion matrix:
+
+```{r}
+confusionMatrix(predictions_rf_cforest0, test_data0$EUNISa_1)
+```
+
+```{r}
+varimp_rf_cforest0 <- party::varimp(rf_cforest0, conditional = F) 
+```
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest0 <- party::varimp(rf_cforest0, conditional = T)
+# conditional = T adjusts for correlations between predictor variables
+# Takes long!
+save(varimp_rf_cond_cforest0, file = "objects/varimp_rf_cond_cforest0.Rdata")
+```
+
+Variable Importance Plot
+
+```{r}
+varimp_rf_cforest0_df <- data.frame(Variable = names(varimp_rf_cforest0),
+                                    Importance = varimp_rf_cforest0)
+ggplot(varimp_rf_cforest0_df,
+       aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  coord_flip() + theme_minimal() +
+  labs(title = "Variable Importance", x = "Variables", y = "Importance")
+```
+
+ROC curves:
+
+```{r}
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest0, newdata = test_data0, type = "prob")
+
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
+
+# Step 2: Prepare actual class labels
+actual <- factor(test_data0$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc0 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc0
+```
+
+## REVISE FROM HERE: All GPS points above p20
 
 Filter the data to get only GPS-points above p20 of NDVI_max and NDMI_min.
 
@@ -1700,7 +1819,7 @@ varimp_rf_cforest5 <- party::varimp(rf_cforest5, conditional = F)
 varimp_rf_cond_cforest5 <- party::varimp(rf_cforest5, conditional = T)
 # conditional = T adjusts for correlations between predictor variables
 # Takes long!
-save(varimp_rf_cond_cforest5, file = "objects/varimp_rf_cond_cforest4.Rdata")
+save(varimp_rf_cond_cforest5, file = "objects/varimp_rf_cond_cforest5.Rdata")
 ```
 
 Variable Importance Plot
