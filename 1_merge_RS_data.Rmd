@@ -140,7 +140,11 @@ data_RS_S2_phen <- data_RS_S2_phen %>%
          contains("SAVI"), contains("NDMI"),contains("NDWI")) %>%
   rename_with(~ sub("^[0-9]+_", "", .), .cols = matches("^[0-9]+_")) %>%
   # Add column source
-  mutate(source = "S2")
+  mutate(source = "S2") %>%
+  # Remove these cols that I'm not sure what they are about
+  select(-NDVI_diff_max, - NDVI_diff_min, -NDMI_diff_max, - NDMI_diff_min,
+         -NDWI_diff_max, - NDWI_diff_min, -SAVI_diff_max, - SAVI_diff_min,
+         -EVI_diff_max, - EVI_diff_min)
 ```
 
 ## Landsat
@@ -617,7 +621,7 @@ db_resurv_RS %>% count(CH_data)
 Save clean file for analyses (to be updated continuously due to updates in ReSurvey database and updates on RS data).
 
 ```{r}
-write_tsv(db_resurv_RS,here("data", "clean","db_resurv_RS_20250611.csv"))
+write_tsv(db_resurv_RS,here("data", "clean","db_resurv_RS_20250617.csv"))
 ```
 
 # Session info
