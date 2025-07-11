@@ -4,5 +4,6 @@
 .Ruserdata
 data/
 output/
+objects/
 .pdf
 4_validation_RS_CH_phen.pdf
