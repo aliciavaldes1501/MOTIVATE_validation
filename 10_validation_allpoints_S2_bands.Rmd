@@ -1,0 +1,1969 @@
+---
+title: "Script to validate points in ReSurvey database using RS data"
+subtitle: "Validation done with ALL points (all observations)"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This R script is used to validate the points in the ReSurvey database using RS indicators (indices + phenology + canopy height).
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(gridExtra)
+library(readxl)
+library(scales)
+library(sf)
+library(rnaturalearth)
+library(dtplyr)
+library(lme4)
+library(lmerTest)
+library(car)
+library(ggeffects)
+library(party)
+library(partykit)
+library(strucchange)
+library(ggparty)
+library(caret)
+library(moreparty)
+library(randomForest)
+library(pROC)
+library(corrplot)
+```
+
+# Define printall function
+
+```{r}
+printall <- function(tibble) {
+  print(tibble, width = Inf)
+  }
+```
+
+# Load geom_flat_violin plot
+
+```{r}
+source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/fb53bd97121f7f9ce947837ef1a4c65a73bffb3f/geom_flat_violin.R")
+```
+
+# HERE: START MODIF: Read data
+
+```{r}
+data_validation<-read_tsv(here("data", "clean","final_RS_data_bands_S2_all.csv"))
+```
+
+No parsing issues!
+
+# Some data managenemt
+
+## TO-DO: Missing data checks
+
+Do when all RS data is ready!
+
+# Distributions all bioregions
+
+## Indices
+
+```{r}
+# Define a function to create histograms
+plot_histogram <- function(data, x_var, x_label) {
+  ggplot(data %>%
+           dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
+         aes(x = !!sym(x_var))) +
+    geom_histogram(color = "black", fill = "white") +
+    labs(x = x_label, y = "Frequency") +
+    theme_bw()
+}
+```
+
+```{r}
+# Define a function to create plots with violin + boxplot + points
+distr_plot <- function(data, y_vars, y_labels) {
+  for (i in seq_along(y_vars)) {
+    y_var <- y_vars[[i]]
+    y_label <- y_labels[[i]]
+    
+    p <- ggplot(data = data %>%
+                  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
+                aes(x = EUNISa_1_descr, y = !!sym(y_var), fill = EUNISa_1_descr)) +
+      geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+      geom_point(aes(y = !!sym(y_var), color = EUNISa_1_descr),
+                 position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+      geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+      stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
+      stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                     label = length(x)),
+                   geom = "text", aes(label = ..label..), vjust = 0.5) +
+      labs(y = y_label, x = "EUNIS level 1") +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+      guides(fill = FALSE, color = FALSE) +
+      theme_bw() + coord_flip()
+    
+    print(p)
+  }
+}
+```
+
+Ranges of min and max:
+
+```{r}
+range(data_validation$NDVI_max, na.rm = T) # NDVI_max > 1 (slightly)
+range(data_validation$NDMI_max, na.rm = T) # NDMI_max > 1 (slightly)
+range(data_validation$NDWI_max, na.rm = T)
+range(data_validation$SAVI_max, na.rm = T)
+range(data_validation$EVI_max, na.rm = T) # EVI_max > 1 (slightly)
+range(data_validation$NDVI_min, na.rm = T)
+range(data_validation$NDMI_min, na.rm = T)
+range(data_validation$NDWI_min, na.rm = T) # NDWI_min < -1 (slightly)
+range(data_validation$SAVI_min, na.rm = T)
+range(data_validation$EVI_min, na.rm = T) # EVI_min < -1!
+```
+
+```{r}
+nrow(data_validation %>% dplyr::filter(NDVI_max > 1))
+nrow(data_validation %>% dplyr::filter(NDMI_max > 1))
+nrow(data_validation %>% dplyr::filter(EVI_max > 1))
+nrow(data_validation %>% dplyr::filter(NDWI_min < -1))
+nrow(data_validation %>% dplyr::filter(EVI_min < -1))
+```
+
+Histograms to check that max and min values are ok:
+
+```{r}
+plot_histogram(data_validation, "NDVI_max", "NDVI max")
+plot_histogram(data_validation, "NDMI_max", "NDMI max")
+plot_histogram(data_validation, "NDWI_max", "NDWI max")
+plot_histogram(data_validation, "SAVI_max", "SAVI max")
+plot_histogram(data_validation, "EVI_max", "EVI max")
+plot_histogram(data_validation, "NDVI_min", "NDVI min")
+plot_histogram(data_validation, "NDMI_min", "NDMI min")
+plot_histogram(data_validation, "NDWI_min", "NDWI min")
+plot_histogram(data_validation, "SAVI_min", "SAVI min")
+plot_histogram(data_validation %>%
+                 dplyr::filter(EVI_min > -1.5), "EVI_min", "EVI min")
+```
+
+```{r}
+nrow(data_validation %>%
+       dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+       dplyr::filter(EVI_max > 1 | EVI_max < -1))
+data_validation %>%
+       dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q"))%>%
+  dplyr::filter(EVI_max > 1 | EVI_max < -1) %>%
+  count(biogeo, unit)
+```
+
+Most EVI values are ok!
+
+Distribution plots:
+
+```{r message=FALSE, warning=FALSE}
+distr_plot(data_validation %>% dplyr::filter(EVI_min > -0.5),
+           c("NDVI_max", "EVI_max", "SAVI_max", "NDMI_max", "NDWI_max",
+             "NDVI_min", "EVI_min", "SAVI_min", "NDMI_min", "NDWI_min"),
+           c("NDVI_max", "EVI_max", "SAVI_max", "NDMI_max", "NDWI_max",
+             "NDVI_min", "EVI_min", "SAVI_min", "NDMI_min", "NDWI_min"))
+```
+
+## CH
+
+```{r}
+distr_plot(data_validation, "canopy_height", "Canopy height (m)")
+```
+ 
+### Show habitats with CH categories
+
+```{r}
+ggplot(data_validation %>%
+         # Keep only forests, grasslands, shrublands and wetlands
+         dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+         mutate(CH_cat =
+                  factor(
+                    case_when(canopy_height == 0 ~ "0 m",
+                              canopy_height > 0 & canopy_height <= 1 ~ "0-1 m",
+                              canopy_height > 1 & canopy_height <=2 ~ "1-2 m",
+                              canopy_height > 2 & canopy_height <=5 ~ "2-5 m",
+                              canopy_height > 5 & canopy_height <=8 ~ "5-8 m",
+                              canopy_height > 8 ~ "> 8 m",
+                              is.na(canopy_height) ~ NA_character_),
+                    levels = c(
+                      "0 m", "0-1 m", "1-2 m", "2-5 m", "5-8 m", "> 8 m"))),
+       aes(x = EUNISa_1_descr, fill = CH_cat)) +
+  geom_bar() + theme_bw() + coord_flip() +
+  scale_y_continuous(labels = label_number()) +
+  scale_fill_viridis_d(direction = -1) +
+  labs(x = "EUNIS level 1", fill = "Canopy height") +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  theme(legend.position = c(0.8, 0.75),
+        legend.direction = "vertical")
+```
+
+### Stats per habitat type
+
+```{r}
+data_validation %>%
+  # Keep only forests, grasslands, shrublands and wetlands
+  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  group_by(EUNISa_1_descr) %>%
+  summarise(across(canopy_height, list(
+    mean = mean,
+    median = median,
+    sd = sd,
+    min = min,
+    max = max
+    ), na.rm = TRUE))
+```
+
+## Phenology
+
+Only using NDVI- and SAVI-based values so far.
+
+Maximum NDVI should be equal to value at peak?
+
+```{r}
+nrow(data_validation %>% dplyr::filter(NDVI_pos_value  != NDVI_max))
+```
+
+Not sure why this happens, but in most cases the difference is small (< -0.1). Anyway, we should use only one of these two in the RF models.
+
+```{r}
+plot_histogram(data_validation, "NDVI_sos_doy", "NDVI_sos_doy")
+plot_histogram(data_validation, "NDVI_pos_doy", "NDVI_pos_doy")
+plot_histogram(data_validation, "NDVI_eos_doy", "NDVI_eos_doy")
+plot_histogram(data_validation, "EVI_sos_doy", "EVI_sos_doy")
+plot_histogram(data_validation, "EVI_pos_doy", "EVI_pos_doy")
+plot_histogram(data_validation, "EVI_eos_doy", "EVI_eos_doy")
+plot_histogram(data_validation, "SAVI_sos_doy", "SAVI_sos_doy")
+plot_histogram(data_validation, "SAVI_pos_doy", "SAVI_pos_doy")
+plot_histogram(data_validation, "SAVI_eos_doy", "SAVI_eos_doy")
+```
+
+```{r}
+plot_histogram(data_validation, "NDVI_sos_value", "NDVI_sos_value")
+plot_histogram(data_validation, "NDVI_pos_value", "NDVI_pos_value")
+plot_histogram(data_validation, "NDVI_eos_value", "NDVI_eos_value")
+plot_histogram(data_validation, "EVI_sos_value", "EVI_sos_value")
+plot_histogram(data_validation, "EVI_pos_value", "EVI_pos_value")
+plot_histogram(data_validation, "EVI_eos_value", "EVI_eos_value")
+```
+
+```{r}
+plot_histogram(data_validation, "NDVI_gsd", "NDVI_gsd")
+plot_histogram(data_validation, "EVI_gsd", "EVI_gsd")
+plot_histogram(data_validation, "SAVI_gsd", "SAVI_gsd")
+plot_histogram(data_validation, "NDVI_diff_pos_sos_value",
+               "NDVI_diff_pos_sos_value")
+plot_histogram(data_validation, "EVI_diff_pos_sos_value",
+               "EVI_diff_pos_sos_value")
+plot_histogram(data_validation, "SAVI_diff_pos_sos_value",
+               "SAVI_diff_pos_sos_value")
+plot_histogram(data_validation, "NDVI_diff_pos_eos_value",
+               "NDVI_diff_pos_eos_value")
+plot_histogram(data_validation, "EVI_diff_pos_eos_value",
+               "EVI_diff_pos_eos_value")
+plot_histogram(data_validation, "SAVI_diff_pos_eos_value",
+               "SAVI_diff_pos_eos_value")
+plot_histogram(data_validation, "NDVI_diff_pos_sos_doy",
+               "NDVI_diff_pos_sos_doy")
+plot_histogram(data_validation, "EVI_diff_pos_sos_doy",
+               "EVI_diff_pos_sos_doy")
+plot_histogram(data_validation, "SAVI_diff_pos_sos_doy",
+               "SAVI_diff_pos_sos_doy")
+plot_histogram(data_validation, "NDVI_diff_eos_pos_doy",
+               "NDVI_diff_eos_pos_doy")
+plot_histogram(data_validation, "EVI_diff_eos_pos_doy", 
+               "EVI_diff_eos_pos_doy")
+plot_histogram(data_validation, "SAVI_diff_eos_pos_doy", 
+               "SAVI_diff_eos_pos_doy")
+```
+
+```{r}
+plot_histogram(data_validation, "NDVI_auc", "NDVI_auc")
+plot_histogram(data_validation, "EVI_auc", "EVI_auc")
+plot_histogram(data_validation, "SAVI_auc", "SAVI_auc")
+```
+
+```{r}
+distr_plot(data_validation,
+           c("NDVI_sos_value","NDVI_pos_value", "NDVI_eos_value",
+             "EVI_sos_value","EVI_pos_value", "EVI_eos_value",
+             "SAVI_sos_value", "SAVI_pos_value", "SAVI_eos_value",
+             "NDVI_sos_doy","NDVI_pos_doy", "NDVI_eos_doy",
+             "EVI_sos_doy","EVI_pos_doy", "EVI_eos_doy",
+             "SAVI_sos_doy", "SAVI_pos_doy", "SAVI_eos_doy"),
+           c("NDVI_sos_value","NDVI_pos_value", "NDVI_eos_value",
+             "EVI_sos_value","EVI_pos_value", "EVI_eos_value",
+             "SAVI_sos_Value", "SAVI_pos_value", "SAVI_eos_value",
+             "NDVI_sos_doy","NDVI_pos_doy", "NDVI_eos_doy",
+             "EVI_sos_doy","EVI_pos_doy", "EVI_eos_doy",
+             "SAVI_sos_doy", "SAVI_pos_doy", "SAVI_eos_doy")
+           )
+```
+
+```{r}
+distr_plot(data_validation,
+           c("NDVI_gsd","EVI_gsd", "SAVI_gsd",
+             "NDVI_diff_pos_sos_value", "EVI_diff_pos_sos_value",
+             "SAVI_diff_pos_sos_value",
+             "NDVI_diff_pos_eos_value", "EVI_diff_pos_eos_value",
+             "SAVI_diff_pos_eos_value",
+             "NDVI_diff_pos_sos_doy", "EVI_diff_pos_sos_doy",
+             "SAVI_diff_pos_sos_doy",
+             "NDVI_diff_eos_pos_doy", "EVI_diff_eos_pos_doy",
+             "SAVI_diff_eos_pos_doy"),
+           c("NDVI_gsd","EVI_gsd", "SAVI_gsd",
+             "NDVI_diff_pos_sos_value", "EVI_diff_pos_sos_value",
+             "SAVI_diff_pos_sos_Value",
+             "NDVI_diff_pos_eos_value", "EVI_diff_pos_eos_value",
+             "SAVI_diff_pos_eos_value",
+             "NDVI_diff_pos_sos_doy", "EVI_diff_pos_sos_doy",
+             "SAVI_diff_pos_sos_doy",
+             "NDVI_diff_eos_pos_doy", "EVI_diff_eos_pos_doy",
+             "SAVI_diff_eos_pos_doy")
+           )
+```
+
+```{r}
+distr_plot(data_validation,
+           c("NDVI_auc", "EVI_auc", "SAVI_auc"),
+             c("NDVI_auc", "EVI_auc", "SAVI_auc"))
+```
+
+# TBD: Distributions per bioregion
+
+```{r}
+# Define a function to create plots with violin + boxplot + points
+distr_plot_biogeo <- function(data, y_vars, y_labels) {
+  plots <- list()
+  
+  for (i in seq_along(y_vars)) {
+    y_var <- y_vars[[i]]
+    y_label <- y_labels[[i]]
+    
+    p <- ggplot(data = data %>%
+                  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
+                aes(x = EUNISa_1_descr, y = !!sym(y_var), fill = EUNISa_1_descr)) +
+      geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+      geom_point(aes(y = !!sym(y_var), color = EUNISa_1_descr),
+                 position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+      geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+      stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
+      stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                     label = length(x)),
+                   geom = "text", aes(label = ..label..), vjust = 0.5) +
+      labs(y = y_label, x = "EUNISa_1_descr") +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+      guides(fill = FALSE, color = FALSE) +
+      theme_bw() + coord_flip() + facet_wrap(~ biogeo)
+    
+    plots[[y_var]] <- p
+  }
+  
+  return(plots)
+}
+```
+
+## Indices
+
+Distribution plots:
+
+## CH
+
+```{r}
+distr_plot_biogeo(data_validation, "canopy_height", "Canopy height (m)")
+```
+
+## Phenology
+
+# RF models
+
+```{r}
+vars_RF <- c(
+  # Min values of all indices
+  "NDVI_min", "EVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, EVI and SAVI
+  "NDVI_auc", "EVI_auc", "SAVI_auc",
+  # Values of NDVI, EVI and SAVI at sos, pos and eos
+  "NDVI_sos_value", "NDVI_pos_value", "NDVI_eos_value",
+  "EVI_sos_value", "EVI_pos_value", "EVI_eos_value", 
+  "SAVI_sos_value", "SAVI_pos_value", "SAVI_eos_value",
+  # Differences pos-sos in value and doy
+  "NDVI_diff_pos_sos_value", "EVI_diff_pos_sos_value", "SAVI_diff_pos_sos_value",
+  "NDVI_diff_pos_sos_doy", "EVI_diff_pos_sos_doy", "SAVI_diff_pos_sos_doy",
+  # Differences pos-eos in value and doy
+  "NDVI_diff_pos_eos_value", "EVI_diff_pos_eos_value","SAVI_diff_pos_eos_value",
+  "NDVI_diff_eos_pos_doy", "EVI_diff_eos_pos_doy", "SAVI_diff_eos_pos_doy",
+  # Growing season duration
+  "NDVI_gsd", "EVI_gsd", "SAVI_gsd",
+  # Canopy height
+  "canopy_height")
+```
+
+## RF with all points
+
+```{r}
+filtered_data0 <- data_validation %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(NDVI_max <= 1) %>%
+  dplyr::filter(NDMI_max <= 1) %>%
+  dplyr::filter(NDWI_min >= -1) %>%
+  # Remove rows with missing values
+  dplyr::filter(if_all(all_of(vars_RF), ~ !is.na(.))) %>%
+  # Keep only rows with differences > 0
+  dplyr::filter(if_all(contains("diff"), ~ .x > 0)) %>%
+  # Select only variables needed
+  select(EUNISa_1, all_of(vars_RF))
+```
+
+Correlation of all variables to be included in RF models:
+
+```{r}
+corrplot(filtered_data0 %>% 
+           select(all_of(vars_RF)) %>%
+           cor(use = "pairwise.complete.obs"),
+         method = "color", type = "upper", tl.col = "black", tl.srt = 45)
+```
+
+Split into training and test data sets.
+
+```{r}
+train_indices0 <- sample(1:nrow(filtered_data0), 0.7 * nrow(filtered_data0))
+train_data0 <- filtered_data0[train_indices0, ]
+test_data0 <- filtered_data0[-train_indices0, ]
+```
+
+Number of points per category for filtered data:
+
+```{r}
+filtered_data0 %>% count(EUNISa_1)
+```
+
+```{r}
+rf_cforest0 <- party::cforest(
+  formula = reformulate(vars_RF, response = "EUNISa_1"),
+  data = train_data0, 
+  controls = cforest_control(mtry = round(sqrt(length(all_of(vars_RF)))),  
+                             # mtry = sqrt(35) # sqrt of total n variables
+                             # Default mtry = 5
+                             # Bagging: mtry = NULL
+                             # or = number of input variables
+                             ntree = 500) # Default, try increasing
+  ) 
+```
+
+```{r}
+predictions_rf_cforest0 <- predict(rf_cforest0, newdata = test_data0,
+                                   OOB = TRUE, type = "response")
+```
+
+Confusion matrix:
+
+```{r}
+confusionMatrix(predictions_rf_cforest0, test_data0$EUNISa_1)
+```
+
+```{r}
+varimp_rf_cforest0 <- party::varimp(rf_cforest0, conditional = F) 
+```
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest0 <- party::varimp(rf_cforest0, conditional = T)
+# conditional = T adjusts for correlations between predictor variables
+# Takes long!
+save(varimp_rf_cond_cforest0, file = "objects/varimp_rf_cond_cforest0.Rdata")
+```
+
+Variable Importance Plot
+
+```{r}
+varimp_rf_cforest0_df <- data.frame(Variable = names(varimp_rf_cforest0),
+                                    Importance = varimp_rf_cforest0)
+ggplot(varimp_rf_cforest0_df,
+       aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  coord_flip() + theme_minimal() +
+  labs(title = "Variable Importance", x = "Variables", y = "Importance")
+```
+
+ROC curves:
+
+```{r}
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest0, newdata = test_data0, type = "prob")
+
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
+
+# Step 2: Prepare actual class labels
+actual <- factor(test_data0$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc0 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc0
+```
+
+## RF with all GPS points (diff or not)
+
+```{r}
+filtered_data1 <- data_validation %>%
+  # Select only GPS points
+  dplyr::filter(`Location method` == "Location with GPS" |
+                  `Location method` == "Location with differential GPS") %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(NDVI_max <= 1) %>%
+  dplyr::filter(NDMI_max <= 1) %>%
+  dplyr::filter(NDWI_min >= -1) %>%
+  # Remove rows with missing values
+  dplyr::filter(if_all(all_of(vars_RF), ~ !is.na(.))) %>%
+  # Keep only rows with differences > 0
+  dplyr::filter(if_all(contains("diff"), ~ .x > 0)) %>%
+  # Select only variables needed
+  select(EUNISa_1, all_of(vars_RF))
+```
+
+Split into training and test data sets.
+
+```{r}
+train_indices1 <- sample(1:nrow(filtered_data1), 0.7 * nrow(filtered_data1))
+train_data1 <- filtered_data1[train_indices1, ]
+test_data1 <- filtered_data1[-train_indices1, ]
+```
+
+Number of points per category for filtered data:
+
+```{r}
+filtered_data1 %>% count(EUNISa_1)
+```
+
+```{r}
+rf_cforest1 <- party::cforest(
+  formula = reformulate(vars_RF, response = "EUNISa_1"),
+  data = train_data1, 
+  controls = cforest_control(mtry = round(sqrt(length(all_of(vars_RF)))),  
+                             # mtry = sqrt(35) # sqrt of total n variables
+                             # Default mtry = 5
+                             # Bagging: mtry = NULL
+                             # or = number of input variables
+                             ntree = 500) # Default, try increasing
+  ) 
+```
+
+```{r}
+predictions_rf_cforest1 <- predict(rf_cforest1, newdata = test_data1,
+                                   OOB = TRUE, type = "response")
+```
+
+Confusion matrix:
+
+```{r}
+confusionMatrix(predictions_rf_cforest1, test_data1$EUNISa_1)
+```
+
+```{r}
+varimp_rf_cforest1 <- party::varimp(rf_cforest1, conditional = F) 
+```
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest1 <- party::varimp(rf_cforest1, conditional = T)
+# conditional = T adjusts for correlations between predictor variables
+# Takes long!
+save(varimp_rf_cond_cforest1, file = "objects/varimp_rf_cond_cforest1.Rdata")
+```
+
+Variable Importance Plot
+
+```{r}
+varimp_rf_cforest1_df <- data.frame(Variable = names(varimp_rf_cforest1),
+                                    Importance = varimp_rf_cforest1)
+ggplot(varimp_rf_cforest1_df,
+       aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  coord_flip() + theme_minimal() +
+  labs(title = "Variable Importance", x = "Variables", y = "Importance")
+```
+
+ROC curves:
+
+```{r}
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest1, newdata = test_data1, type = "prob")
+
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
+
+# Step 2: Prepare actual class labels
+actual <- factor(test_data1$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc1 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc1
+```
+
+## RF with ...
+
+
+# OLD FROM HERE
+
+# First validation
+
+For T, R, S, Q habitats.
+
+Define a set of rules for a first validation of ALL ReSurvey data. We can call these "Expert-based" rules.
+
+Number of observations in ReSurvey from the habitats of interest:
+
+```{r}
+nrow(data_validation %>%
+       dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")))
+```
+
+Number of observations in ReSurvey from the habitats of interest and with all RS data:
+
+```{r}
+nrow(data_validation %>%
+       dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+       dplyr::filter(CH_data == T) %>%
+       dplyr::filter(RS_data ==T) %>%
+       dplyr::filter(RS_phen_data == T))
+```
+
+```{r}
+data_validation_terrestrial <- data_validation %>%
+  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q"))
+```
+
+## Define rules
+
+Create column for first validation based on different indicators, where "wrong" is noted when the validation rule is not met. Include EUNIS1 confusions.
+
+```{r}
+data_validation_terrestrial %>% count(EUNISa_1, EUNIS1_conf_type)
+```
+
+Define rules:
+
+```{r}
+data_validation_terrestrial <-
+  data_validation_terrestrial %>%
+  mutate(
+    valid_1_NDWI = case_when(
+      # Points that are basically water
+      NDWI_max > 0.3 ~ "wrong",
+      TRUE ~ NA_character_),
+    valid_1_CH = case_when(
+      # T points with low CH
+      EUNISa_1 == "T" & canopy_height < 8 ~ "wrong",
+      # S points with low CH
+      EUNISa_1 =="S" & canopy_height < 5 ~ "wrong",
+      # R & Q points with high CH
+      EUNISa_1 %in% c("R", "Q") & canopy_height > 2 ~ "wrong",
+      TRUE ~ NA_character_),
+    valid_1_NDVI = case_when(
+      # T points with low NDVI_max
+      EUNISa_1 == "T" & NDVI_max < 0.6 ~ "wrong",
+      # S-R-Q points with low NDVI_max
+      EUNISa_1 %in% c("R", "S", "Q") & NDVI_max < 0.2 ~ "wrong",
+      TRUE ~ NA_character_),
+    # Count how many validation rules are not met
+    valid_1_count = rowSums(across(c(valid_1_NDWI, valid_1_CH, valid_1_NDVI), 
+                             ~ . == "wrong"), na.rm = TRUE),
+    # Points where at least 1 rule not met
+    valid_1 = if_else(valid_1_count > 0, "At least 1 rule broken",
+                      "No rules broken so far")
+    )
+```
+
+## Plots first validation
+
+```{r}
+ggplot(data_validation_terrestrial%>%
+         mutate(rules_broken = case_when(
+           valid_1_count == 1 & valid_1_NDWI == "wrong" ~ "NDWI",
+           valid_1_count == 1 & valid_1_NDVI == "wrong" ~ "NDVI",
+           valid_1_count == 1 & valid_1_CH == "wrong" ~ "CH",
+           valid_1_count == 2 &
+             valid_1_NDWI == "wrong" & valid_1_NDVI == "wrong"~ "NDWI + NDVI",
+           valid_1_count == 2 &
+             valid_1_NDWI == "wrong" & valid_1_CH == "wrong"~ "NDWI + CH",
+           valid_1_count == 2 &
+             valid_1_NDVI == "wrong" & valid_1_CH == "wrong"~ "NDVI + CH",
+           valid_1_count == 3 ~ "NDWI + NDVI + CH",
+           TRUE ~ NA_character_
+         )), 
+       aes(x = valid_1_count, fill = rules_broken)) +
+  geom_bar() + labs(x = "Number of broken rules")
+```
+
+```{r}
+data_validation_terrestrial %>%
+         mutate(rules_broken = case_when(
+           valid_1_count == 1 & valid_1_NDWI == "wrong" ~ "NDWI",
+           valid_1_count == 1 & valid_1_NDVI == "wrong" ~ "NDVI",
+           valid_1_count == 1 & valid_1_CH == "wrong" ~ "CH",
+           valid_1_count == 2 &
+             valid_1_NDWI == "wrong" & valid_1_NDVI == "wrong"~ "NDWI + NDVI",
+           valid_1_count == 2 &
+             valid_1_NDWI == "wrong" & valid_1_CH == "wrong"~ "NDWI + CH",
+           valid_1_count == 2 &
+             valid_1_NDVI == "wrong" & valid_1_CH == "wrong"~ "NDVI + CH",
+           valid_1_count == 3 ~ "NDWI + NDVI + CH",
+           TRUE ~ NA_character_
+         )) %>%
+  count(rules_broken, EUNIS1_conf_type)
+```
+
+Proportion of observations not validated (so far):
+
+```{r}
+nrow(data_validation_terrestrial %>% dplyr::filter(valid_1_count > 0))/
+  nrow(data_validation_terrestrial)
+```
+
+But be aware that there are still MANY missing RS data.
+
+```{r}
+ggplot(data_validation_terrestrial %>%
+         mutate(diff_GPS = if_else(
+           `Location method` != "Location with differential GPS" |
+             is.na(`Location method`), "no", "yes")), 
+       aes(x = diff_GPS, fill = valid_1)) +
+  geom_bar() + labs(x = "Differential GPS")
+ggplot(data_validation_terrestrial %>%
+         mutate(GPS = case_when(
+           `Location method` == "Location with differential GPS" ~ "yes",
+           `Location method` == "Location with GPS" ~ "yes",
+           is.na(`Location method`) ~ "no",
+           TRUE ~ "no"
+         )), 
+       aes(x = GPS, fill = valid_1)) +
+  geom_bar() + labs(x = "GPS")
+```
+
+Points with any rule broken and confusion between EUNIS:
+
+```{r}
+nrow(data_validation_terrestrial %>%
+       dplyr::filter(EUNIS1_conf == T & valid_1_count > 0))
+```
+
+Convert to shp to look at these in GIS:
+
+```{r}
+# st_write(data_validation_terrestrial %>%
+#            dplyr::filter(EUNIS1_conf == T & valid_1_count > 0) %>%
+#            st_as_sf(coords = c("Lon_updated", "Lat_updated"), crs = 4326),
+#          "C:/GIS/MOTIVATE/shapefiles/resurv_not_val_EUNIS_conf.shp")
+```
+
+Checked and yes
+
+How many points with differential GPS that have at least 1 rule broken?
+
+```{r}
+nrow(data_validation_terrestrial %>%
+  dplyr::filter(`Location method` == "Location with differential GPS" &
+           valid_1 == "At least 1 rule broken"))
+```
+
+Convert to shp to look at these in GIS:
+
+```{r}
+# st_write(data_validation_terrestrial %>%
+#            dplyr::filter(`Location method` == "Location with differential GPS" &
+#                     valid_1 == "At least 1 rule broken") %>%
+#            st_as_sf(coords = c("Lon_updated", "Lat_updated"), crs = 4326),
+#          "C:/GIS/MOTIVATE/shapefiles/resurv_not_val_diff_GPS.shp")
+```
+
+# Maps
+
+## Points GPS
+
+```{r}
+# Load world boundaries
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Calculate the extent of the points
+points_GPS_extent <- data_validation %>%
+  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  dplyr::filter(S2_data == T | Landsat_data == T ) %>%
+  dplyr::filter(`Location method` == "Location with differential GPS" |
+           `Location method` == "Location with GPS") %>%
+  summarise(lon_min = min(Lon_updated, na.rm = TRUE),
+            lon_max = max(Lon_updated, na.rm = TRUE),
+            lat_min = min(Lat_updated, na.rm = TRUE),
+            lat_max = max(Lat_updated, na.rm = TRUE))
+
+# Add padding to the extent (adjust as needed)
+padding <- 2  # Adjust padding to your preference
+x_limits <- c(points_GPS_extent$lon_min - padding,
+              points_GPS_extent$lon_max + padding)
+y_limits <- c(points_GPS_extent$lat_min - padding,
+              points_GPS_extent$lat_max + padding)
+
+# Create the zoomed map
+ggplot() +
+  geom_sf(data = world, fill = "lightblue", color = "gray") +
+  geom_point(data = data_validation %>%
+               dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+               dplyr::filter(S2_data == T | Landsat_data == T ) %>%
+               dplyr::filter(`Location method` == "Location with differential GPS" |
+           `Location method` == "Location with GPS"),
+             aes(x = Lon_updated, y = Lat_updated, color = EUNISa_1),
+             size = 1) +
+  coord_sf(xlim = x_limits, ylim = y_limits) +
+  theme_minimal()
+```
+
+Number of GPS points by Country:
+
+```{r}
+data_validation %>%
+  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  dplyr::filter(S2_data == T | Landsat_data == T ) %>%
+  dplyr::filter(`Location method` == "Location with differential GPS" |
+           `Location method` == "Location with GPS") %>%
+  count(Country)
+```
+
+## Points ReSurvey
+
+```{r}
+# Calculate the extent of the points
+points_resurvey_extent <- data_validation %>%
+  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  dplyr::filter(S2_data == T | Landsat_data == T ) %>%
+  summarise(lon_min = min(Lon_updated, na.rm = TRUE),
+            lon_max = max(Lon_updated, na.rm = TRUE),
+            lat_min = min(Lat_updated, na.rm = TRUE),
+            lat_max = max(Lat_updated, na.rm = TRUE))
+
+# Add padding to the extent (adjust as needed)
+padding <- 2  # Adjust padding to your preference
+x_limits <- c(points_resurvey_extent$lon_min - padding,
+              points_resurvey_extent$lon_max + padding)
+y_limits <- c(points_resurvey_extent$lat_min - padding,
+              points_resurvey_extent$lat_max + padding)
+
+# Create the zoomed map
+ggplot() +
+  geom_sf(data = world, fill = "lightblue", color = "gray") +
+  geom_point(data = data_validation %>%
+               dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+               dplyr::filter(S2_data == T | Landsat_data == T ),
+             aes(x = Lon_updated, y = Lat_updated, color = EUNISa_1),
+             size = 1) +
+  coord_sf(xlim = x_limits, ylim = y_limits) +
+  theme_minimal()
+```
+
+Number of ReSurvey points by Country:
+
+```{r}
+data_validation %>%
+  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  dplyr::filter(S2_data == T | Landsat_data == T ) %>%
+  count(Country)
+```
+
+# Distributions from GPS points without rules broken so far
+
+Create tibble with differential GPS points without rules broken so far:
+
+```{r}
+all_GPS_valid <- data_validation_terrestrial %>%
+  dplyr::filter((`Location method` == "Location with differential GPS" | 
+            `Location method` == "Location with GPS" ) &
+           valid_1 == "No rules broken so far") 
+```
+
+## NDVI, NDMI, NDWI, SAVI and EVI
+
+```{r}
+distr_plot(all_GPS_valid,
+           c("NDVI_max", "NDVI_p90", "NDVI_min", "NDVI_p10"), 
+           c("NDVI max", "NDVI p90", "NDVI min", "NDVI p10"))
+distr_plot(all_GPS_valid,
+           c("NDMI_max", "NDMI_p90", "NDMI_min", "NDMI_p10"), 
+           c("NDMI max", "NDMI p90", "NDMI min", "NDMI p10"))
+distr_plot(all_GPS_valid,
+           c("NDWI_max", "NDWI_p90", "NDWI_min", "NDWI_p10"), 
+           c("NDWI max", "NDWI p90", "NDWI min", "NDWI p10"))
+distr_plot(all_GPS_valid,
+           c("SAVI_max", "SAVI_p90", "SAVI_min", "SAVI_p10"), 
+           c("SAVI max", "SAVI p90", "SAVI min", "SAVI p10"))
+distr_plot(all_GPS_valid %>%
+             dplyr::filter(EVI_max <= 1) %>%
+             dplyr::filter(EVI_min >= -1 & EVI_min <= 1),
+           c("EVI_max", "EVI_p90", "EVI_min", "EVI_p10"), 
+           c("EVI max", "EVI p90", "EVI min", "EVI p10"))
+```
+
+## CH
+
+```{r}
+distr_plot(all_GPS_valid, "canopy_height", "Canopy height (m)")
+```
+
+## Phenology
+
+```{r}
+distr_plot(all_GPS_valid,
+           c("SOS_DOY","Peak_DOY", "EOS_DOY",
+             "NDVI_at_SOS", "NDVI_at_Peak", "NDVI_at_EOS",
+             "diff_Peak_SOS","diff_Peak_EOS", "Season_Length"),
+           c("SOS DOY", "Peak DOY", "EOS DOY",
+             "NDVI at SOS", "NDVI at Peak", "NDVI at EOS",
+             "Difference Peak-SOS", "Difference Peak-EOS", "Season Length"))
+```
+
+# GPS valid points above p20 of NDVI_max and NDMI_min for each habitat
+
+# HERE! 
+
+Chosen NDVI_min because it was important in RF models, but let's see with new data!
+
+```{r}
+percentiles_all_GPS <- all_GPS_valid %>%
+  group_by(EUNISa_1) %>%
+  summarize(percentile_20_NDVI_max = quantile(NDVI_max, probs = 0.20, na.rm = T),
+            percentile_20_NDMI_min = quantile(NDMI_min, probs = 0.20, na.rm = T))
+
+all_GPS_valid <- all_GPS_valid %>%
+  left_join(percentiles_all_GPS, by = "EUNISa_1") %>%
+  mutate(category_NDVI_max = case_when(
+    NDVI_max < percentile_20_NDVI_max ~ "below_20th",
+    NDVI_max >= percentile_20_NDVI_max ~ "above_20th"),
+  category_NDMI_min = case_when(
+    NDMI_min < percentile_20_NDMI_min ~ "below_20th",
+    NDMI_min >= percentile_20_NDMI_min ~ "above_20th"))
+
+ggplot(data = all_GPS_valid,
+       aes(x = EUNISa_1_descr, y = NDVI_max)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8,
+                   fill = "lightblue") +
+  geom_point(aes(color = category_NDVI_max),
+             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1, label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5) +
+  labs(y = "NDVI max", x = "EUNIS level 1") +
+  guides(fill = FALSE, color = FALSE) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  scale_color_manual(values = c("below_20th" = "grey", "above_20th" = "lightblue")) +
+  theme_bw() + coord_flip()
+
+ggplot(data = all_GPS_valid,
+       aes(x = EUNISa_1_descr, y = NDMI_min)) +
+  geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8,
+                   fill = "lightblue") +
+  geom_point(aes(color = category_NDMI_min),
+             position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+  stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
+  stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1, label = length(x)),
+               geom = "text", aes(label = ..label..), vjust = 0.5) +
+  labs(y = "NDMI min", x = "EUNIS level 1") +
+  guides(fill = FALSE, color = FALSE) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  scale_color_manual(values = c("below_20th" = "grey", "above_20th" = "lightblue")) +
+  theme_bw() + coord_flip()
+```
+
+# RF models
+
+Using the conditional inference version of random forest (cforest in package party). Suggested if the data are highly correlated. Cforest is more stable in deriving variable importance values in the presence of highly correlated variables, thus providing better accuracy in calculating variable importance (ref below).
+
+Hothorn, T., Hornik, K. and Zeileis, A. (2006) Unbiased Recursive Portioning: A Conditional Inference Framework. Journal of Computational and Graphical Statistics, 15, 651-
+674. http://dx.doi.org/10.1198/106186006X133933
+
+## All GPS points
+
+```{r}
+dplyr::filtered_data0 <- all_GPS_valid %>%
+  dplyr::filter(!is.na(NDVI_max) & !is.na(NDMI_max) & !is.na(NDWI_max) &
+           !is.na(SAVI_max) & !is.na(EVI_max) & !is.na(NDVI_min) &
+           !is.na(NDMI_min) & !is.na(NDWI_min) & !is.na(SAVI_min) &
+           !is.na(EVI_min)) %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  dplyr::filter(EVI_max <= 1 & EVI_min >= -1)
+```
+
+Split into training and test data sets.
+
+```{r}
+train_indices0 <- sample(1:nrow(dplyr::filtered_data0), 0.7 * nrow(dplyr::filtered_data0))
+train_data0 <- dplyr::filtered_data0[train_indices0, ]
+test_data0 <- dplyr::filtered_data0[-train_indices0, ]
+```
+
+Number of points per category for dplyr::filtered data:
+
+```{r}
+dplyr::filtered_data0 %>% count(EUNISa_1)
+```
+
+```{r}
+rf_cforest0 <- party::cforest(EUNISa_1 ~ NDVI_max + NDVI_min + NDMI_max +
+                                NDMI_min + NDWI_max + NDWI_min + EVI_max +
+                                EVI_min + SAVI_max + SAVI_min + canopy_height, 
+                              data = train_data0,
+                              controls = cforest_control(
+                                mtry = 3,
+                                # mtry = sqrt(11)
+                                # Default mtry = 5
+                                # Bagging: mtry = NULL
+                                # or = number of input variables
+                                ntree = 500) # Default, try increasing
+                              ) 
+```
+
+```{r}
+predictions_rf_cforest0 <- predict(rf_cforest0, newdata = test_data0,
+                                   OOB = TRUE, type = "response")
+```
+
+Confusion matrix:
+
+```{r}
+confusionMatrix(predictions_rf_cforest0, test_data0$EUNISa_1)
+```
+
+```{r}
+varimp_rf_cforest0 <- party::varimp(rf_cforest0, conditional = F) 
+```
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest0 <- party::varimp(rf_cforest0, conditional = T)
+# conditional = T adjusts for correlations between predictor variables
+# Takes long!
+save(varimp_rf_cond_cforest0, file = "objects/varimp_rf_cond_cforest0.Rdata")
+```
+
+Variable Importance Plot
+
+```{r}
+varimp_rf_cforest0_df <- data.frame(Variable = names(varimp_rf_cforest0),
+                                    Importance = varimp_rf_cforest0)
+ggplot(varimp_rf_cforest0_df,
+       aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  coord_flip() + theme_minimal() +
+  labs(title = "Variable Importance", x = "Variables", y = "Importance")
+```
+
+ROC curves:
+
+```{r}
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest0, newdata = test_data0, type = "prob")
+
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
+
+# Step 2: Prepare actual class labels
+actual <- factor(test_data0$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc0 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc0
+```
+
+## REVISE FROM HERE: All GPS points above p20
+
+dplyr::filter the data to get only GPS-points above p20 of NDVI_max and NDMI_min.
+
+```{r}
+all_GPS_valid <- all_GPS_valid %>%
+  select(-percentile_20_NDVI_max, -percentile_20_NDMI_min)
+```
+
+```{r}
+percentiles <- all_GPS_valid %>%
+  group_by(EUNISa_1) %>%
+  summarize(
+    percentile_20_NDVI_max = quantile(NDVI_max, 0.20, na.rm = T),
+    percentile_20_NDMI_min = quantile(NDMI_min, 0.20, na.rm = T),
+    percentile_80_NDVI_max = quantile(NDVI_max, 0.80, na.rm = T),
+    percentile_80_NDMI_min = quantile(NDMI_min, 0.80, na.rm = T)
+    )
+
+# Join the percentiles back to the original data
+all_GPS_valid <- all_GPS_valid %>%
+  left_join(percentiles, by = "EUNISa_1")
+
+# dplyr::filter rows above the 20th percentile for both variables for each category of EUNISa_1
+dplyr::filtered_data1 <- all_GPS_valid %>%
+  dplyr::filter(
+    NDVI_max >= percentile_20_NDVI_max & NDMI_min >= percentile_20_NDMI_min
+    ) %>%
+  dplyr::filter(!is.na(NDVI_max) & !is.na(NDMI_max) & !is.na(NDWI_max) &
+           !is.na(SAVI_max) & !is.na(EVI_max) & !is.na(NDVI_min) &
+           !is.na(NDMI_min) & !is.na(NDWI_min) & !is.na(SAVI_min) &
+           !is.na(EVI_min)) %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  dplyr::filter(EVI_max <= 1 & EVI_min >= -1)
+```
+
+Split into training and test data sets.
+
+```{r}
+train_indices1 <- sample(1:nrow(dplyr::filtered_data1), 0.7 * nrow(dplyr::filtered_data1))
+train_data1 <- dplyr::filtered_data1[train_indices1, ]
+test_data1 <- dplyr::filtered_data1[-train_indices1, ]
+```
+
+Number of points per category for dplyr::filtered data:
+
+```{r}
+dplyr::filtered_data1 %>% count(EUNISa_1)
+```
+
+Investigate package ggparty (e.g. autoplot function, and more).
+
+TO-DO: 
+Choose the hyperparameter mtry based on the square root of the number of predictor variables (Hastie et al., 2009)-
+
+Hastie, T., Tibshirani, R., & Friedman, J. (2009). The elements of statistical
+learning: Data mining, inference, and prediction. Springer Science &
+Business Media.
+
+Maybe TO_DO:
+We variated ntree from 50 to 800 in steps of 50, leaving mtry constant at 2. Tis parameter variation showed that ntree=500 was optimal, while higher ntree led to no further model improvement (Supplementary Fig. S10). Subsequently, the hyperparameter mtry was varied from 2 to 8 with constant ntree=500. Here, mtry=3 led to the best results in almost all cases (Supplementary Fig. S11). Consequently, we chose ntree=500 and mtry=3 for our main analysis across all study sites.
+
+```{r}
+rf_cforest1 <- party::cforest(EUNISa_1 ~ NDVI_max + NDVI_min + NDMI_max +
+                                NDMI_min + NDWI_max + NDWI_min + EVI_max +
+                                EVI_min + SAVI_max + SAVI_min + canopy_height, 
+                              data = train_data1,
+                              controls = cforest_control(
+                                mtry = 3,
+                                # mtry = sqrt(11)
+                                # Default mtry = 5
+                                # Bagging: mtry = NULL
+                                # or = number of input variables
+                                ntree = 500) # Default, try increasing
+                              ) 
+```
+
+```{r}
+predictions_rf_cforest1 <- predict(rf_cforest1, newdata = test_data1,
+                                   OOB = TRUE, type = "response")
+```
+
+Confusion matrix:
+
+```{r}
+confusionMatrix(predictions_rf_cforest1, test_data1$EUNISa_1)
+```
+
+SurrogateTree --> does not work
+
+```{r}
+varimp_rf_cforest1 <- party::varimp(rf_cforest1, conditional = F) 
+```
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest1 <- party::varimp(rf_cforest1, conditional = T)
+# conditional = T adjusts for correlations between predictor variables
+# Takes long!
+save(varimp_rf_cond_cforest1, file = "objects/varimp_rf_cond_cforest1.Rdata")
+```
+
+Variable Importance Plot
+
+```{r}
+varimp_rf_cforest1_df <- data.frame(Variable = names(varimp_rf_cforest1),
+                                    Importance = varimp_rf_cforest1)
+ggplot(varimp_rf_cforest1_df,
+       aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  coord_flip() + theme_minimal() +
+  labs(title = "Variable Importance", x = "Variables", y = "Importance")
+```
+
+Tree Visualization
+
+```{r}
+# Create a single conditional inference tree using ctree
+single_tree1 <- ctree(EUNISa_1 ~ NDVI_max + NDVI_min + NDMI_max + NDMI_min +
+                       NDWI_max + NDWI_min + EVI_max + EVI_min + SAVI_max +
+                       SAVI_min + canopy_height,
+                     data = train_data1)
+
+# Plot the single tree using
+autoplot(single_tree1)
+```
+
+ROC curves:
+
+```{r}
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest1, newdata = test_data1, type = "prob")
+
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
+
+# Step 2: Prepare actual class labels
+actual <- factor(test_data1$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc1 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc1
+```
+
+
+## All GPS points within IQ range
+
+dplyr::filter the data to get only GPS-points within IQ range of NDVI_max and NDMI_min.
+
+```{r}
+IQ_ranges <- all_GPS_valid %>%
+  group_by(EUNISa_1) %>%
+  summarize(
+    Q1_NDVI_max = quantile(NDVI_max, 0.25, na.rm = T),
+    Q1_NDMI_min = quantile(NDMI_min, 0.25, na.rm = T),
+    Q3_NDVI_max = quantile(NDVI_max, 0.75, na.rm = T),
+    Q3_NDMI_min = quantile(NDMI_min, 0.75, na.rm = T),
+    IQR_NDVI_max = IQR(NDVI_max, na.rm = TRUE),
+    IQR_NDMI_min = IQR(NDMI_min, na.rm = TRUE)
+    )
+
+# Join the IQ ranges back to the original data
+all_GPS_valid <- all_GPS_valid %>%
+  left_join(IQ_ranges, by = "EUNISa_1")
+
+# Filter rows within the IQR range for both variables
+dplyr::filtered_data2 <- all_GPS_valid %>%
+  dplyr::filter(
+    (NDVI_max >= Q1_NDVI_max & NDVI_max <= Q3_NDVI_max) &
+    (NDMI_min >= Q1_NDMI_min & NDMI_min <= Q3_NDMI_min)
+    ) %>%
+  dplyr::filter(!is.na(NDVI_max) & !is.na(NDMI_max) & !is.na(NDWI_max) &
+           !is.na(SAVI_max) & !is.na(EVI_max) & !is.na(NDVI_min) &
+           !is.na(NDMI_min) & !is.na(NDWI_min) & !is.na(SAVI_min) &
+           !is.na(EVI_min)) %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  dplyr::filter(EVI_max <= 1 & EVI_min >= -1)
+```
+
+Split into training and test data sets.
+
+```{r}
+train_indices2 <- sample(1:nrow(filtered_data2), 0.7 * nrow(filtered_data2))
+train_data2 <- filtered_data2[train_indices2, ]
+test_data2 <- filtered_data2[-train_indices2, ]
+```
+
+Number of points per category for filtered data:
+
+```{r}
+filtered_data2 %>% count(EUNISa_1)
+```
+
+```{r}
+rf_cforest2 <- party::cforest(EUNISa_1 ~ NDVI_max + NDVI_min + NDMI_max +
+                                NDMI_min + NDWI_max + NDWI_min + EVI_max +
+                                EVI_min + SAVI_max + SAVI_min + canopy_height, 
+                              data = train_data2,
+                              controls = cforest_control(
+                                mtry = 3,
+                                # mtry = sqrt(11)
+                                # Default mtry = 5
+                                # Bagging: mtry = NULL
+                                # or = number of input variables
+                                ntree = 500) # Default, try increasing
+                              ) 
+```
+
+```{r}
+predictions_rf_cforest2 <- predict(rf_cforest2, newdata = test_data2,
+                                   OOB = TRUE, type = "response")
+```
+
+Confusion matrix:
+
+```{r}
+confusionMatrix(predictions_rf_cforest2, test_data2$EUNISa_1)
+```
+
+```{r}
+varimp_rf_cforest2 <- party::varimp(rf_cforest2, conditional = F) 
+```
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest2 <- party::varimp(rf_cforest2, conditional = T)
+# conditional = T adjusts for correlations between predictor variables
+# Takes long!
+save(varimp_rf_cond_cforest2, file = "objects/varimp_rf_cond_cforest2.Rdata")
+```
+
+Variable Importance Plot
+
+```{r}
+varimp_rf_cforest2_df <- data.frame(Variable = names(varimp_rf_cforest2),
+                                    Importance = varimp_rf_cforest2)
+ggplot(varimp_rf_cforest2_df,
+       aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  coord_flip() + theme_minimal() +
+  labs(title = "Variable Importance", x = "Variables", y = "Importance")
+```
+
+ROC curves:
+
+```{r}
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest1, newdata = test_data1, type = "prob")
+
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
+
+# Step 2: Prepare actual class labels
+actual <- factor(test_data1$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc2 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc2
+```
+
+## All GPS points within 1.5 * IQ range
+
+Filter the data to get only GPS-points within 1.5 * IQ range of NDVI_max and NDMI_min.
+
+```{r}
+# Filter rows within the 1.5 * IQR range for both variables
+filtered_data3 <- all_GPS_valid %>%
+  filter(
+    (NDVI_max >= (Q1_NDVI_max - 1.5 * IQR_NDVI_max) & NDVI_max <= (Q3_NDVI_max + 1.5 * IQR_NDVI_max)) &
+      (NDMI_min >= (Q1_NDMI_min - 1.5 * IQR_NDMI_min) & NDMI_min <= (Q3_NDMI_min + 1.5 * IQR_NDMI_min))
+    ) %>%
+  filter(!is.na(NDVI_max) & !is.na(NDMI_max) & !is.na(NDWI_max) &
+           !is.na(SAVI_max) & !is.na(EVI_max) & !is.na(NDVI_min) &
+           !is.na(NDMI_min) & !is.na(NDWI_min) & !is.na(SAVI_min) &
+           !is.na(EVI_min)) %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  filter(EVI_max <= 1 & EVI_min >= -1)
+```
+
+Split into training and test data sets.
+
+```{r}
+train_indices3 <- sample(1:nrow(filtered_data3), 0.7 * nrow(filtered_data3))
+train_data3 <- filtered_data3[train_indices3, ]
+test_data3 <- filtered_data3[-train_indices3, ]
+```
+
+Number of points per category for filtered data:
+
+```{r}
+filtered_data3 %>% count(EUNISa_1)
+```
+
+```{r}
+rf_cforest3 <- party::cforest(EUNISa_1 ~ NDVI_max + NDVI_min + NDMI_max +
+                                NDMI_min + NDWI_max + NDWI_min + EVI_max +
+                                EVI_min + SAVI_max + SAVI_min + canopy_height, 
+                              data = train_data3,
+                              controls = cforest_control(
+                                mtry = 3,
+                                # mtry = sqrt(11)
+                                # Default mtry = 5
+                                # Bagging: mtry = NULL
+                                # or = number of input variables
+                                ntree = 500) # Default, try increasing
+                              ) 
+```
+
+```{r}
+predictions_rf_cforest3 <- predict(rf_cforest3, newdata = test_data3,
+                                   OOB = TRUE, type = "response")
+```
+
+Confusion matrix:
+
+```{r}
+confusionMatrix(predictions_rf_cforest3, test_data3$EUNISa_1)
+```
+
+```{r}
+varimp_rf_cforest3 <- party::varimp(rf_cforest3, conditional = F) 
+```
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest3 <- party::varimp(rf_cforest3, conditional = T)
+# conditional = T adjusts for correlations between predictor variables
+# Takes long!
+save(varimp_rf_cond_cforest3, file = "objects/varimp_rf_cond_cforest3.Rdata")
+```
+
+Variable Importance Plot
+
+```{r}
+varimp_rf_cforest3_df <- data.frame(Variable = names(varimp_rf_cforest3),
+                                    Importance = varimp_rf_cforest3)
+ggplot(varimp_rf_cforest3_df,
+       aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  coord_flip() + theme_minimal() +
+  labs(title = "Variable Importance", x = "Variables", y = "Importance")
+```
+
+ROC curves:
+
+```{r}
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest1, newdata = test_data1, type = "prob")
+
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
+
+# Step 2: Prepare actual class labels
+actual <- factor(test_data1$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc3 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc3
+```
+
+## All GPS points within mean +/- SD
+
+Filter the data to get only GPS-points within mean +/- SD of NDVI_max and NDMI_min.
+
+```{r}
+mean_sd <- all_GPS_valid %>%
+  group_by(EUNISa_1) %>%
+  summarize(
+    mean_NDVI_max = mean(all_GPS_valid$NDVI_max, na.rm = T),
+    mean_NDMI_min = mean(all_GPS_valid$NDMI_min, na.rm = T),
+    sd_NDVI_max = sd(all_GPS_valid$NDVI_max, na.rm = T),
+    sd_NDMI_min = sd(all_GPS_valid$NDMI_min, na.rm = T)
+    )
+
+# Join the IQ ranges back to the original data
+all_GPS_valid <- all_GPS_valid %>%
+  left_join(mean_sd, by = "EUNISa_1")
+
+# Filter rows within the specified range for both variables
+filtered_data4 <- all_GPS_valid %>%
+  filter(
+    (NDVI_max >= (mean_NDVI_max - sd_NDVI_max) & NDVI_max <= (mean_NDVI_max + sd_NDVI_max)) &
+      (NDMI_min >= (mean_NDMI_min - sd_NDMI_min) & NDMI_min <= (mean_NDMI_min + sd_NDMI_min))
+    ) %>%
+  filter(!is.na(NDVI_max) & !is.na(NDMI_max) & !is.na(NDWI_max) &
+           !is.na(SAVI_max) & !is.na(EVI_max) & !is.na(NDVI_min) &
+           !is.na(NDMI_min) & !is.na(NDWI_min) & !is.na(SAVI_min) &
+           !is.na(EVI_min)) %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  filter(EVI_max <= 1 & EVI_min >= -1)
+```
+
+Split into training and test data sets.
+
+```{r}
+train_indices4 <- sample(1:nrow(filtered_data4), 0.7 * nrow(filtered_data4))
+train_data4 <- filtered_data4[train_indices4, ]
+test_data4 <- filtered_data4[-train_indices4, ]
+```
+
+Number of points per category for filtered data:
+
+```{r}
+filtered_data4 %>% count(EUNISa_1)
+```
+
+```{r}
+rf_cforest4 <- party::cforest(EUNISa_1 ~ NDVI_max + NDVI_min + NDMI_max +
+                                NDMI_min + NDWI_max + NDWI_min + EVI_max +
+                                EVI_min + SAVI_max + SAVI_min + canopy_height, 
+                              data = train_data4,
+                              controls = cforest_control(
+                                mtry = 3,
+                                # mtry = sqrt(11)
+                                # Default mtry = 5
+                                # Bagging: mtry = NULL
+                                # or = number of input variables
+                                ntree = 500) # Default, try increasing
+                              ) 
+```
+
+```{r}
+predictions_rf_cforest4 <- predict(rf_cforest4, newdata = test_data4,
+                                   OOB = TRUE, type = "response")
+```
+
+Confusion matrix:
+
+```{r}
+confusionMatrix(predictions_rf_cforest4, test_data4$EUNISa_1)
+```
+
+```{r}
+varimp_rf_cforest4 <- party::varimp(rf_cforest4, conditional = F) 
+```
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest4 <- party::varimp(rf_cforest4, conditional = T)
+# conditional = T adjusts for correlations between predictor variables
+# Takes long!
+save(varimp_rf_cond_cforest4, file = "objects/varimp_rf_cond_cforest4.Rdata")
+```
+
+Variable Importance Plot
+
+```{r}
+varimp_rf_cforest4_df <- data.frame(Variable = names(varimp_rf_cforest4),
+                                    Importance = varimp_rf_cforest4)
+ggplot(varimp_rf_cforest4_df,
+       aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  coord_flip() + theme_minimal() +
+  labs(title = "Variable Importance", x = "Variables", y = "Importance")
+```
+
+ROC curves:
+
+```{r}
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest1, newdata = test_data1, type = "prob")
+
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
+
+# Step 2: Prepare actual class labels
+actual <- factor(test_data1$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc4 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc4
+```
+
+## All GPS points above p20 and below p80
+
+Filter the data to get only GPS-points above p20 and below p80 of NDVI_max and NDMI_min.
+
+```{r}
+# Filter rows above the 20th percentile and below the 80th percentile for both variables
+filtered_data5 <- all_GPS_valid %>%
+  filter(
+    (NDVI_max >= percentile_20_NDVI_max & NDVI_max <= percentile_80_NDVI_max) &
+    (NDMI_min >= percentile_20_NDMI_min & NDMI_min <= percentile_80_NDMI_min)
+    ) %>%
+  filter(!is.na(NDVI_max) & !is.na(NDMI_max) & !is.na(NDWI_max) &
+           !is.na(SAVI_max) & !is.na(EVI_max) & !is.na(NDVI_min) &
+           !is.na(NDMI_min) & !is.na(NDWI_min) & !is.na(SAVI_min) &
+           !is.na(EVI_min)) %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  filter(EVI_max <= 1 & EVI_min >= -1)
+```
+
+Split into training and test data sets.
+
+```{r}
+train_indices5 <- sample(1:nrow(filtered_data5), 0.7 * nrow(filtered_data5))
+train_data5 <- filtered_data5[train_indices5, ]
+test_data5 <- filtered_data5[-train_indices5, ]
+```
+
+Number of points per category for filtered data:
+
+```{r}
+filtered_data5 %>% count(EUNISa_1)
+```
+
+```{r}
+rf_cforest5 <- party::cforest(EUNISa_1 ~ NDVI_max + NDVI_min + NDMI_max +
+                                NDMI_min + NDWI_max + NDWI_min + EVI_max +
+                                EVI_min + SAVI_max + SAVI_min + canopy_height, 
+                              data = train_data5,
+                              controls = cforest_control(
+                                mtry = 3,
+                                # mtry = sqrt(11)
+                                # Default mtry = 5
+                                # Bagging: mtry = NULL
+                                # or = number of input variables
+                                ntree = 500) # Default, try increasing
+                              ) 
+```
+
+```{r}
+predictions_rf_cforest5 <- predict(rf_cforest5, newdata = test_data5,
+                                   OOB = TRUE, type = "response")
+```
+
+Confusion matrix:
+
+```{r}
+confusionMatrix(predictions_rf_cforest5, test_data5$EUNISa_1)
+```
+
+```{r}
+varimp_rf_cforest5 <- party::varimp(rf_cforest5, conditional = F) 
+```
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf_cond_cforest5 <- party::varimp(rf_cforest5, conditional = T)
+# conditional = T adjusts for correlations between predictor variables
+# Takes long!
+save(varimp_rf_cond_cforest5, file = "objects/varimp_rf_cond_cforest5.Rdata")
+```
+
+Variable Importance Plot
+
+```{r}
+varimp_rf_cforest5_df <- data.frame(Variable = names(varimp_rf_cforest5),
+                                    Importance = varimp_rf_cforest5)
+ggplot(varimp_rf_cforest5_df,
+       aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  coord_flip() + theme_minimal() +
+  labs(title = "Variable Importance", x = "Variables", y = "Importance")
+```
+
+ROC curves:
+
+```{r}
+# Predict probabilities for each class
+probabilities <- predict(rf_cforest1, newdata = test_data1, type = "prob")
+
+# Step 1: Convert list of matrices to a proper data frame
+prob_matrix <- t(sapply(probabilities, as.vector))
+colnames(prob_matrix) <- c("Q", "R", "S", "T")  # Adjust if needed
+prob_df <- as.data.frame(prob_matrix)
+
+# Step 2: Prepare actual class labels
+actual <- factor(test_data1$EUNISa_1, levels = c("Q", "R", "S", "T"))
+classes <- levels(actual)
+
+# Step 3: Binarize actual labels
+actual_bin <- model.matrix(~ actual - 1)
+colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+
+# Step 4: Compute ROC data for each class with AUC in label
+roc_data <- lapply(classes, function(class) {
+  roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+  auc_val <- round(auc(roc_obj), 3)
+  data.frame(
+    FPR = rev(roc_obj$specificities),
+    TPR = rev(roc_obj$sensitivities),
+    Class = paste0(class, " (AUC = ", auc_val, ")")
+  )
+}) %>% bind_rows()
+
+# Step 5: Plot ROC curves with ggplot2
+roc5 <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    title = "Multiclass ROC Curves with AUC",
+    x = "False Positive Rate",
+    y = "True Positive Rate",
+    color = "Class (AUC)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+roc5
+```
+
+# HERE: Compare RF 1-5
+
+# Cordillera data
+
+```{r}
+AlpineGrasslands_indices <- read_csv(
+  "C:/Data/MOTIVATE/Cordillera/AlpineGrasslands/AlpineGrassland_Sentinel_Plot_Allyear_Allmetrics.csv")
+AlpineGrasslands_phen <- read_csv(
+  "C:/Data/MOTIVATE/Cordillera/AlpineGrasslands/AlpineGrasslands_Phenology_SOS_EOS_Peak_NDVI_Amplitude.csv")
+AlpineGrasslands_CH <- read_csv(
+  "C:/Data/MOTIVATE/Cordillera/AlpineGrasslands/AlpineGrasslands_CanopyHeight_1m.csv")
+VegetationTypes_indices <- read_csv(
+  "C:/Data/MOTIVATE/Cordillera/VegetationTypes/VegetationTypes_Sentinel_Plot_AllYear_Allmetrics.csv")
+VegetationTypes_phen <- read_csv(
+  "C:/Data/MOTIVATE/Cordillera/VegetationTypes/VegetationTypes_Phenology_SOS_EOS_Peak_NDVI_Amplitude.csv")
+VegetationTypes_CH <- read_csv(
+  "C:/Data/MOTIVATE/Cordillera/VegetationTypes/VegetationTypes_CanopyHeight_1m.csv")
+```
+
+```{r}
+AlpineGrasslands <- AlpineGrasslands_indices %>%
+  select(-`system:index`, -.geo, -Localidad) %>%
+  rename(Hábitat = "H�bitat") %>% 
+  full_join(AlpineGrasslands_phen  %>%
+              select(-`system:index`, -.geo, -Localidad) %>%
+              rename(Hábitat = "H�bitat")) %>%
+  full_join(AlpineGrasslands_CH  %>%
+              select(-`system:index`, -.geo, -Localidad)) %>%
+  select(-Date__year, - `Precisi�n`) %>%
+  mutate(DATE = ymd(DATE)) %>%
+  rename(ID = "Releve_num") %>%
+  mutate(ID = as.character(ID)) %>%
+  mutate(layer = "AlpineGrasslands")
+```
+
+```{r}
+VegetationTypes <- VegetationTypes_indices %>%
+  select(-`system:index`, -.geo) %>%
+  full_join(VegetationTypes_phen  %>%
+              select(-`system:index`, -.geo)) %>%
+  full_join(VegetationTypes_CH  %>%
+              select(-`system:index`, -.geo)) %>%
+  rename(Hábitat = "TYPE") %>%
+  mutate(layer = "VegetationTypes")
+```
+
+Merge both datasets:
+
+```{r}
+cordillera <- bind_rows(
+  AlpineGrasslands %>% select(DATE, ID, starts_with("NDMI"),
+                              starts_with("NDVI"), Hábitat, "EOS_DOY",
+                              "Peak_DOY", "SOS_DOY", "Season_Length",
+                              "canopy_height", "layer"),
+  VegetationTypes %>% select(DATE, ID, starts_with("NDMI"),
+                              starts_with("NDVI"), Hábitat, "EOS_DOY",
+                              "Peak_DOY", "SOS_DOY", "Season_Length",
+                              "canopy_height", "layer")
+  ) %>%
+  mutate(EUNISa_1 = case_when(
+    Hábitat = str_detect(Hábitat, "Pastizal|Cervunal|grassland|meadow") ~ "R",
+    Hábitat = str_detect(Hábitat, "forest") ~ "T",
+    Hábitat = str_detect(Hábitat, "Scrub|scrub|Shrubland|shrubland|shrub|Heathland") ~ "S",
+    Hábitat = str_detect(Hábitat, "Suelo|Scree|scree|cliff") ~ "U",
+    Hábitat = is.na(Hábitat) ~ "R",
+    TRUE ~ NA_character_),
+    EUNISa_1_descr = case_when(
+      EUNISa_1 == "R" ~ "Grasslands",
+      EUNISa_1 == "T" ~ "Forests and other wooded land",
+      EUNISa_1 == "S" ~ "Heathlands, scrub and tundra",
+      EUNISa_1 == "U" ~ "Inland habitats with no or little soil")
+    )
+```
+
+## NDVI, NDMI
+
+```{r}
+distr_plot(cordillera,
+           c("NDVI_max", "NDVI_p90", "NDVI_min", "NDVI_p10"), 
+           c("NDVI max", "NDVI p90", "NDVI min", "NDVI p10"))
+distr_plot(cordillera,
+           c("NDMI_max", "NDMI_p90", "NDMI_min", "NDMI_p10"), 
+           c("NDMI max", "NDMI p90", "NDMI min", "NDMI p10"))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+

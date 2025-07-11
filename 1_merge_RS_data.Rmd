@@ -383,13 +383,38 @@ db_Europa_sample <- db_Europa_sample %>%
   select(-RS_site, -RS_plot)
 ```
 
-Keep only habitats F, R, S and Q, and, for each PLOT, keep only the last resurvey:
+Keep only habitats F, R, S and Q:
+
+```{r}
+db_Europa_allobs <- db_Europa_sample %>%
+  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q"))
+```
+
+Save as csv for me to use in GEE:
+
+```{r}
+write_csv(db_Europa_allobs,
+          file = "data/clean/db_Europa_allobst.csv")
+```
+
+Save as shp to merge with bioregions:
+
+```{r}
+# Convert to sf object
+db_Europa_allobs_sf <- st_as_sf(db_Europa_allobs,
+                                       coords = c("Lon_updated", "Lat_updated"),
+                                       crs = 4326) # WGS84
+st_write(db_Europa_allobs_sf,
+         "C:/GIS/MOTIVATE/shapefiles/db_Europa_allobs_sf.shp")
+```
+
+And, for each PLOT, keep only the last resurvey:
 
 ```{r}
 db_Europa_sample_latest <- db_Europa_sample %>%
-  filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
+  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")) %>%
   group_by(PLOT) %>%
-  filter(date == max(date)) %>%
+  dplyr::filter(date == max(date)) %>%
   ungroup()
 ```
 
