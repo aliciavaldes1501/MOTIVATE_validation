@@ -35,13 +35,35 @@ library(pracma)
 handlers("txtprogressbar") # Simple console progress bar
 ```
 
+# Supress package messages
+
+```{r}
+suppressPackageStartupMessages({
+  library(mgcv)
+  library(nlme)
+})
+```
+
 # Load previously created objects
 
 ```{r}
-load(file = "objects/GAM_data.Rdata")
-load(file = "objects/smoothed_data.Rdata")
+load(file = "objects/data_RS_S2_bands_indices.Rdata")
+load(file = "objects/GAM_data_S2.Rdata")
+load(file = "objects/ts_plots_q1_S2.Rdata")
+load(file = "objects/ts_plots_q0_S2.Rdata")
+load(file = "objects/smoothed_data_S2.Rdata")
 ```
 
+# Load Resurvey db
+
+```{r}
+db_Europa_allobs <- read_csv(
+  here("data", "clean", "db_Europa_allobs.csv")) %>%
+  select(PlotObservationID, EUNISa_1, EUNISa_1_descr,
+         EUNISa_2, EUNISa_2_descr) %>%
+  mutate(PlotObservationID = factor(PlotObservationID),
+         EUNISa_1 = factor(EUNISa_1), EUNISa_2 = factor(EUNISa_2))
+```
 
 # Define printall function
 
@@ -51,9 +73,11 @@ printall <- function(tibble) {
   }
 ```
 
-# HERE: START MODIF: Read files with band data
+# Read files with band data
 
 I got these files using the GEE code prepared by Bea.
+
+These files contain all observations in the ReSurvey database from 2016 onward. In order to avoid computation problems in GEE, biogeographical units that contain more than 4500 points have been subdivided in ArcGIS.
 
 ```{r}
 # Set the folder path
@@ -72,12 +96,20 @@ extract_info <- function(filename) {
   list(biogeo = biogeo, unit = unit)
   }
 
+
+# Define column types: force RSrvypl to character, others auto-detected
+custom_col_types <- cols(
+  RSrvypl = col_character(),
+  RSrvyst = col_character(),
+  default = col_guess()
+)
+
 # Read and process each file
 data_list <- lapply(csv_files, function(file) {
   info <- extract_info(basename(file)) # Use only the filename
   
   # Read the file
-  df <- read_csv(file) %>%
+  df <- read_csv(file, col_types = custom_col_types) %>%
     # Remove columns that give column type problems when combining data
     select(-starts_with("EUNIS"), -starts_with("ReSurvey")) %>%
     mutate(biogeo = info$biogeo, unit = info$unit)
@@ -86,7 +118,8 @@ data_list <- lapply(csv_files, function(file) {
   })
 
 # Combine all data
-data_RS_S2_bands <- bind_rows(data_list)
+data_RS_S2_bands <- bind_rows(data_list) %>%
+  rename(PlotObservationID = PltObID)
 
 # View the resulting tibble
 print(data_RS_S2_bands)
@@ -115,7 +148,7 @@ data_RS_S2_bands %>% group_by(PlotObservationID, date, time_utc) %>%
 
 When there is more than one image for each point and day, average the values of the bands:
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 # Summarize the band values conditionally
 band_summary <- data_RS_S2_bands %>%
   group_by(PlotObservationID, date) %>%
@@ -150,7 +183,7 @@ data_RS_S2_bands_updated <- data_RS_S2_bands %>%
 
 # Calculate indices
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 # Calculate indices
 data_RS_S2_bands_indices <- data_RS_S2_bands_updated %>%
   # Set PlotObservationID as factor
@@ -175,7 +208,13 @@ data_RS_S2_bands_indices <- data_RS_S2_bands_updated %>%
          NDMI = (NIR - SWIR) / (NIR + SWIR),
          NDWI = (green - NIR) / (green + NIR)) %>%
   # Setting values of indices outside expected ranges (errors) to NA
-  mutate(EVI = if_else(EVI > 1 | EVI < -1, NA, EVI)) # 7485 values of EVI as NA
+  mutate(EVI = if_else(EVI > 1 | EVI < -1, NA, EVI)) # 12166 values of EVI as NA
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+save(data_RS_S2_bands_indices, file = "objects/data_RS_S2_bands_indices.Rdata")
 ```
 
 Plot n_daytime:
@@ -190,192 +229,556 @@ data_RS_S2_bands_indices %>%
 
 # Compute phenological metrics from models fitted to time series data
 
+## Function
+
 Using GAMs, reweighting and 3 iterations.
 
-Approach similar to https://doi.org/10.1016/j.jag.2020.102172.
+Using both a change detection method (maximum slope) and a threshold method (50% amplitude) to calculate sos and eos.
+
+Approach similar to https://doi.org/10.1016/j.jag.2020.102172 for GAM fitting and change detection method, and to https://www.mdpi.com/2072-4292/12/22/3738 fot threshold method.
 
 Define function to compute phenology metrics using GAM fit and NDVI / EVI / SAVI:
 
 ```{r}
-compute_metrics_models <- function(
-    # Data frame df with index values over time (DOY)
-  df, 
-  # Name of the vegetation indices columns (e.g., "NDVI", "EVI", "SAVI)
-  index_cols = c("NDVI", "EVI", "SAVI"),
-  # Number of iterations for the reweighting process to refine the GAM fit
-  max_iter = 3
-  ) {
-  # Initialize lists to store results
-  metrics_list <- list()
-  fits_list <- list()
+compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
+  suppressPackageStartupMessages({
+    library(mgcv)
+    library(nlme)
+    })
   
-  # Loop over each index column
-  for (index_col in index_cols) {
-    # Remove rows with missing index values and sort data by DOY
-    df_index <- df %>% dplyr::filter(!is.na(.data[[index_col]]))%>% arrange(DOY)
+  plan(multisession)  # Set up parallel processing
+  
+  # Create a list of index-specific data frames
+  index_dfs <- lapply(index_cols, function(index_col) {
+    list(index_col = index_col, df = df %>%
+           select(DOY, PlotObservationID, all_of(index_col)))
+    })
+  
+  # Define the processing function for each index
+  process_index <- function(index_data) {
+    index_col <- index_data$index_col
+    df_index <- index_data$df %>%
+      filter(!is.na(.data[[index_col]])) %>%
+      arrange(DOY)
     
-    # Replace values in DOY 1–50 and DOY 315–end with separate base values
-    base_value_early <- mean(df_index %>% dplyr::filter(DOY >= 1 & DOY <= 50) %>%
-                               pull(index_col), na.rm = TRUE)
-    base_value_late  <- mean(df_index %>% dplyr::filter(DOY >= 315) %>%
-                               pull(index_col), na.rm = TRUE)
+    plot_id <- unique(df_index$PlotObservationID)
+
+    if (nrow(df_index) < 10) {
+      message("  Skipped: insufficient data (< 10 rows)")
+      return(tibble(PlotObservationID = plot_id, index = index_col,
+                    sos_slope = NA_real_, sos_threshold = NA_real_,
+                    pos = NA_real_, eos_slope = NA_real_, 
+                    eos_threshold = NA_real_, auc_slope = NA_real_,
+                    auc_threshold = NA_real_, Vmax = NA_real_,
+                    DOY = df_index$DOY, value = NA_real_))
+    }
     
+    # Replace early/late DOY values
+    base_value_early <- mean(df_index %>% filter(DOY <= 50) %>% 
+                               pull(index_col), na.rm = TRUE)
+    base_value_late  <- mean(df_index %>% filter(DOY >= 315) %>% 
+                               pull(index_col), na.rm = TRUE)
+
     df_index <- df_index %>%
       mutate(!!index_col := case_when(
         DOY <= 50 ~ base_value_early,
         DOY >= 315 ~ base_value_late,
         TRUE ~ .data[[index_col]]
       ))
-    
-    # Extract x (DOY) and y (index) vectors for modelling
+
     x <- df_index$DOY
     y <- df_index[[index_col]]
+    weights <- rep(1, length(y))
     
-    # If there are fewer than 11 observations or all values are NA, skip
-    # VERIFY if this value is OK!
-    if (length(x) < 11 || all(is.na(y))) {
-      next
-    }
-    
-    # Create tibble to store original and predicted index values
-    fits_df <- tibble(DOY = x, observed = y)
-    
-    # Fit initial GAM (unweighted):
-    # Fit a GAM with a thin plate spline (bs = "tp") to smooth the index curve
-    gam_unweighted <- gam(y ~ s(x, bs = "tp"))
-    # Store the predicted values in the unweighted column
-    fits_df$unweighted <- predict(gam_unweighted, newdata = tibble(x = x))
-    
-    # Iterative reweighted GAM fitting
-    weights <- rep(1, length(y)) # Start with equal weights
-    for (i in 1:max_iter) {
-      # Update prediction and recalculate weights to emphasize
-      # points where observed index is higher than predicted
-      gam_fit <- gam(y ~ s(x, bs = "tp"), weights = weights)
-      pred <- predict(gam_fit, newdata = tibble(x = x))
-      if (any(is.na(pred))) {
-        print(paste("Warning: NA predctions in iteration", i, "for", index_col))
+    # GAM fit
+    pred <- NULL
+    for (i in 1:3) {
+      gam_fit <- tryCatch({
+        mgcv::bam(y ~ s(x, bs = "tp"),weights = weights)
+        }, error = function(e) {
+          message("  GAM fitting failed for ", plot_id, " - ", index_col, ": ", 
+                  e$message)
+          return(NULL)
+          })
+      if (is.null(gam_fit)) {
+        return(tibble(
+          PlotObservationID = plot_id,
+          index = index_col,
+          sos_slope = NA_real_,
+          sos_threshold = NA_real_,
+          pos = NA_real_,
+          eos_slope = NA_real_, 
+          eos_threshold = NA_real_, 
+          auc_slope = NA_real_,
+          auc_threshold = NA_real_, 
+          Vmin_pre = NA_real_, 
+          Vmin_post = NA_real_,
+          Vmax = NA_real_, 
+          u_sos = NA_real_, 
+          u_eos = NA_real_,
+          DOY = df_index$DOY,
+          value = NA_real_))
         }
-      fits_df[[paste0("iter_", i)]] <- pred
       
-      # Apply weighting only between DOY 50 and 315
-      weights <- rep(1, length(y))
+      pred <- tryCatch({
+        predict(gam_fit, newdata = tibble(x = x))
+        }, error = function(e) {
+          message("Prediction failed for ", plot_id, " - ", index_col, ": ",
+                  e$message)
+          return(rep(NA_real_, length(x)))
+          })
+      
       idx_between <- which(x > 50 & x < 315 & !is.na(pred) & pred != 0)
-      weights[idx_between] <- (y[idx_between] / pred[idx_between])^4
-      weights[weights > 1] <- 1
-      weights[is.na(weights)] <- 1
-    }
+      weights <- rep(1, length(y))
+      weights[idx_between] <- (y[idx_between] / (pred[idx_between] + 1e-6))^4
+      weights[weights > 1 | is.na(weights)] <- 1
+      }
     
-    # Compute phenological metrics for each fit_type
-    fit_types <- c("unweighted", paste0("iter_", 1:max_iter))
-    for (fit_type in fit_types) {
-      pred <- fits_df[[fit_type]]
-      
-      if (all(is.na(pred))) {
-        print(paste("All predictions are NA for", fit_type, "on", index_col))
-      }
-      
-      slope <- c(NA, diff(pred))
-      
-      pos <- {
-        idx <- which(x >= 50 & x <= 315)
-        if (length(idx) > 0) x[idx][which.max(pred[idx])] else NA_real_
-      }
-      
-      if (is.na(pos)) {
-        print(paste("POS is NA for", fit_type, "on", index_col))
-      }
-      
-      sos <- {
-        idx <- which(x < pos)
-        if (length(idx) > 0) {
-          sub_x <- x[idx]
-          sub_slope <- slope[idx]
-          sub_x[which.max(sub_slope)]
-        } else NA_real_
-      }
-      
-      eos <- {
-        idx <- which(x > pos)
-        if (length(idx) > 0) {
-          sub_x <- x[idx]
-          sub_slope <- slope[idx]
-          sub_x[which.min(sub_slope)]
-        } else NA_real_
-      }
-      
-      # Compute time-integrated index (AUC) between SOS and EOS
-      integration_idx <- which(x >= sos & x <= eos & !is.na(pred))
-      if (length(integration_idx) > 1) {
-        auc <- sum(diff(x[integration_idx]) * 
-                     zoo::rollmean(pred[integration_idx], 2))
-        } else {
-          auc <- NA_real_
-          }
-      
-      metrics_list[[paste(index_col, fit_type, sep = "_")]] <- tibble(
-        PlotObservationID = unique(df$PlotObservationID),
-        index = index_col,
-        fit_type = fit_type,
-        sos = sos,
-        pos = pos,
-        eos = eos,
-        auc = auc
-      )
-      }
+    # Compute metrics
+    slope <- c(NA, diff(pred))
+    idx <- which(x >= 50 & x <= 315)
+    pos <- if (length(idx) > 0) x[idx][which.max(pred[idx])] else NA_real_
 
-    # Store fits in long format
-    fits_long <- fits_df %>%
-      pivot_longer(cols = -DOY, names_to = "fit_type", values_to = "value") %>%
-      mutate(
-        PlotObservationID = unique(df$PlotObservationID),
-        index = index_col
+    sos_slope <- if (!is.na(pos)) {
+      idx <- which(x < pos)
+      if (length(idx) > 0) x[idx][which.max(slope[idx])] else NA_real_
+    } else NA_real_
+
+    eos_slope <- if (!is.na(pos)) {
+      idx <- which(x > pos)
+      if (length(idx) > 0) x[idx][which.min(slope[idx])] else NA_real_
+    } else NA_real_
+
+    integration_idx_slope <- which(x >= sos_slope & x <= 
+                                     eos_slope & !is.na(pred))
+    auc_slope <- if (length(integration_idx_slope) > 1) {
+      sum(diff(x[integration_idx_slope]) * 
+            zoo::rollmean(pred[integration_idx_slope], 2))
+      } else NA_real_
+    
+    # Vmin antes y después del pico
+    Vmin_pre <- if (!is.na(pos)) min(pred[x <= pos], na.rm = TRUE)else NA_real_
+    Vmin_post <- if (!is.na(pos)) min(pred[x >= pos], na.rm = TRUE) else NA_real_
+    Vmax <- max(pred, na.rm = TRUE)
+    
+    # Umbrales relativos
+    p <- 0.5
+    u_sos <- if (!is.na(Vmin_pre)) Vmin_pre + p * (Vmax - Vmin_pre) else NA_real_
+    u_eos <- if (!is.na(Vmin_post)) Vmin_post + p * (Vmax - Vmin_post) else NA_real_
+    
+    # DOY donde se cruzan los umbrales
+    sos_threshold <- if (!is.na(u_sos)) x[which(pred >= u_sos)[1]] else NA_real_
+    eos_threshold <- if (!is.na(u_eos)) x[rev(which(pred >= u_eos))[1]] else NA_real_
+    
+    integration_idx_threshold <- which(x >= sos_threshold & 
+                                         x <= eos_threshold & !is.na(pred))
+    auc_threshold <- if (length(integration_idx_threshold) > 1) {
+      sum(diff(x[integration_idx_threshold]) * 
+            zoo::rollmean(pred[integration_idx_threshold], 2))
+      } else NA_real_
+    
+    # 1. Predicciones por DOY
+    fits_df <- tibble(
+      PlotObservationID = unique(df_index$PlotObservationID),
+      DOY = x,
+      value = pred,
+      index = index_col
       )
     
-    fits_list[[index_col]] <- fits_long
+    # 2. Métricas resumen
+    metrics_df <- tibble(
+      PlotObservationID = unique(df_index$PlotObservationID),
+      index = index_col,
+      sos_slope = sos_slope,
+      sos_threshold = sos_threshold,
+      pos = pos,
+      eos_slope = eos_slope,
+      eos_threshold = eos_threshold,
+      auc_slope = auc_slope,
+      auc_threshold = auc_threshold,
+      Vmin_pre = Vmin_pre,
+      Vmin_post = Vmin_post,
+      Vmax = Vmax,
+      u_sos = u_sos,
+      u_eos = u_eos
+      )
+    
+    # 3. Unir por PlotObservationID, index
+    final_df <- left_join(fits_df, metrics_df, 
+                          by = c("PlotObservationID", "index"))
   }
   
-  # Fallback in case no metrics were computed
-  if (length(metrics_list) == 0) {
-    print(paste("No metrics computed for PlotObservationID:",
-                unique(df$PlotObservationID)))
-    return(tibble())
-  }
-  
-  # Combine metrics and fits into a single GAM_data tibble
-  metrics_df <- bind_rows(metrics_list[!sapply(metrics_list, is.null)])
-  fits_df <- bind_rows(fits_list)
-  
-  GAM_data <- fits_df %>%
-    left_join(metrics_df, by = c("PlotObservationID", "index", "fit_type")) %>%
-  mutate(method = "GAM") %>%
-  # Specify column order
-  select(PlotObservationID, DOY, method, fit_type, index, value,
-         sos, pos, eos, auc)
-  
-  # Return the combined tibble
-  return(GAM_data)
-
-  }
+  # Run in parallel
+  results <- future_map(index_dfs, process_index, .progress = TRUE)
+  results <- purrr::compact(results)  # removes NULLs
+  if (length(results) == 0) return(tibble())  # or return(NULL)
+  bind_rows(results)
+}
 ```
-
-Apply the function:
 
 ```{r}
-# Apply the function to each PlotObservationID
-execution_time <- system.time({
-  with_progress({
-    GAM_data <- data_RS_S2_bands_indices %>%
-      group_split(PlotObservationID) %>%
-      set_names(map_chr(., ~ as.character(unique(.x$PlotObservationID)))) %>%
-      map_dfr(~ compute_metrics_models(df = .,
-                                       index_cols = c("NDVI", "EVI", "SAVI")),
-                     .progress = TRUE)
-  })
+# # OLD
+# compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI"), 
+#                                    max_iter = 3) {
+#   plan(multisession)  # Set up parallel processing
+# 
+#   # Create a list of index-specific data frames
+#   index_dfs <- lapply(index_cols, function(index_col) {
+#     list(index_col = index_col, df = df %>% 
+#            
+#            select(DOY, PlotObservationID, all_of(index_col)))
+#   })
+# 
+#   # Define the processing function for each index
+#   process_index <- function(index_data) {
+#     index_col <- index_data$index_col
+#     df_index <- index_data$df %>%
+#       filter(!is.na(.data[[index_col]])) %>%
+#       arrange(DOY)
+# 
+#     # if (nrow(df_index) < 11) return(NULL)
+# 
+#     # Replace early/late DOY values
+#     base_value_early <- mean(df_index %>% filter(DOY <= 50) %>% 
+#                                pull(index_col), na.rm = TRUE)
+#     base_value_late  <- mean(df_index %>% filter(DOY >= 315) %>% 
+#                                pull(index_col), na.rm = TRUE)
+# 
+#     df_index <- df_index %>%
+#       mutate(!!index_col := case_when(
+#         DOY <= 50 ~ base_value_early,
+#         DOY >= 315 ~ base_value_late,
+#         TRUE ~ .data[[index_col]]
+#       ))
+# 
+#     x <- df_index$DOY
+#     y <- df_index[[index_col]]
+#     fits_df <- tibble(DOY = x, observed = y)
+# 
+#     # Initial unweighted GAM
+#     gam_unweighted <- mgcv::bam(y ~ s(x, bs = "tp"))
+#     fits_df$unweighted <- predict(gam_unweighted, newdata = tibble(x = x))
+# 
+#     # Iterative reweighting
+#     weights <- rep(1, length(y))
+#     for (i in 1:max_iter) {
+#       gam_fit <- mgcv::bam(y ~ s(x, bs = "tp"), weights = weights)
+#       pred <- predict(gam_fit, newdata = tibble(x = x))
+#       fits_df[[paste0("iter_", i)]] <- pred
+# 
+#       idx_between <- which(x > 50 & x < 315 & !is.na(pred) & pred != 0)
+#       weights <- rep(1, length(y))
+#       weights[idx_between] <- (y[idx_between] / (pred[idx_between] + 1e-6))^4
+#       weights[weights > 1 | is.na(weights)] <- 1
+#     }
+# 
+#     # Compute metrics
+#     metrics_list <- list()
+#     fit_types <- c("unweighted", paste0("iter_", 1:max_iter))
+#     for (fit_type in fit_types) {
+#       pred <- fits_df[[fit_type]]
+#       slope <- c(NA, diff(pred))
+#       idx <- which(x >= 50 & x <= 315)
+#       pos <- if (length(idx) > 0) x[idx][which.max(pred[idx])] else NA_real_
+# 
+#       sos_slope <- if (!is.na(pos)) {
+#         idx <- which(x < pos)
+#         if (length(idx) > 0) x[idx][which.max(slope[idx])] else NA_real_
+#       } else NA_real_
+# 
+#       eos_slope <- if (!is.na(pos)) {
+#         idx <- which(x > pos)
+#         if (length(idx) > 0) x[idx][which.min(slope[idx])] else NA_real_
+#       } else NA_real_
+# 
+#       integration_idx_slope <- 
+#         which(x >= sos_slope & x <= eos_slope & !is.na(pred))
+#       auc_slope <- if (length(integration_idx_slope) > 1) {
+#         sum(diff(x[integration_idx_slope]) * 
+#               zoo::rollmean(pred[integration_idx_slope], 2))
+#         } else NA_real_
+#       
+#       # Dynamic threshold method
+#       Vmin <- min(pred, na.rm = TRUE)
+#       Vmax <- max(pred, na.rm = TRUE)
+#       p <- 0.5
+#       u <- Vmin + p * (Vmax - Vmin)
+#       sos_threshold <- x[which(pred >= u)[1]]
+#       eos_threshold <- x[rev(which(pred >= u))[1]]
+#       integration_idx_threshold <- 
+#         which(x >= sos_threshold & x <= eos_threshold & !is.na(pred))
+#       auc_threshold <- if (length(integration_idx_threshold) > 1) {
+#         sum(diff(x[integration_idx_threshold]) * 
+#               zoo::rollmean(pred[integration_idx_threshold], 2))
+#         } else NA_real_
+#       
+#       metrics_list[[fit_type]] <- tibble(
+#         PlotObservationID = unique(df_index$PlotObservationID),
+#         index = index_col,
+#         fit_type = fit_type,
+#         sos_slope = sos_slope,
+#         sos_threshold = sos_threshold,
+#         pos = pos,
+#         eos_slope = eos_slope,
+#         eos_threshold = eos_threshold,
+#         auc_slope = auc_slope,
+#         auc_threshold = auc_threshold,
+#         Vmin = Vmin,
+#         Vmax = Vmax,
+#         u = u
+#       )
+#     }
+# 
+#     fits_long <- fits_df %>%
+#       pivot_longer(cols = -DOY, names_to = "fit_type", values_to = "value") %>%
+#       mutate(PlotObservationID = unique(df_index$PlotObservationID), 
+#              index = index_col)
+# 
+#     list(metrics = bind_rows(metrics_list), fits = fits_long)
+#   }
+# 
+#   # Run in parallel
+#   results <- future_map(index_dfs, process_index, .progress = TRUE)
+# 
+#   # Combine results
+#   metrics_df <- bind_rows(map(results, "metrics"))
+#   fits_df <- bind_rows(map(results, "fits"))
+# 
+#   GAM_data <- fits_df %>%
+#     left_join(metrics_df, by = c("PlotObservationID", "index", "fit_type")) %>%
+#     mutate(method = "GAM") %>%
+#     select(PlotObservationID, DOY, method, fit_type, index, value, sos_slope,
+#            sos_threshold, pos, eos_slope, eos_threshold, auc_slope, 
+#            auc_threshold, Vmin, Vmax, u)
+# 
+#   return(GAM_data)
+# }
+```
+
+```{r}
+# OLD
+# compute_metrics_models <- function(
+#   # Data frame df with index values over time (DOY)
+#   df, 
+#   # Name of the vegetation indices columns (e.g., "NDVI", "EVI", "SAVI")
+#   index_cols = c("NDVI", "EVI", "SAVI"),
+#   # Number of iterations for the reweighting process to refine the GAM fit
+#   max_iter = 3
+# ) {
+#   # Initialize lists to store results
+#   metrics_list <- list()
+#   fits_list <- list()
+#   
+#   # Loop over each index column
+#   for (index_col in index_cols) {
+#     # Remove rows with missing index values and sort data by DOY
+#     df_index <- df %>%
+#       dplyr::filter(!is.na(.data[[index_col]])) %>%
+#       arrange(DOY)
+#     
+#     # Replace values in DOY 1–50 and DOY 315–end with separate base values
+#     base_value_early <- mean(df_index %>%
+#                                dplyr::filter(DOY >= 1 & DOY <= 50) %>%
+#                                pull(index_col), na.rm = TRUE)
+#     base_value_late  <- mean(df_index %>%
+#                                dplyr::filter(DOY >= 315) %>%
+#                                pull(index_col), na.rm = TRUE)
+#     
+#     df_index <- df_index %>%
+#       mutate(!!index_col := case_when(
+#         DOY <= 50 ~ base_value_early,
+#         DOY >= 315 ~ base_value_late,
+#         TRUE ~ .data[[index_col]]
+#       ))
+#     
+#     # Extract x (DOY) and y (index) vectors for modelling
+#     x <- df_index$DOY
+#     y <- df_index[[index_col]]
+#     
+#     # If there are fewer than 11 observations or all values are NA, skip
+#     # VERIFY if this value is OK!
+#     if (length(x) < 11 || all(is.na(y))) {
+#       next
+#     }
+#     
+#     # Create tibble to store original and predicted index values
+#     fits_df <- tibble(DOY = x, observed = y)
+#     
+#     # Fit initial GAM (unweighted):
+#     # Fit a GAM with a thin plate spline (bs = "tp") to smooth the index curve
+#     gam_unweighted <- mgcv::bam(y ~ s(x, bs = "tp"))
+#     # Store the predicted values in the unweighted column
+#     fits_df$unweighted <- predict(gam_unweighted, newdata = tibble(x = x))
+#     
+#     # Iterative reweighted GAM fitting
+#     weights <- rep(1, length(y)) # Start with equal weights
+#     for (i in 1:max_iter) {
+#       # Update prediction and recalculate weights to emphasize
+#       # points where observed index is higher than predicted
+#       gam_fit <- mgcv::bam(y ~ s(x, bs = "tp"), weights = weights)
+#       pred <- predict(gam_fit, newdata = tibble(x = x))
+#       if (any(is.na(pred))) {
+#         print(paste("Warning: NA predictions in iteration", i, "for", index_col))
+#       }
+#       fits_df[[paste0("iter_", i)]] <- pred
+#       
+#       # Apply weighting only between DOY 50 and 315
+#       weights <- rep(1, length(y))
+#       idx_between <- which(x > 50 & x < 315 & !is.na(pred) & pred != 0)
+#       weights[idx_between] <- (y[idx_between] / pred[idx_between])^4
+#       weights[weights > 1] <- 1
+#       weights[is.na(weights)] <- 1
+#     }
+#     
+#     # Compute phenological metrics for each fit_type
+#     fit_types <- c("unweighted", paste0("iter_", 1:max_iter))
+#     for (fit_type in fit_types) {
+#       pred <- fits_df[[fit_type]]
+#       
+#       if (all(is.na(pred))) {
+#         print(paste("All predictions are NA for", fit_type, "on", index_col))
+#       }
+#       
+#       slope <- c(NA, diff(pred))
+#       
+#       pos <- {
+#         idx <- which(x >= 50 & x <= 315)
+#         if (length(idx) > 0) x[idx][which.max(pred[idx])] else NA_real_
+#       }
+#       
+#       if (is.na(pos)) {
+#         print(paste("POS is NA for", fit_type, "on", index_col))
+#       }
+#       
+#       sos <- {
+#         idx <- which(x < pos)
+#         if (length(idx) > 0) {
+#           sub_x <- x[idx]
+#           sub_slope <- slope[idx]
+#           sub_x[which.max(sub_slope)]
+#         } else NA_real_
+#       }
+#       
+#       eos <- {
+#         idx <- which(x > pos)
+#         if (length(idx) > 0) {
+#           sub_x <- x[idx]
+#           sub_slope <- slope[idx]
+#           sub_x[which.min(sub_slope)]
+#         } else NA_real_
+#       }
+#       
+#       # Compute time-integrated index (AUC) between SOS and EOS
+#       integration_idx <- which(x >= sos & x <= eos & !is.na(pred))
+#       if (length(integration_idx) > 1) {
+#         auc <- sum(diff(x[integration_idx]) * 
+#                      zoo::rollmean(pred[integration_idx], 2))
+#       } else {
+#         auc <- NA_real_
+#       }
+#       
+#       metrics_list[[paste(index_col, fit_type, sep = "_")]] <- tibble(
+#         PlotObservationID = unique(df$PlotObservationID),
+#         index = index_col,
+#         fit_type = fit_type,
+#         sos = sos,
+#         pos = pos,
+#         eos = eos,
+#         auc = auc
+#       )
+#     }
+#     
+#     # Store fits in long format
+#     fits_long <- fits_df %>%
+#       pivot_longer(cols = -DOY, names_to = "fit_type", values_to = "value") %>%
+#       mutate(
+#         PlotObservationID = unique(df$PlotObservationID),
+#         index = index_col
+#       )
+#     
+#     fits_list[[index_col]] <- fits_long
+#   }
+#   
+#   # Fallback in case no metrics were computed
+#   if (length(metrics_list) == 0) {
+#     print(paste("No metrics computed for PlotObservationID:",
+#                 unique(df$PlotObservationID)))
+#     return(tibble())
+#   }
+#   
+#   # Combine metrics and fits into a single GAM_data tibble
+#   metrics_df <- bind_rows(metrics_list[!sapply(metrics_list, is.null)])
+#   fits_df <- bind_rows(fits_list)
+#   
+#   GAM_data <- fits_df %>%
+#     left_join(metrics_df, by = c("PlotObservationID", "index", "fit_type")) %>%
+#     mutate(method = "GAM") %>%
+#     # Specify column order
+#     select(PlotObservationID, DOY, method, fit_type, index, value,
+#            sos, pos, eos, auc)
+#   
+#   # Return the combined tibble
+#   return(GAM_data)
+# }
+```
+
+## Calculation
+
+Apply the function with batch processing
+
+```{r message=FALSE}
+plan(multisession, workers = availableCores() - 1)
+
+ids <- unique(data_RS_S2_bands_indices$PlotObservationID)
+batches <- split(ids, ceiling(seq_along(ids) / 50))  # batches of 50
+
+start_total <- Sys.time()
+
+GAM_data <- map_dfr(seq_along(batches), function(i) {
+  batch_ids <- batches[[i]]
+  total_batches <- length(batches)
+  batch_file <- file.path("objects/GAM_batches", paste0("batch_", i, ".rds"))
+
+  if (file.exists(batch_file)) {
+    message("✅ Batch  ", i, " of ", total_batches, 
+            " already processed. Loading from file.")
+    return(readRDS(batch_file))
+  }
+
+  message("🔄 Processing batch  ", i, " of ", total_batches, " with ",
+          length(batch_ids), " IDs...")
+
+  start_batch <- Sys.time()
+
+  result <- data_RS_S2_bands_indices %>%
+    filter(PlotObservationID %in% batch_ids) %>%
+    group_split(PlotObservationID) %>%
+    set_names(map_chr(., ~ as.character(unique(.x$PlotObservationID)))) %>%
+    future_map_dfr(~ compute_metrics_models(df = .,
+                                            index_cols = c("NDVI", "EVI", "SAVI")),
+                   .progress = TRUE)
+
+  end_batch <- Sys.time()
+  duration <- round(difftime(end_batch, start_batch, units = "mins"), 2)
+  message("⏱️ Batch time ", i, ": ", duration, " minutes")
+
+  message("💾 Saving batch ", i, " to file...")
+  saveRDS(result, batch_file)
+  message("✅ Batch ", i, " saved.") 
+
+  result
 })
 
-print(execution_time)
+end_total <- Sys.time()
+total_time <- round(difftime(end_total, start_total, units = "mins"), 2)
+message("⏱️ Total time: ", total_time, " minutes")
 ```
+
+```{r}
+plan(sequential)
+```
+
+## Save
 
 Look:
 
@@ -385,49 +788,211 @@ GAM_data
 
 Save as an object:
 
+```{r eval=FALSE, include=FALSE}
+save(GAM_data, file = "objects/GAM_data_S2.Rdata")
+```
+
+## Extract average values of indices per month
+
 ```{r}
-save(GAM_data, file = "objects/GAM_data.Rdata")
+extract_monthly_avg_indices <- function(
+    GAM_data, 
+    monthly_doys = list("01" = 1:31, "02" = 32:59, "03" = 60:90, "04" = 91:120, 
+                        "05" = 121:151, "06" = 152:181, "07" = 182:212, 
+                        "08" = 213:243, "09" = 244:273, "10" = 274:304,
+                        "11" = 305:334, "12" = 335:365)) {
+  GAM_data %>%
+    mutate(month = purrr::map_chr(DOY, function(doy) {
+      month_name <- names(monthly_doys)[sapply(monthly_doys, 
+                                               function(r) doy %in% r)]
+      if (length(month_name) > 0) month_name else NA_character_
+    })) %>%
+    filter(!is.na(month)) %>%
+    group_by(PlotObservationID, index, month) %>%
+    summarise(avg_value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+    mutate(avg_value = ifelse(is.infinite(avg_value), NA, avg_value)) %>%
+    arrange(PlotObservationID, match(month, names(monthly_doys))) %>%
+    pivot_wider(names_from = month, values_from = avg_value,
+                names_prefix = "avg_value_")
+}
+```
+
+```{r}
+monthly_avg_indices <- extract_monthly_avg_indices(GAM_data)
+```
+
+Save as an object:
+
+```{r eval=FALSE, include=FALSE}
+save(monthly_avg_indices, file = "objects/monthly_avg_indices_S2.Rdata")
+```
+
+## Assess time series quality
+
+For the time series to be acceptable, it should have a reasonable number of time points, and these points should be distributed along almost all months (could be ok to miss the winter months).
+
+In GAM data, check how many time points are there for each PlotObservationID, how many months, and which months are missing.
+
+```{r}
+ts_quality <- GAM_data %>%
+  # Filter only NDVI (all indices will have the same time points)
+  dplyr::filter(index == "NDVI") %>%
+  # Get month from DOY
+  mutate(month = month(ymd("2020-01-01") + days(DOY - 1))) %>%
+  # For each PlotObservationID
+  group_by(PlotObservationID) %>%
+  # Get the number of time points (days) and the number of months
+  summarise(
+    n_days = n_distinct(DOY),
+    n_months = n_distinct(month),
+    .groups = "drop"
+  ) %>%
+  left_join(GAM_data %>%
+              # Filter only NDVI
+              dplyr::filter(index == "NDVI") %>%
+              # Get month from DOY
+              mutate(month = month(ymd("2020-01-01") + days(DOY - 1))) %>%
+              # Get unique values of PlotObservationID and month
+              distinct(PlotObservationID, month) %>%
+              # Add 1 as value
+              mutate(value = 1) %>%
+              # Reshape to wide format and add zeros when month is missing
+              pivot_wider(
+                names_from = month,
+                names_prefix = "month",
+                values_from = value,
+                values_fill = 0),
+            by = "PlotObservationID")
+```
+
+Histograms time points and n months:
+
+```{r}
+ggplot(ts_quality, aes(x = n_days)) +
+  geom_histogram(color = "black", fill = "white") +
+  xlab("Number of time points (days) in the S2 time series") +
+  theme_minimal()
+ggplot(ts_quality, aes(x = n_months)) +
+  geom_histogram(color = "black", fill = "white") +
+  xlab("Number of months in the S2 time series") +
+  theme_minimal()
+```
+
+Count how many PlotObservationIDs have missing data (value 0) for each month:
+
+```{r}
+obs_missing_month <- ts_quality %>%
+  summarise(across(starts_with("month"), ~ sum(.x == 0))) %>%
+  pivot_longer(cols = everything(), names_to = "month", values_to = "nobs_missing")
+
+ggplot(obs_missing_month %>%
+         mutate(month = factor(month, levels = paste0("month", 1:12))), 
+       aes(x = month, y = nobs_missing)) + geom_bar(stat = "identity") +
+  ylab("Number of PlotObservationID with missing data") +
+  ggtitle("Missing data in S2 time series") +
+  theme_minimal()
+```
+
+Add quality flag:
+
+```{r}
+ts_quality_flag <- ts_quality %>%
+  rowwise() %>%
+  mutate(
+    #  If 2 consecutive months of the period March-October are missing
+    # quality_flag = 0
+    quality_flag = {
+      months <- c_across(month3:month10)
+      if (any(months[-length(months)] == 0 & months[-1] == 0)) 0 else 1
+    }
+  ) %>%
+  ungroup()
+```
+
+```{r}
+ts_quality_flag %>% count(quality_flag)
 ```
 
 ## Boxplot comparing moments for different indices
 
 ```{r}
-GAM_data %>% dplyr::filter(fit_type =="iter_3") %>%
-  select(PlotObservationID, index, sos, pos, eos) %>% distinct() %>%
-  pivot_longer(cols = c(sos, pos, eos),
+GAM_data %>% 
+  select(PlotObservationID, index, sos_slope, sos_threshold, pos, eos_slope,
+         eos_threshold) %>% distinct() %>%
+  pivot_longer(cols = c(sos_slope, sos_threshold, pos, eos_slope, eos_threshold),
                names_to = "moment", values_to = "value") %>%
-  ggplot(aes(x = moment, y = value, fill = index)) + geom_boxplot() 
+  ggplot(aes(x = moment, y = value, fill = index)) + geom_boxplot() +
+  theme_minimal()
 ```
 
 ## Plot fit and moments for each PlotObservationID
 
+### Quality = 1
+
 ```{r}
+# Get unique IDs with quality_flag == 1
+ids_q1 <- ts_quality_flag %>%
+  dplyr::filter(quality_flag == 1) %>%
+  mutate(PlotObservationID = droplevels(PlotObservationID)) %>%
+  pull(PlotObservationID)
+GAM_data_ids_q1 <- GAM_data %>%
+  # Join to get biogeo and unit
+  left_join(data_RS_S2_bands_indices %>%
+              select(PlotObservationID, biogeo, unit) %>%
+              distinct()) %>%
+  # Join to get EUNIS info
+   left_join(db_Europa_allobs %>%
+               select(PlotObservationID, EUNISa_1, EUNISa_1_descr,
+                      EUNISa_2, EUNISa_2_descr)) %>%
+  # Join to get original values of indices
+  left_join(data_RS_S2_bands_indices %>%
+              select(PlotObservationID, DOY, NDVI, EVI, SAVI) %>%
+              pivot_longer(cols = c(NDVI, EVI, SAVI), names_to = "index", 
+                           values_to = "value_orig")) %>%
+  # Join to get ts_quality data
+  left_join(ts_quality_flag %>% select(PlotObservationID, quality_flag)) %>%
+  # Keep only those with quality_flag == 1
+  dplyr::filter(quality_flag == 1)
+```
+
+```{r eval=FALSE, include=FALSE}
 # Get unique PlotObservationIDs
-unique_ids <- unique(GAM_data$PlotObservationID)
+unique_ids1 <- ids_q1
 
 # Create and store plots in a list
-plots_GAM_iter_3 <- map(unique_ids, function(id) {
-  plot_data <- GAM_data %>% filter(PlotObservationID == id) %>%
-    filter(fit_type == "observed" | fit_type == "iter_3")
+ts_plots_q1 <- map(unique_ids1, function(id) {
+  plot_data <- GAM_data_ids_q1 %>%
+    mutate(PlotObservationID = as.character(PlotObservationID)) %>%
+    dplyr::filter(PlotObservationID == id) 
+  
+  # Extract metadata for title
+  metadata <- plot_data %>%
+    select(biogeo, unit, EUNISa_1, EUNISa_2, quality_flag) %>%
+    distinct()
   
   ggplot() +
     # Raw data points
-    geom_point(data = filter(plot_data, fit_type == "observed"), 
-               aes(x = DOY, y = value), alpha = 0.5) +
-    geom_line(data = filter(plot_data, fit_type == "iter_3"),
-              aes(x = DOY, y = value), size = 0.5, color = "red") +
-    geom_vline(data = filter(plot_data, fit_type == "iter_3"),
-               aes(xintercept = sos),
+    geom_point(data = plot_data,aes(x = DOY, y = value_orig), alpha = 0.5) +
+    geom_line(data = plot_data, aes(x = DOY, y = value), 
+              size = 0.5, color = "blue") +
+    geom_vline(data = plot_data %>% distinct(index, sos_slope),
+               aes(xintercept = sos_slope, group = index),
                linetype = "dashed", size = 0.5, color = "red") +
-    geom_vline(data = filter(plot_data, fit_type == "iter_3"),
-               aes(xintercept = pos),
-               linetype = "dotted", size = 0.5, color = "red") +
-    geom_vline(data = filter(plot_data, fit_type == "iter_3"),
-               aes(xintercept = eos),
+    geom_vline(data = plot_data %>% distinct(index, sos_threshold),
+               aes(xintercept = sos_threshold, group = index),
+               linetype = "dashed", size = 0.5, color = "darkgreen") +
+    geom_vline(data = plot_data %>% distinct(index, pos),
+               aes(xintercept = pos, group = index),
+               linetype = "dotted", size = 0.5, color = "blue") +
+    geom_vline(data = plot_data %>% distinct(index, eos_slope),
+               aes(xintercept = eos_slope, group = index),
                linetype = "dashed", size = 0.5, color = "red") +
+    geom_vline(data = plot_data %>% distinct(index, eos_threshold),
+               aes(xintercept = eos_threshold, group = index),
+               linetype = "dashed", size = 0.5, color = "darkgreen") +
     facet_grid(cols = vars(index)) +
     labs(
-      title = glue::glue("PlotObservationID: {id}"),
+      title = glue::glue("{id} | {metadata$biogeo}{metadata$unit} | {metadata$EUNISa_1} | {metadata$EUNISa_2} | Quality: {metadata$quality_flag}"),
       x = "Day of Year",
       y = "Index Value"
     ) +
@@ -435,17 +1000,108 @@ plots_GAM_iter_3 <- map(unique_ids, function(id) {
 })
 
 # Name the list by PlotObservationID
-names(plots_GAM_iter_3) <- unique_ids
+names(ts_plots_q1) <- unique_ids1
 
 # Display the first plot
-print(plots_GAM_iter_3[[1]])
+ts_plots_q1[1]
 ```
 
 Save each plot to a file:
 
+```{r eval=FALSE, include=FALSE}
+walk2(ts_plots_q1, seq_along(ts_plots_q1), ~ ggsave(
+  filename = paste0("output/figures/phenology/ts_q1/ts_plots_q1", .y, ".jpeg"),
+  plot = .x,
+  width = 8,
+  height = 5
+))
+```
+
+### Quality = 0
+
 ```{r}
-walk2(plots_GAM_iter_3, seq_along(plots_GAM_iter_3), ~ ggsave(
-  filename = paste0("output/figures/phenology/plots_GAM_iter_3_", .y, ".jpeg"),
+# Get unique IDs with quality_flag == 0
+ids_q0 <- ts_quality_flag %>%
+  dplyr::filter(quality_flag == 0) %>%
+  mutate(PlotObservationID = droplevels(PlotObservationID)) %>%
+  pull(PlotObservationID)
+GAM_data_ids_q0 <- GAM_data %>%
+  # Join to get biogeo and unit
+  left_join(data_RS_S2_bands_indices %>%
+              select(PlotObservationID, biogeo, unit) %>%
+              distinct()) %>%
+  # Join to get EUNIS info
+   left_join(db_Europa_allobs %>%
+               select(PlotObservationID, EUNISa_1, EUNISa_1_descr,
+                      EUNISa_2, EUNISa_2_descr)) %>%
+  # Join to get original values of indices
+  left_join(data_RS_S2_bands_indices %>%
+              select(PlotObservationID, DOY, NDVI, EVI, SAVI) %>%
+              pivot_longer(cols = c(NDVI, EVI, SAVI), names_to = "index", 
+                           values_to = "value_orig")) %>%
+  # Join to get ts_quality data
+  left_join(ts_quality_flag %>%
+              select(PlotObservationID, n_months, quality_flag)) %>%
+  # Keep only those with quality_flag == 0
+  dplyr::filter(quality_flag == 0)
+```
+
+```{r eval=FALSE, include=FALSE}
+# Get unique PlotObservationIDs
+unique_ids0 <- ids_q0
+
+# Create and store plots in a list
+ts_plots_q0 <- map(unique_ids0, function(id) {
+  plot_data <- GAM_data_ids_q0 %>%
+    mutate(PlotObservationID = as.character(PlotObservationID)) %>%
+    dplyr::filter(PlotObservationID == id) 
+  
+  # Extract metadata for title
+  metadata <- plot_data %>%
+    select(biogeo, unit, EUNISa_1, EUNISa_2, quality_flag) %>%
+    distinct()
+  
+  ggplot() +
+    # Raw data points
+    geom_point(data = plot_data,aes(x = DOY, y = value_orig), alpha = 0.5) +
+    geom_line(data = plot_data, aes(x = DOY, y = value), 
+              size = 0.5, color = "blue") +
+    geom_vline(data = plot_data %>% distinct(index, sos_slope),
+               aes(xintercept = sos_slope, group = index),
+               linetype = "dashed", size = 0.5, color = "red") +
+    geom_vline(data = plot_data %>% distinct(index, sos_threshold),
+               aes(xintercept = sos_threshold, group = index),
+               linetype = "dashed", size = 0.5, color = "darkgreen") +
+    geom_vline(data = plot_data %>% distinct(index, pos),
+               aes(xintercept = pos, group = index),
+               linetype = "dotted", size = 0.5, color = "blue") +
+    geom_vline(data = plot_data %>% distinct(index, eos_slope),
+               aes(xintercept = eos_slope, group = index),
+               linetype = "dashed", size = 0.5, color = "red") +
+    geom_vline(data = plot_data %>% distinct(index, eos_threshold),
+               aes(xintercept = eos_threshold, group = index),
+               linetype = "dashed", size = 0.5, color = "darkgreen") +
+    facet_grid(cols = vars(index)) +
+    labs(
+      title = glue::glue("{id} | {metadata$biogeo}{metadata$unit} | {metadata$EUNISa_1} | {metadata$EUNISa_2} | Quality: {metadata$quality_flag}"),
+      x = "Day of Year",
+      y = "Index Value"
+    ) +
+    theme_minimal() + theme(legend.position = "top")
+})
+
+# Name the list by PlotObservationID
+names(ts_plots_q0) <- unique_ids0
+
+# Display the first plot
+ts_plots_q0[1]
+```
+
+Save each plot to a file:
+
+```{r eval=FALSE, include=FALSE}
+walk2(ts_plots_q0, seq_along(ts_plots_q0), ~ ggsave(
+  filename = paste0("output/figures/phenology/ts_q0/ts_plots_q0", .y, ".jpeg"),
   plot = .x,
   width = 8,
   height = 5
@@ -454,7 +1110,7 @@ walk2(plots_GAM_iter_3, seq_along(plots_GAM_iter_3), ~ ggsave(
 
 # Smooth the time series of NDMI and NDWI
 
-Using GAM, without replacing values in DOY 1–50 and DOY 315–end with separate base values, later use only unweighted GAM 
+Using GAM, without replacing values in DOY 1–50 and DOY 315–end with separate base values, later use only unweighted GAM.
 
 ```{r}
 compute_unweighted_fit <- function(
@@ -483,7 +1139,7 @@ compute_unweighted_fit <- function(
     
     # Fit GAM (unweighted) with a thin plate spline (bs = "tp")
     # to smooth the index curve
-    gam_unweighted <- gam(y ~ s(x, bs = "tp"))
+    gam_unweighted <- mgcv::bam(y ~ s(x, bs = "tp"))
     pred <- predict(gam_unweighted, newdata = tibble(x = x))
     
     # Create tibble to store original and predicted index values
@@ -507,14 +1163,16 @@ compute_unweighted_fit <- function(
 
 Apply the function:
 
-```{r}
+```{r eval=FALSE, include=FALSE}
+plan(multisession, workers = parallel::detectCores() - 1)
+
 # Apply the function to each PlotObservationID
 execution_time <- system.time({
   with_progress({
     smoothed_data <- data_RS_S2_bands_indices %>%
       group_split(PlotObservationID) %>%
       set_names(map_chr(., ~ as.character(unique(.x$PlotObservationID)))) %>%
-      map_dfr(~ compute_unweighted_fit(df = .,
+      future_map_dfr(~ compute_unweighted_fit(df = .,
                                        index_cols = c("NDMI", "NDWI")),
                      .progress = TRUE)
   })
@@ -531,19 +1189,38 @@ smoothed_data
 
 Save as an object:
 
-```{r}
-save(smoothed_data, file = "objects/smoothed_data.Rdata")
+```{r eval=FALSE, include=FALSE}
+save(smoothed_data, file = "objects/smoothed_data_S2.Rdata")
 ```
 
 ## Plot fit and moments for each PlotObservationID
 
 ```{r}
+smoothed_data_ids <- smoothed_data %>%
+  # Join to get biogeo and unit
+  left_join(data_RS_S2_bands_indices %>%
+              select(PlotObservationID, biogeo, unit) %>%
+              distinct()) %>%
+  # Join to get EUNIS info
+   left_join(db_Europa_allobs %>%
+               select(PlotObservationID, EUNISa_1, EUNISa_1_descr,
+                      EUNISa_2, EUNISa_2_descr)) %>%
+  mutate(PlotObservationID = as.character(PlotObservationID))
+```
+
+```{r eval=FALSE, include=FALSE}
 # Get unique PlotObservationIDs
-unique_ids <- unique(smoothed_data$PlotObservationID)
+unique_ids <- unique(smoothed_data_ids$PlotObservationID)
 
 # Create and store plots in a list
-plots_smoothed_data <- map(unique_ids, function(id) {
-  plot_data <- smoothed_data %>% filter(PlotObservationID == id)
+ts_plots_NDMI_NDWI<- map(unique_ids, function(id) {
+  plot_data <- smoothed_data_ids %>% 
+    dplyr::filter(PlotObservationID == id)
+  
+  # Extract metadata for title
+  metadata <- plot_data %>%
+    select(biogeo, unit, EUNISa_1, EUNISa_2) %>%
+    distinct()
   
   ggplot() +
     # Raw data points
@@ -554,10 +1231,10 @@ plots_smoothed_data <- map(unique_ids, function(id) {
                   filter(PlotObservationID == id),
                 aes(x = DOY, y = value), alpha = 0.6) +
     geom_line(data = plot_data, aes(x = DOY, y = value),
-              size = 0.5, color = "red") +
+              size = 0.5, color = "blue") +
     facet_grid(cols = vars(index)) +
     labs(
-      title = glue::glue("PlotObservationID: {id}"),
+      title = glue::glue("{id} | {metadata$biogeo}{metadata$unit} | {metadata$EUNISa_1} | {metadata$EUNISa_2}"),
       x = "Day of Year",
       y = "Index Value"
     ) +
@@ -565,47 +1242,18 @@ plots_smoothed_data <- map(unique_ids, function(id) {
 })
 
 # Name the list by PlotObservationID
-names(plots_smoothed_data) <- unique_ids
+names(ts_plots_NDMI_NDWI) <- unique_ids
 
 # Display the first plot
-print(plots_smoothed_data[[1]])
-```
-
-```{r}
-# Get unique PlotObservationIDs
-unique_ids <- unique((trial_indices %>%
-                        select(PlotObservationID, DOY, NDMI, NDWI) %>%
-                        pivot_longer(cols = c(NDMI, NDWI), names_to = "index",
-                                     values_to = "value"))$PlotObservationID)
-
-# Create a named list of plots using purrr::map
-plots_smoothed_data <- map(unique_ids, function(id) {
-  ggplot() +
-    geom_point(data = trial_indices %>%
-                 select(PlotObservationID, DOY, NDMI, NDWI) %>%
-                 pivot_longer(cols = c(NDMI, NDWI), names_to = "index",
-                              values_to = "value") %>%
-                 filter(PlotObservationID == id),
-               aes(x = DOY, y = value), alpha = 0.6) +
-    geom_line(data = smoothed_data %>% filter(PlotObservationID == id),
-              aes(x = DOY, y = value), color = "blue") +
-    facet_wrap(~ index) +
-    labs(title = paste("PlotObservationID:", id)) +
-    theme_minimal()
-})
-
-# Name the list by PlotObservationID
-names(plots_smoothed_data) <- unique_ids
-
-# Display the first plot
-print(plots_smoothed_data[[1]])
+print(ts_plots_NDMI_NDWI[[1]])
 ```
 
 Save each plot to a file:
 
-```{r}
-walk2(plots_smoothed_data, seq_along(plots_smoothed_data), ~ ggsave(
-  filename = paste0("output/figures/phenology/plots_smoothed_data_", .y, ".jpeg"),
+```{r eval=FALSE, include=FALSE}
+walk2(ts_plots_NDMI_NDWI, seq_along(ts_plots_NDMI_NDWI), ~ ggsave(
+  filename = paste0("output/figures/phenology/ts_NDMI_NDWI/ts_plots_NDVI_NDMI",
+                    .y, ".jpeg"),
   plot = .x,
   width = 8,
   height = 5
@@ -618,9 +1266,6 @@ Careful! These maximum and minimum values are from the smoothed time series. For
 
 ```{r}
 final_indices_data <- GAM_data %>%
-  # Filter for iter_3
-  dplyr::filter(fit_type =="iter_3") %>%
-  select(-method, -fit_type) %>%
   group_by(PlotObservationID, index) %>%
   summarise(max = max(value), min = min(value)) %>%
   ungroup() %>%
@@ -643,14 +1288,13 @@ Use GAM iter_3 to get dates of the moments, values at those moments and AUC (tim
 ```{r}
 # Join to get values at SOS, POS, EOS and auc
 final_phenology_data <- GAM_data %>%
-  # Filter for iter_3
-  dplyr::filter(fit_type =="iter_3") %>%
-  select(-method, -fit_type) %>%
   mutate(
     stage = case_when(
-      DOY == sos ~ "sos",
+      DOY == sos_slope ~ "sos_slope",
+      DOY == sos_threshold ~ "sos_treshold",
       DOY == pos ~ "pos",
-      DOY == eos ~ "eos",
+      DOY == eos_slope ~ "eos_slope",
+      DOY == eos_threshold ~ "eos_threshold",
       TRUE ~ NA_character_
     )
   ) %>%
@@ -663,71 +1307,104 @@ final_phenology_data <- GAM_data %>%
   ) %>%
   # Convert list cols to regular numeric cols
   mutate(
-    NDVI_sos_value = map_dbl(NDVI_sos_value, 1),
+    NDVI_sos_slope_value = map_dbl(NDVI_sos_slope_value, 1),
+    NDVI_sos_treshold_value = map_dbl(NDVI_sos_treshold_value, 1),
     NDVI_pos_value = map_dbl(NDVI_pos_value, 1),
-    NDVI_eos_value = map_dbl(NDVI_eos_value, 1),
-    EVI_sos_value = map_dbl(EVI_sos_value, 1),
+    NDVI_eos_slope_value = map_dbl(NDVI_eos_slope_value, 1),
+    NDVI_eos_threshold_value = map_dbl(NDVI_eos_threshold_value, 1),
+    EVI_sos_slope_value = map_dbl(EVI_sos_slope_value, 1),
+    EVI_sos_threshold_value = map_dbl(EVI_sos_treshold_value, 1),
     EVI_pos_value = map_dbl(EVI_pos_value, 1),
-    EVI_eos_value = map_dbl(EVI_eos_value, 1),
-    SAVI_sos_value = map_dbl(SAVI_sos_value, 1),
+    EVI_eos_slope_value = map_dbl(EVI_eos_slope_value, 1),
+    EVI_eos_threshold_value = map_dbl(EVI_eos_threshold_value, 1),
+    SAVI_sos_slope_value = map_dbl(SAVI_sos_slope_value, 1),
+    SAVI_sos_threshold_value = map_dbl(SAVI_sos_treshold_value, 1),
     SAVI_pos_value = map_dbl(SAVI_pos_value, 1),
-    SAVI_eos_value = map_dbl(SAVI_eos_value, 1)
+    SAVI_eos_slope_value = map_dbl(SAVI_eos_slope_value, 1),
+    SAVI_eos_threshold_value = map_dbl(SAVI_eos_threshold_value, 1)
   ) %>%
-  full_join(GAM_data %>% dplyr::filter(fit_type == "iter_3") %>%
-              distinct(PlotObservationID, index, auc) %>%
-              pivot_wider(names_from = index, values_from = auc,
+  full_join(GAM_data %>%
+              distinct(PlotObservationID, index, auc_slope, auc_threshold) %>%
+              pivot_wider(names_from = index, values_from = c(auc_slope, auc_threshold),
                           names_glue = "{index}_{.value}"))
 ```
 
 # Join indices and phenology data
 
 ```{r}
-final_RS_data <- full_join(final_indices_data, final_phenology_data)
+final_RS_data <- full_join(
+  # Indices data (max and min)
+  final_indices_data,
+  # Average values of indices per month
+  monthly_avg_indices %>%
+    pivot_wider(names_from = index, values_from = c(avg_value_01:avg_value_12),
+                names_glue = "{index}_{.value}")
+  ) %>%
+  full_join(
+    # Phenology data
+    final_phenology_data 
+    ) %>%
+  # Sort cols in alphabetical order
+  select(PlotObservationID, sort(names(.)[names(.) != "PlotObservationID"]))
 ```
 
 # Add EUNIS codes
 
 ```{r}
-db_Europa_sample_latest <- read_csv(
-  here("data", "clean", "db_Europa_sample_latest.csv")) %>%
-  select(PlotObservationID, EUNISa_1, EUNISa_1_descr) %>%
-  mutate(PlotObservationID = factor(PlotObservationID),
-         EUNISa_1 = factor(EUNISa_1))
-```
-
-```{r}
-final_RS_data <- final_RS_data %>% left_join(db_Europa_sample_latest)
+final_RS_data <- final_RS_data %>% left_join(db_Europa_allobs)
 ```
 
 ```{r}
 data_RS_S2_bands_indices <- data_RS_S2_bands_indices %>%
-  left_join(db_Europa_sample_latest)
+  left_join(db_Europa_allobs)
 ```
 
-# Monthly spectrophenology per habitat type
+# HERE: REVISE: Monthly spectrophenology per habitat type
 
 ```{r}
 # Prepare the data
-data_monthly <- data_RS_S2_bands_indices %>%
+data_monthly_EUNISa_1 <- data_RS_S2_bands_indices %>%
   mutate(month = month(date, label = TRUE, abbr = TRUE)) %>%
-  group_by(month, EUNISa_1) %>%
+  group_by(month, EUNISa_1, EUNISa_1_descr) %>%
   summarise(
     mean_NDVI = mean(NDVI, na.rm = TRUE),
     sd_NDVI = sd(NDVI, na.rm = TRUE),
+    n_NDVI = sum(!is.na(NDVI)),
     mean_EVI = mean(EVI, na.rm = TRUE),
     sd_EVI = sd(EVI, na.rm = TRUE),
+    n_EVI = sum(!is.na(EVI)),
     mean_SAVI = mean(SAVI, na.rm = TRUE),
     sd_SAVI = sd(SAVI, na.rm = TRUE),
+    n_SAVI = sum(!is.na(SAVI)),
     .groups = "drop"
   )
+data_monthly_EUNISa_2 <- data_RS_S2_bands_indices %>%
+  mutate(month = month(date, label = TRUE, abbr = TRUE)) %>%
+  group_by(month, EUNISa_1, EUNISa_1_descr, EUNISa_2, EUNISa_2_descr) %>%
+  summarise(
+    mean_NDVI = mean(NDVI, na.rm = TRUE),
+    sd_NDVI = sd(NDVI, na.rm = TRUE),
+    n_NDVI = sum(!is.na(NDVI)),
+    mean_EVI = mean(EVI, na.rm = TRUE),
+    sd_EVI = sd(EVI, na.rm = TRUE),
+    n_EVI = sum(!is.na(EVI)),
+    mean_SAVI = mean(SAVI, na.rm = TRUE),
+    sd_SAVI = sd(SAVI, na.rm = TRUE),
+    n_SAVI = sum(!is.na(SAVI)),
+    .groups = "drop"
+  )
+```
 
-# Plot
-ggplot(data_monthly, 
+```{r}
+# Plots
+
+# EUNISa_1
+ggplot(data_monthly_EUNISa_1, 
        aes(x = month, y = mean_NDVI, color = EUNISa_1, group = EUNISa_1)) +
-  geom_point(size = 3) +
+  geom_point(aes(size = n_NDVI)) +
   geom_line() +
-  geom_errorbar(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
-                width = 0.2) +
+  #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
+                #width = 0.2) +
   labs(
     title = "Monthly NDVI by Habitat Type",
     x = "Month",
@@ -736,12 +1413,12 @@ ggplot(data_monthly,
   ) +
   theme_minimal()
 
-ggplot(data_monthly, 
+ggplot(data_monthly_EUNISa_1, 
        aes(x = month, y = mean_EVI, color = EUNISa_1, group = EUNISa_1)) +
-  geom_point(size = 3) +
+  geom_point(aes(size = n_EVI)) +
   geom_line() +
-  geom_errorbar(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
-                width = 0.2) +
+  #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
+                #width = 0.2) +
   labs(
     title = "Monthly EVI by Habitat Type",
     x = "Month",
@@ -750,12 +1427,12 @@ ggplot(data_monthly,
   ) +
   theme_minimal()
 
-ggplot(data_monthly, 
+ggplot(data_monthly_EUNISa_1, 
        aes(x = month, y = mean_SAVI, color = EUNISa_1, group = EUNISa_1)) +
-  geom_point(size = 3) +
+  geom_point(aes(size = n_SAVI)) +
   geom_line() +
-  geom_errorbar(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
-                width = 0.2) +
+  #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
+                #width = 0.2) +
   labs(
     title = "Monthly SAVI by Habitat Type",
     x = "Month",
@@ -763,9 +1440,194 @@ ggplot(data_monthly,
     color = "Habitat (EUNISa_1)"
   ) +
   theme_minimal()
+
+# EUNISa_2
+
+# NDVI
+ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "Q" & !is.na(EUNISa_2)) %>%
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_NDVI, color = EUNIS, group = EUNIS)) +
+  geom_point(aes(size = n_NDVI)) +
+  geom_line() +
+  #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly NDVI by Habitat Type",
+    x = "Month",
+    y = "NDVI",
+    color = "Habitat (EUNISa_2)"
+  ) +
+  theme_minimal()
+
+ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "R" & !is.na(EUNISa_2)) %>%
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_NDVI, color = EUNIS, group = EUNIS)) +
+  geom_point(aes(size = n_NDVI)) +
+  geom_line() +
+  #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly NDVI by Habitat Type",
+    x = "Month",
+    y = "NDVI",
+    color = "Habitat (EUNISa_2)"
+  ) +
+  theme_minimal()
+
+ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "S" & !is.na(EUNISa_2)) %>%
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_NDVI, color = EUNIS, group = EUNIS)) +
+  geom_point(aes(size = n_NDVI)) +
+  geom_line() +
+  #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly NDVI by Habitat Type",
+    x = "Month",
+    y = "NDVI",
+    color = "Habitat (EUNISa_2)"
+  ) +
+  theme_minimal()
+
+ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "T" & !is.na(EUNISa_2)) %>%
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_NDVI, color = EUNIS, group = EUNIS)) +
+  geom_point(aes(size = n_NDVI)) +
+  geom_line() +
+  #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly NDVI by Habitat Type",
+    x = "Month",
+    y = "NDVI",
+    color = "Habitat (EUNISa_2)"
+  ) +
+  theme_minimal()
+
+# EVI
+ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "Q" & !is.na(EUNISa_2)) %>%
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_EVI, color = EUNIS, group = EUNIS)) +
+  geom_point(aes(size = n_EVI)) +
+  geom_line() +
+  #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly EVI by Habitat Type",
+    x = "Month",
+    y = "EVI",
+    color = "Habitat (EUNISa_2)"
+  ) +
+  theme_minimal()
+
+ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "R" & !is.na(EUNISa_2)) %>%
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_EVI, color = EUNIS, group = EUNIS)) +
+  geom_point(aes(size = n_EVI)) +
+  geom_line() +
+  #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly EVI by Habitat Type",
+    x = "Month",
+    y = "EVI",
+    color = "Habitat (EUNISa_2)"
+  ) +
+  theme_minimal()
+
+ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "S" & !is.na(EUNISa_2)) %>%
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_EVI, color = EUNIS, group = EUNIS)) +
+  geom_point(aes(size = n_EVI)) +
+  geom_line() +
+  #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly EVI by Habitat Type",
+    x = "Month",
+    y = "EVI",
+    color = "Habitat (EUNISa_2)"
+  ) +
+  theme_minimal()
+
+ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "T" & !is.na(EUNISa_2)) %>%
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_EVI, color = EUNIS, group = EUNIS)) +
+  geom_point(aes(size = n_EVI)) +
+  geom_line() +
+  #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly EVI by Habitat Type",
+    x = "Month",
+    y = "EVI",
+    color = "Habitat (EUNISa_2)"
+  ) +
+  theme_minimal()
+
+# SAVI
+ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "Q" & !is.na(EUNISa_2)) %>%
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_SAVI, color = EUNIS, group = EUNIS)) +
+  geom_point(aes(size = n_SAVI)) +
+  geom_line() +
+  #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly SAVI by Habitat Type",
+    x = "Month",
+    y = "SAVI",
+    color = "Habitat (EUNISa_2)"
+  ) +
+  theme_minimal()
+
+ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "R" & !is.na(EUNISa_2)) %>%
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_SAVI, color = EUNIS, group = EUNIS)) +
+  geom_point(aes(size = n_SAVI)) +
+  geom_line() +
+  #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly SAVI by Habitat Type",
+    x = "Month",
+    y = "SAVI",
+    color = "Habitat (EUNISa_2)"
+  ) +
+  theme_minimal()
+
+ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "S" & !is.na(EUNISa_2)) %>%
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_SAVI, color = EUNIS, group = EUNIS)) +
+  geom_point(aes(size = n_SAVI)) +
+  geom_line() +
+  #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly SAVI by Habitat Type",
+    x = "Month",
+    y = "SAVI",
+    color = "Habitat (EUNISa_2)"
+  ) +
+  theme_minimal()
+
+ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "T" & !is.na(EUNISa_2)) %>%
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_SAVI, color = EUNIS, group = EUNIS)) +
+  geom_point(aes(size = n_SAVI)) +
+  geom_line() +
+  #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly SAVI by Habitat Type",
+    x = "Month",
+    y = "SAVI",
+    color = "Habitat (EUNISa_2)"
+  ) +
+  theme_minimal()
 ```
 
-# Calculate other phenological metrics
+# MODIFY: Calculate other phenological metrics
 
 ```{r}
 final_RS_data <- final_RS_data %>%
@@ -823,37 +1685,70 @@ nrow(final_RS_data %>%
                        SAVI_diff_eos_pos_doy <= 0))
 ```
 
-EVI gives less problems, could use only this one?
-
-# Detect number of peaks in smoothed curves
+# HERE: Run. Detect number of peaks in smoothed curves
 
 ```{r}
-# Function to count peaks for each PlotObservationID
+# Set up parallel plan
+plan(multisession, workers = min(parallel::detectCores() - 1))
+
+# Define peak-counting function
 count_peaks <- function(df) {
-  y <- df$value
-  peaks <- findpeaks(y, 
-                     # Minimum number of indices (e.g., DOY steps)
-                     # between two peaks
-                     minpeakdistance = 30, 
-                     # Minimum vertical difference between a peak
-                     # and its surrounding value
-                     threshold = 0.02)
-  num_peaks <- if (!is.null(peaks)) nrow(peaks) else 0
-  return(tibble(PlotObservationID = unique(df$PlotObservationID),
-                num_peaks = num_peaks))
+  # Convert 1D array column to numeric vector
+  y <- as.numeric(df$value)
+  
+  peaks <- findpeaks(y, minpeakdistance = 30, threshold = 0.02)
+  
+  tibble(
+    PlotObservationID = unique(df$PlotObservationID),
+    index = unique(df$index),
+    num_peaks = if (!is.null(peaks)) nrow(peaks) else 0
+  )
 }
 
-# Apply to each group
+# Apply peak counting in parallel
 peak_counts <- GAM_data %>%
-  mutate(value = map_dbl(value, 1)) %>%
-  dplyr::filter(fit_type == "iter_3") %>%
+  filter(fit_type == "iter_3") %>%
   arrange(DOY) %>%
   group_by(PlotObservationID, index) %>%
-  group_modify(~ count_peaks(.x)) %>%
-  ungroup()
+  nest() %>%
+  mutate(result = future_map(data, count_peaks, .progress = TRUE,
+                             .options = furrr_options(scheduling = Inf))) %>%
+  select(-data) %>%
+  unnest(result)
 
-# View result
-peak_counts %>% count(index, num_peaks)
+# Summarize result
+peak_counts_summary <- peak_counts %>% count(index, num_peaks)
+```
+
+# HERE: save
+
+```{r}
+# # Function to count peaks for each PlotObservationID
+# count_peaks <- function(df) {
+#   y <- df$value
+#   peaks <- findpeaks(y, 
+#                      # Minimum number of indices (e.g., DOY steps)
+#                      # between two peaks
+#                      minpeakdistance = 30, 
+#                      # Minimum vertical difference between a peak
+#                      # and its surrounding value
+#                      threshold = 0.02)
+#   num_peaks <- if (!is.null(peaks)) nrow(peaks) else 0
+#   return(tibble(PlotObservationID = unique(df$PlotObservationID),
+#                 num_peaks = num_peaks))
+# }
+# 
+# # Apply to each group
+# peak_counts <- GAM_data %>%
+#   mutate(value = map_dbl(value, 1)) %>%
+#   dplyr::filter(fit_type == "iter_3") %>%
+#   arrange(DOY) %>%
+#   group_by(PlotObservationID, index) %>%
+#   group_modify(~ count_peaks(.x)) %>%
+#   ungroup()
+# 
+# # View result
+# peak_counts %>% count(index, num_peaks)
 ```
 
 ## Plot number of peaks
@@ -877,7 +1772,7 @@ final_RS_data <- final_RS_data %>%
 
 ## Plot fit and moments for PlotObservationIDs with zero peaks
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 # Get unique PlotObservationIDs
 unique_ids <- final_RS_data %>%
   dplyr::filter(EVI_num_peaks == 0) %>%
@@ -944,7 +1839,7 @@ final_RS_data %>%
 final_RS_data <- final_RS_data %>%
   left_join(
     data_RS_S2_bands_indices %>%
-      distinct(PlotObservationID, year, biogeo, unit, `Location method`)
+      distinct(PlotObservationID, year, biogeo, unit, Lctnmth)
     )
 ```
 

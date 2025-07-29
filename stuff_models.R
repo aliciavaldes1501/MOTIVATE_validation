@@ -67,6 +67,6 @@ plot(ggpredict(lm_EOS_DOY))
 
 ### HERE: correspondence analyses (CAs), 
 # biplot showing the distribution of points, similar to PCA, 
-# see if they are grouped by habiat type... (read paper sent by Bea)
+# see if they are grouped by habitat type... (read paper sent by Bea)
 
 
