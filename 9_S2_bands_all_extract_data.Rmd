@@ -49,9 +49,8 @@ suppressPackageStartupMessages({
 ```{r}
 load(file = "objects/data_RS_S2_bands_indices.Rdata")
 load(file = "objects/GAM_data_S2.Rdata")
-load(file = "objects/ts_plots_q1_S2.Rdata")
-load(file = "objects/ts_plots_q0_S2.Rdata")
 load(file = "objects/smoothed_data_S2.Rdata")
+load(file = "objects/monthly_avg_indices_S2.Rdata")
 ```
 
 # Load Resurvey db
@@ -230,6 +229,21 @@ data_RS_S2_bands_indices %>%
 # Compute phenological metrics from models fitted to time series data
 
 ## Function
+
+## HERE (already done in Landsat): Modify function and rerun everything from here (TBD)
+
+```{r eval=FALSE, include=FALSE}
+# Modify these parts in the function below to ensure that
+# sos_threshold < pos and eos_threshold > pos
+sos_threshold <- if (!is.na(u_sos) && !is.na(pos)) {
+  candidates <- x[which(pred >= u_sos & x <= pos)]
+  if (length(candidates) > 0) candidates[1] else NA_real_
+} else NA_real_
+
+eos_threshold <- if (!is.na(u_eos)) {
+  x[rev(which(x > pos & pred >= u_eos))[1]]
+} else NA_real_
+```
 
 Using GAMs, reweighting and 3 iterations.
 
@@ -416,317 +430,11 @@ compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
 }
 ```
 
-```{r}
-# # OLD
-# compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI"), 
-#                                    max_iter = 3) {
-#   plan(multisession)  # Set up parallel processing
-# 
-#   # Create a list of index-specific data frames
-#   index_dfs <- lapply(index_cols, function(index_col) {
-#     list(index_col = index_col, df = df %>% 
-#            
-#            select(DOY, PlotObservationID, all_of(index_col)))
-#   })
-# 
-#   # Define the processing function for each index
-#   process_index <- function(index_data) {
-#     index_col <- index_data$index_col
-#     df_index <- index_data$df %>%
-#       filter(!is.na(.data[[index_col]])) %>%
-#       arrange(DOY)
-# 
-#     # if (nrow(df_index) < 11) return(NULL)
-# 
-#     # Replace early/late DOY values
-#     base_value_early <- mean(df_index %>% filter(DOY <= 50) %>% 
-#                                pull(index_col), na.rm = TRUE)
-#     base_value_late  <- mean(df_index %>% filter(DOY >= 315) %>% 
-#                                pull(index_col), na.rm = TRUE)
-# 
-#     df_index <- df_index %>%
-#       mutate(!!index_col := case_when(
-#         DOY <= 50 ~ base_value_early,
-#         DOY >= 315 ~ base_value_late,
-#         TRUE ~ .data[[index_col]]
-#       ))
-# 
-#     x <- df_index$DOY
-#     y <- df_index[[index_col]]
-#     fits_df <- tibble(DOY = x, observed = y)
-# 
-#     # Initial unweighted GAM
-#     gam_unweighted <- mgcv::bam(y ~ s(x, bs = "tp"))
-#     fits_df$unweighted <- predict(gam_unweighted, newdata = tibble(x = x))
-# 
-#     # Iterative reweighting
-#     weights <- rep(1, length(y))
-#     for (i in 1:max_iter) {
-#       gam_fit <- mgcv::bam(y ~ s(x, bs = "tp"), weights = weights)
-#       pred <- predict(gam_fit, newdata = tibble(x = x))
-#       fits_df[[paste0("iter_", i)]] <- pred
-# 
-#       idx_between <- which(x > 50 & x < 315 & !is.na(pred) & pred != 0)
-#       weights <- rep(1, length(y))
-#       weights[idx_between] <- (y[idx_between] / (pred[idx_between] + 1e-6))^4
-#       weights[weights > 1 | is.na(weights)] <- 1
-#     }
-# 
-#     # Compute metrics
-#     metrics_list <- list()
-#     fit_types <- c("unweighted", paste0("iter_", 1:max_iter))
-#     for (fit_type in fit_types) {
-#       pred <- fits_df[[fit_type]]
-#       slope <- c(NA, diff(pred))
-#       idx <- which(x >= 50 & x <= 315)
-#       pos <- if (length(idx) > 0) x[idx][which.max(pred[idx])] else NA_real_
-# 
-#       sos_slope <- if (!is.na(pos)) {
-#         idx <- which(x < pos)
-#         if (length(idx) > 0) x[idx][which.max(slope[idx])] else NA_real_
-#       } else NA_real_
-# 
-#       eos_slope <- if (!is.na(pos)) {
-#         idx <- which(x > pos)
-#         if (length(idx) > 0) x[idx][which.min(slope[idx])] else NA_real_
-#       } else NA_real_
-# 
-#       integration_idx_slope <- 
-#         which(x >= sos_slope & x <= eos_slope & !is.na(pred))
-#       auc_slope <- if (length(integration_idx_slope) > 1) {
-#         sum(diff(x[integration_idx_slope]) * 
-#               zoo::rollmean(pred[integration_idx_slope], 2))
-#         } else NA_real_
-#       
-#       # Dynamic threshold method
-#       Vmin <- min(pred, na.rm = TRUE)
-#       Vmax <- max(pred, na.rm = TRUE)
-#       p <- 0.5
-#       u <- Vmin + p * (Vmax - Vmin)
-#       sos_threshold <- x[which(pred >= u)[1]]
-#       eos_threshold <- x[rev(which(pred >= u))[1]]
-#       integration_idx_threshold <- 
-#         which(x >= sos_threshold & x <= eos_threshold & !is.na(pred))
-#       auc_threshold <- if (length(integration_idx_threshold) > 1) {
-#         sum(diff(x[integration_idx_threshold]) * 
-#               zoo::rollmean(pred[integration_idx_threshold], 2))
-#         } else NA_real_
-#       
-#       metrics_list[[fit_type]] <- tibble(
-#         PlotObservationID = unique(df_index$PlotObservationID),
-#         index = index_col,
-#         fit_type = fit_type,
-#         sos_slope = sos_slope,
-#         sos_threshold = sos_threshold,
-#         pos = pos,
-#         eos_slope = eos_slope,
-#         eos_threshold = eos_threshold,
-#         auc_slope = auc_slope,
-#         auc_threshold = auc_threshold,
-#         Vmin = Vmin,
-#         Vmax = Vmax,
-#         u = u
-#       )
-#     }
-# 
-#     fits_long <- fits_df %>%
-#       pivot_longer(cols = -DOY, names_to = "fit_type", values_to = "value") %>%
-#       mutate(PlotObservationID = unique(df_index$PlotObservationID), 
-#              index = index_col)
-# 
-#     list(metrics = bind_rows(metrics_list), fits = fits_long)
-#   }
-# 
-#   # Run in parallel
-#   results <- future_map(index_dfs, process_index, .progress = TRUE)
-# 
-#   # Combine results
-#   metrics_df <- bind_rows(map(results, "metrics"))
-#   fits_df <- bind_rows(map(results, "fits"))
-# 
-#   GAM_data <- fits_df %>%
-#     left_join(metrics_df, by = c("PlotObservationID", "index", "fit_type")) %>%
-#     mutate(method = "GAM") %>%
-#     select(PlotObservationID, DOY, method, fit_type, index, value, sos_slope,
-#            sos_threshold, pos, eos_slope, eos_threshold, auc_slope, 
-#            auc_threshold, Vmin, Vmax, u)
-# 
-#   return(GAM_data)
-# }
-```
-
-```{r}
-# OLD
-# compute_metrics_models <- function(
-#   # Data frame df with index values over time (DOY)
-#   df, 
-#   # Name of the vegetation indices columns (e.g., "NDVI", "EVI", "SAVI")
-#   index_cols = c("NDVI", "EVI", "SAVI"),
-#   # Number of iterations for the reweighting process to refine the GAM fit
-#   max_iter = 3
-# ) {
-#   # Initialize lists to store results
-#   metrics_list <- list()
-#   fits_list <- list()
-#   
-#   # Loop over each index column
-#   for (index_col in index_cols) {
-#     # Remove rows with missing index values and sort data by DOY
-#     df_index <- df %>%
-#       dplyr::filter(!is.na(.data[[index_col]])) %>%
-#       arrange(DOY)
-#     
-#     # Replace values in DOY 1–50 and DOY 315–end with separate base values
-#     base_value_early <- mean(df_index %>%
-#                                dplyr::filter(DOY >= 1 & DOY <= 50) %>%
-#                                pull(index_col), na.rm = TRUE)
-#     base_value_late  <- mean(df_index %>%
-#                                dplyr::filter(DOY >= 315) %>%
-#                                pull(index_col), na.rm = TRUE)
-#     
-#     df_index <- df_index %>%
-#       mutate(!!index_col := case_when(
-#         DOY <= 50 ~ base_value_early,
-#         DOY >= 315 ~ base_value_late,
-#         TRUE ~ .data[[index_col]]
-#       ))
-#     
-#     # Extract x (DOY) and y (index) vectors for modelling
-#     x <- df_index$DOY
-#     y <- df_index[[index_col]]
-#     
-#     # If there are fewer than 11 observations or all values are NA, skip
-#     # VERIFY if this value is OK!
-#     if (length(x) < 11 || all(is.na(y))) {
-#       next
-#     }
-#     
-#     # Create tibble to store original and predicted index values
-#     fits_df <- tibble(DOY = x, observed = y)
-#     
-#     # Fit initial GAM (unweighted):
-#     # Fit a GAM with a thin plate spline (bs = "tp") to smooth the index curve
-#     gam_unweighted <- mgcv::bam(y ~ s(x, bs = "tp"))
-#     # Store the predicted values in the unweighted column
-#     fits_df$unweighted <- predict(gam_unweighted, newdata = tibble(x = x))
-#     
-#     # Iterative reweighted GAM fitting
-#     weights <- rep(1, length(y)) # Start with equal weights
-#     for (i in 1:max_iter) {
-#       # Update prediction and recalculate weights to emphasize
-#       # points where observed index is higher than predicted
-#       gam_fit <- mgcv::bam(y ~ s(x, bs = "tp"), weights = weights)
-#       pred <- predict(gam_fit, newdata = tibble(x = x))
-#       if (any(is.na(pred))) {
-#         print(paste("Warning: NA predictions in iteration", i, "for", index_col))
-#       }
-#       fits_df[[paste0("iter_", i)]] <- pred
-#       
-#       # Apply weighting only between DOY 50 and 315
-#       weights <- rep(1, length(y))
-#       idx_between <- which(x > 50 & x < 315 & !is.na(pred) & pred != 0)
-#       weights[idx_between] <- (y[idx_between] / pred[idx_between])^4
-#       weights[weights > 1] <- 1
-#       weights[is.na(weights)] <- 1
-#     }
-#     
-#     # Compute phenological metrics for each fit_type
-#     fit_types <- c("unweighted", paste0("iter_", 1:max_iter))
-#     for (fit_type in fit_types) {
-#       pred <- fits_df[[fit_type]]
-#       
-#       if (all(is.na(pred))) {
-#         print(paste("All predictions are NA for", fit_type, "on", index_col))
-#       }
-#       
-#       slope <- c(NA, diff(pred))
-#       
-#       pos <- {
-#         idx <- which(x >= 50 & x <= 315)
-#         if (length(idx) > 0) x[idx][which.max(pred[idx])] else NA_real_
-#       }
-#       
-#       if (is.na(pos)) {
-#         print(paste("POS is NA for", fit_type, "on", index_col))
-#       }
-#       
-#       sos <- {
-#         idx <- which(x < pos)
-#         if (length(idx) > 0) {
-#           sub_x <- x[idx]
-#           sub_slope <- slope[idx]
-#           sub_x[which.max(sub_slope)]
-#         } else NA_real_
-#       }
-#       
-#       eos <- {
-#         idx <- which(x > pos)
-#         if (length(idx) > 0) {
-#           sub_x <- x[idx]
-#           sub_slope <- slope[idx]
-#           sub_x[which.min(sub_slope)]
-#         } else NA_real_
-#       }
-#       
-#       # Compute time-integrated index (AUC) between SOS and EOS
-#       integration_idx <- which(x >= sos & x <= eos & !is.na(pred))
-#       if (length(integration_idx) > 1) {
-#         auc <- sum(diff(x[integration_idx]) * 
-#                      zoo::rollmean(pred[integration_idx], 2))
-#       } else {
-#         auc <- NA_real_
-#       }
-#       
-#       metrics_list[[paste(index_col, fit_type, sep = "_")]] <- tibble(
-#         PlotObservationID = unique(df$PlotObservationID),
-#         index = index_col,
-#         fit_type = fit_type,
-#         sos = sos,
-#         pos = pos,
-#         eos = eos,
-#         auc = auc
-#       )
-#     }
-#     
-#     # Store fits in long format
-#     fits_long <- fits_df %>%
-#       pivot_longer(cols = -DOY, names_to = "fit_type", values_to = "value") %>%
-#       mutate(
-#         PlotObservationID = unique(df$PlotObservationID),
-#         index = index_col
-#       )
-#     
-#     fits_list[[index_col]] <- fits_long
-#   }
-#   
-#   # Fallback in case no metrics were computed
-#   if (length(metrics_list) == 0) {
-#     print(paste("No metrics computed for PlotObservationID:",
-#                 unique(df$PlotObservationID)))
-#     return(tibble())
-#   }
-#   
-#   # Combine metrics and fits into a single GAM_data tibble
-#   metrics_df <- bind_rows(metrics_list[!sapply(metrics_list, is.null)])
-#   fits_df <- bind_rows(fits_list)
-#   
-#   GAM_data <- fits_df %>%
-#     left_join(metrics_df, by = c("PlotObservationID", "index", "fit_type")) %>%
-#     mutate(method = "GAM") %>%
-#     # Specify column order
-#     select(PlotObservationID, DOY, method, fit_type, index, value,
-#            sos, pos, eos, auc)
-#   
-#   # Return the combined tibble
-#   return(GAM_data)
-# }
-```
-
 ## Calculation
 
 Apply the function with batch processing
 
-```{r message=FALSE}
+```{r eval=FALSE, message=FALSE, include=FALSE}
 plan(multisession, workers = availableCores() - 1)
 
 ids <- unique(data_RS_S2_bands_indices$PlotObservationID)
@@ -737,7 +445,7 @@ start_total <- Sys.time()
 GAM_data <- map_dfr(seq_along(batches), function(i) {
   batch_ids <- batches[[i]]
   total_batches <- length(batches)
-  batch_file <- file.path("objects/GAM_batches", paste0("batch_", i, ".rds"))
+  batch_file <- file.path("objects/GAM_batches_S2", paste0("batch_", i, ".rds"))
 
   if (file.exists(batch_file)) {
     message("✅ Batch  ", i, " of ", total_batches, 
@@ -794,30 +502,51 @@ save(GAM_data, file = "objects/GAM_data_S2.Rdata")
 
 ## Extract average values of indices per month
 
+Extract average values of indices per month and AUC between March and October 
+
 ```{r}
 extract_monthly_avg_indices <- function(
-    GAM_data, 
-    monthly_doys = list("01" = 1:31, "02" = 32:59, "03" = 60:90, "04" = 91:120, 
-                        "05" = 121:151, "06" = 152:181, "07" = 182:212, 
-                        "08" = 213:243, "09" = 244:273, "10" = 274:304,
-                        "11" = 305:334, "12" = 335:365)) {
-  GAM_data %>%
+  GAM_data, 
+  monthly_doys = list("01" = 1:31, "02" = 32:59, "03" = 60:90, "04" = 91:120, 
+                      "05" = 121:151, "06" = 152:181, "07" = 182:212, 
+                      "08" = 213:243, "09" = 244:273, "10" = 274:304,
+                      "11" = 305:334, "12" = 335:365)) {
+  
+  monthly_df <- GAM_data %>%
     mutate(month = purrr::map_chr(DOY, function(doy) {
       month_name <- names(monthly_doys)[sapply(monthly_doys, 
                                                function(r) doy %in% r)]
       if (length(month_name) > 0) month_name else NA_character_
     })) %>%
-    filter(!is.na(month)) %>%
+    dplyr::filter(!is.na(month)) %>%
     group_by(PlotObservationID, index, month) %>%
     summarise(avg_value = mean(value, na.rm = TRUE), .groups = "drop") %>%
     mutate(avg_value = ifelse(is.infinite(avg_value), NA, avg_value)) %>%
     arrange(PlotObservationID, match(month, names(monthly_doys))) %>%
-    pivot_wider(names_from = month, values_from = avg_value,
+    pivot_wider(names_from = month, values_from = avg_value, 
                 names_prefix = "avg_value_")
+  
+  # Calcular AUC entre marzo y octubre usando regla del trapecio
+  months_auc <- c("03", "04", "05", "06", "07", "08", "09", "10")
+  # DOY aproximado del centro de cada mes
+  doy_midpoints <- c(75, 105, 135, 165, 195, 225, 255, 285)  
+  
+  monthly_df <- monthly_df %>%
+    rowwise() %>%
+    mutate(
+      auc_mar_oct = {
+        values <- c_across(all_of(paste0("avg_value_", months_auc)))
+        if (any(is.na(values))) NA_real_ else sum(diff(doy_midpoints) *
+                                                    zoo::rollmean(values, 2))
+      }
+    ) %>%
+    ungroup()
+  
+  return(monthly_df)
 }
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 monthly_avg_indices <- extract_monthly_avg_indices(GAM_data)
 ```
 
@@ -1010,7 +739,7 @@ Save each plot to a file:
 
 ```{r eval=FALSE, include=FALSE}
 walk2(ts_plots_q1, seq_along(ts_plots_q1), ~ ggsave(
-  filename = paste0("output/figures/phenology/ts_q1/ts_plots_q1", .y, ".jpeg"),
+  filename = paste0("C:/Analyses/MOTIVATE_validation/output/figures/phenology/ts_q1_S2/ts_plots_q1", .y, ".jpeg"),
   plot = .x,
   width = 8,
   height = 5
@@ -1101,7 +830,7 @@ Save each plot to a file:
 
 ```{r eval=FALSE, include=FALSE}
 walk2(ts_plots_q0, seq_along(ts_plots_q0), ~ ggsave(
-  filename = paste0("output/figures/phenology/ts_q0/ts_plots_q0", .y, ".jpeg"),
+  filename = paste0("C:/Analyses/MOTIVATE_validation/output/figures/phenology/ts_q0_S2/ts_plots_q0", .y, ".jpeg"),
   plot = .x,
   width = 8,
   height = 5
@@ -1252,7 +981,7 @@ Save each plot to a file:
 
 ```{r eval=FALSE, include=FALSE}
 walk2(ts_plots_NDMI_NDWI, seq_along(ts_plots_NDMI_NDWI), ~ ggsave(
-  filename = paste0("output/figures/phenology/ts_NDMI_NDWI/ts_plots_NDVI_NDMI",
+  filename = paste0("C:/Analyses/MOTIVATE_validation/output/figures/phenology/ts_NDMI_NDWI_S2/ts_plots_NDVI_NDMI",
                     .y, ".jpeg"),
   plot = .x,
   width = 8,
@@ -1291,7 +1020,7 @@ final_phenology_data <- GAM_data %>%
   mutate(
     stage = case_when(
       DOY == sos_slope ~ "sos_slope",
-      DOY == sos_threshold ~ "sos_treshold",
+      DOY == sos_threshold ~ "sos_threshold",
       DOY == pos ~ "pos",
       DOY == eos_slope ~ "eos_slope",
       DOY == eos_threshold ~ "eos_threshold",
@@ -1308,17 +1037,17 @@ final_phenology_data <- GAM_data %>%
   # Convert list cols to regular numeric cols
   mutate(
     NDVI_sos_slope_value = map_dbl(NDVI_sos_slope_value, 1),
-    NDVI_sos_treshold_value = map_dbl(NDVI_sos_treshold_value, 1),
+    NDVI_sos_threshold_value = map_dbl(NDVI_sos_threshold_value, 1),
     NDVI_pos_value = map_dbl(NDVI_pos_value, 1),
     NDVI_eos_slope_value = map_dbl(NDVI_eos_slope_value, 1),
     NDVI_eos_threshold_value = map_dbl(NDVI_eos_threshold_value, 1),
     EVI_sos_slope_value = map_dbl(EVI_sos_slope_value, 1),
-    EVI_sos_threshold_value = map_dbl(EVI_sos_treshold_value, 1),
+    EVI_sos_threshold_value = map_dbl(EVI_sos_threshold_value, 1),
     EVI_pos_value = map_dbl(EVI_pos_value, 1),
     EVI_eos_slope_value = map_dbl(EVI_eos_slope_value, 1),
     EVI_eos_threshold_value = map_dbl(EVI_eos_threshold_value, 1),
     SAVI_sos_slope_value = map_dbl(SAVI_sos_slope_value, 1),
-    SAVI_sos_threshold_value = map_dbl(SAVI_sos_treshold_value, 1),
+    SAVI_sos_threshold_value = map_dbl(SAVI_sos_threshold_value, 1),
     SAVI_pos_value = map_dbl(SAVI_pos_value, 1),
     SAVI_eos_slope_value = map_dbl(SAVI_eos_slope_value, 1),
     SAVI_eos_threshold_value = map_dbl(SAVI_eos_threshold_value, 1)
@@ -1337,7 +1066,7 @@ final_RS_data <- full_join(
   final_indices_data,
   # Average values of indices per month
   monthly_avg_indices %>%
-    pivot_wider(names_from = index, values_from = c(avg_value_01:avg_value_12),
+    pivot_wider(names_from = index, values_from = c(avg_value_01:auc_mar_oct),
                 names_glue = "{index}_{.value}")
   ) %>%
   full_join(
@@ -1359,12 +1088,12 @@ data_RS_S2_bands_indices <- data_RS_S2_bands_indices %>%
   left_join(db_Europa_allobs)
 ```
 
-# HERE: REVISE: Monthly spectrophenology per habitat type
+# Monthly spectrophenology per habitat type
 
 ```{r}
 # Prepare the data
 data_monthly_EUNISa_1 <- data_RS_S2_bands_indices %>%
-  mutate(month = month(date, label = TRUE, abbr = TRUE)) %>%
+  mutate(month = month(date, label = TRUE, abbr = TRUE, locale="EN-us")) %>%
   group_by(month, EUNISa_1, EUNISa_1_descr) %>%
   summarise(
     mean_NDVI = mean(NDVI, na.rm = TRUE),
@@ -1378,8 +1107,17 @@ data_monthly_EUNISa_1 <- data_RS_S2_bands_indices %>%
     n_SAVI = sum(!is.na(SAVI)),
     .groups = "drop"
   )
+
+data_monthly_EUNISa_1 <- data_monthly_EUNISa_1 %>%
+  # Add label with n
+  left_join(data_monthly_EUNISa_1 %>%
+              group_by(EUNISa_1) %>%
+              summarise(n_total = sum(n_NDVI, na.rm = TRUE)), 
+            by = "EUNISa_1") %>%
+  mutate(EUNISa_1_label = paste0(EUNISa_1, " (n = ", n_total, ")"))
+
 data_monthly_EUNISa_2 <- data_RS_S2_bands_indices %>%
-  mutate(month = month(date, label = TRUE, abbr = TRUE)) %>%
+  mutate(month = month(date, label = TRUE, abbr = TRUE, locale="EN-us")) %>%
   group_by(month, EUNISa_1, EUNISa_1_descr, EUNISa_2, EUNISa_2_descr) %>%
   summarise(
     mean_NDVI = mean(NDVI, na.rm = TRUE),
@@ -1393,29 +1131,50 @@ data_monthly_EUNISa_2 <- data_RS_S2_bands_indices %>%
     n_SAVI = sum(!is.na(SAVI)),
     .groups = "drop"
   )
+
+data_monthly_EUNISa_2 <- data_monthly_EUNISa_2 %>%
+  # Add label with n
+  left_join(data_monthly_EUNISa_2 %>%
+              group_by(EUNISa_2) %>%
+              summarise(n_total = sum(n_NDVI, na.rm = TRUE)), 
+            by = "EUNISa_2") %>%
+  mutate(EUNISa_2_label = paste0(EUNISa_2, " (n = ", n_total, ")"))
 ```
+
+## EUNIS level 1
 
 ```{r}
 # Plots
 
 # EUNISa_1
-ggplot(data_monthly_EUNISa_1, 
-       aes(x = month, y = mean_NDVI, color = EUNISa_1, group = EUNISa_1)) +
-  geom_point(aes(size = n_NDVI)) +
-  geom_line() +
+ggplot(data_monthly_EUNISa_1 %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_1_label, EUNISa_1_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_1, EUNISa_1_descr, sep = " - ")), 
+       aes(x = month, y = mean_NDVI, color = EUNIS, 
+           group = EUNISa_1_label)) +
+  geom_point() +
+  geom_line(aes(group = EUNISa_1)) +
   #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
-                #width = 0.2) +
+  #width = 0.2) +
   labs(
     title = "Monthly NDVI by Habitat Type",
     x = "Month",
     y = "NDVI",
-    color = "Habitat (EUNISa_1)"
+    color = "Habitat (EUNIS1)"
   ) +
   theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS1_NDVI.jpeg"),
+  dpi = 300, width = 6, height = 2.5)
 
-ggplot(data_monthly_EUNISa_1, 
-       aes(x = month, y = mean_EVI, color = EUNISa_1, group = EUNISa_1)) +
-  geom_point(aes(size = n_EVI)) +
+ggplot(data_monthly_EUNISa_1 %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_1_label, EUNISa_1_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_1, EUNISa_1_descr, sep = " - ")), 
+       aes(x = month, y = mean_EVI, color = EUNIS, 
+           group = EUNISa_1_label)) +
+  geom_point() +
   geom_line() +
   #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
                 #width = 0.2) +
@@ -1423,13 +1182,20 @@ ggplot(data_monthly_EUNISa_1,
     title = "Monthly EVI by Habitat Type",
     x = "Month",
     y = "EVI",
-    color = "Habitat (EUNISa_1)"
+    color = "Habitat (EUNIS1)"
   ) +
   theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS1_EVI.jpeg"),
+  dpi = 300, width = 6, height = 2.5)
 
-ggplot(data_monthly_EUNISa_1, 
-       aes(x = month, y = mean_SAVI, color = EUNISa_1, group = EUNISa_1)) +
-  geom_point(aes(size = n_SAVI)) +
+ggplot(data_monthly_EUNISa_1 %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_1_label, EUNISa_1_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_1, EUNISa_1_descr, sep = " - ")), 
+       aes(x = month, y = mean_SAVI, color = EUNIS, 
+           group = EUNISa_1_label)) +
+  geom_point() +
   geom_line() +
   #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
                 #width = 0.2) +
@@ -1437,252 +1203,441 @@ ggplot(data_monthly_EUNISa_1,
     title = "Monthly SAVI by Habitat Type",
     x = "Month",
     y = "SAVI",
-    color = "Habitat (EUNISa_1)"
+    color = "Habitat (EUNIS1)"
   ) +
   theme_minimal()
-
-# EUNISa_2
-
-# NDVI
-ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "Q" & !is.na(EUNISa_2)) %>%
-         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
-       aes(x = month, y = mean_NDVI, color = EUNIS, group = EUNIS)) +
-  geom_point(aes(size = n_NDVI)) +
-  geom_line() +
-  #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
-                #width = 0.2) +
-  labs(
-    title = "Monthly NDVI by Habitat Type",
-    x = "Month",
-    y = "NDVI",
-    color = "Habitat (EUNISa_2)"
-  ) +
-  theme_minimal()
-
-ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "R" & !is.na(EUNISa_2)) %>%
-         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
-       aes(x = month, y = mean_NDVI, color = EUNIS, group = EUNIS)) +
-  geom_point(aes(size = n_NDVI)) +
-  geom_line() +
-  #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
-                #width = 0.2) +
-  labs(
-    title = "Monthly NDVI by Habitat Type",
-    x = "Month",
-    y = "NDVI",
-    color = "Habitat (EUNISa_2)"
-  ) +
-  theme_minimal()
-
-ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "S" & !is.na(EUNISa_2)) %>%
-         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
-       aes(x = month, y = mean_NDVI, color = EUNIS, group = EUNIS)) +
-  geom_point(aes(size = n_NDVI)) +
-  geom_line() +
-  #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
-                #width = 0.2) +
-  labs(
-    title = "Monthly NDVI by Habitat Type",
-    x = "Month",
-    y = "NDVI",
-    color = "Habitat (EUNISa_2)"
-  ) +
-  theme_minimal()
-
-ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "T" & !is.na(EUNISa_2)) %>%
-         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
-       aes(x = month, y = mean_NDVI, color = EUNIS, group = EUNIS)) +
-  geom_point(aes(size = n_NDVI)) +
-  geom_line() +
-  #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
-                #width = 0.2) +
-  labs(
-    title = "Monthly NDVI by Habitat Type",
-    x = "Month",
-    y = "NDVI",
-    color = "Habitat (EUNISa_2)"
-  ) +
-  theme_minimal()
-
-# EVI
-ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "Q" & !is.na(EUNISa_2)) %>%
-         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
-       aes(x = month, y = mean_EVI, color = EUNIS, group = EUNIS)) +
-  geom_point(aes(size = n_EVI)) +
-  geom_line() +
-  #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
-                #width = 0.2) +
-  labs(
-    title = "Monthly EVI by Habitat Type",
-    x = "Month",
-    y = "EVI",
-    color = "Habitat (EUNISa_2)"
-  ) +
-  theme_minimal()
-
-ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "R" & !is.na(EUNISa_2)) %>%
-         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
-       aes(x = month, y = mean_EVI, color = EUNIS, group = EUNIS)) +
-  geom_point(aes(size = n_EVI)) +
-  geom_line() +
-  #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
-                #width = 0.2) +
-  labs(
-    title = "Monthly EVI by Habitat Type",
-    x = "Month",
-    y = "EVI",
-    color = "Habitat (EUNISa_2)"
-  ) +
-  theme_minimal()
-
-ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "S" & !is.na(EUNISa_2)) %>%
-         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
-       aes(x = month, y = mean_EVI, color = EUNIS, group = EUNIS)) +
-  geom_point(aes(size = n_EVI)) +
-  geom_line() +
-  #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
-                #width = 0.2) +
-  labs(
-    title = "Monthly EVI by Habitat Type",
-    x = "Month",
-    y = "EVI",
-    color = "Habitat (EUNISa_2)"
-  ) +
-  theme_minimal()
-
-ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "T" & !is.na(EUNISa_2)) %>%
-         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
-       aes(x = month, y = mean_EVI, color = EUNIS, group = EUNIS)) +
-  geom_point(aes(size = n_EVI)) +
-  geom_line() +
-  #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
-                #width = 0.2) +
-  labs(
-    title = "Monthly EVI by Habitat Type",
-    x = "Month",
-    y = "EVI",
-    color = "Habitat (EUNISa_2)"
-  ) +
-  theme_minimal()
-
-# SAVI
-ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "Q" & !is.na(EUNISa_2)) %>%
-         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
-       aes(x = month, y = mean_SAVI, color = EUNIS, group = EUNIS)) +
-  geom_point(aes(size = n_SAVI)) +
-  geom_line() +
-  #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
-                #width = 0.2) +
-  labs(
-    title = "Monthly SAVI by Habitat Type",
-    x = "Month",
-    y = "SAVI",
-    color = "Habitat (EUNISa_2)"
-  ) +
-  theme_minimal()
-
-ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "R" & !is.na(EUNISa_2)) %>%
-         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
-       aes(x = month, y = mean_SAVI, color = EUNIS, group = EUNIS)) +
-  geom_point(aes(size = n_SAVI)) +
-  geom_line() +
-  #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
-                #width = 0.2) +
-  labs(
-    title = "Monthly SAVI by Habitat Type",
-    x = "Month",
-    y = "SAVI",
-    color = "Habitat (EUNISa_2)"
-  ) +
-  theme_minimal()
-
-ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "S" & !is.na(EUNISa_2)) %>%
-         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
-       aes(x = month, y = mean_SAVI, color = EUNIS, group = EUNIS)) +
-  geom_point(aes(size = n_SAVI)) +
-  geom_line() +
-  #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
-                #width = 0.2) +
-  labs(
-    title = "Monthly SAVI by Habitat Type",
-    x = "Month",
-    y = "SAVI",
-    color = "Habitat (EUNISa_2)"
-  ) +
-  theme_minimal()
-
-ggplot(data_monthly_EUNISa_2 %>% filter(EUNISa_1 == "T" & !is.na(EUNISa_2)) %>%
-         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
-       aes(x = month, y = mean_SAVI, color = EUNIS, group = EUNIS)) +
-  geom_point(aes(size = n_SAVI)) +
-  geom_line() +
-  #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
-                #width = 0.2) +
-  labs(
-    title = "Monthly SAVI by Habitat Type",
-    x = "Month",
-    y = "SAVI",
-    color = "Habitat (EUNISa_2)"
-  ) +
-  theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS1_SAVI.jpeg"),
+  dpi = 300, width = 6, height = 2.5)
 ```
 
-# MODIFY: Calculate other phenological metrics
+## EUNIS level 2
+
+### Q
+
+```{r}
+# NDVI
+ggplot(data_monthly_EUNISa_2 %>% 
+         dplyr::filter(EUNISa_1 == "Q" & !is.na(EUNISa_2)) %>%
+         # Remove those with EUNIS level 2 that does not match current classif
+         dplyr::filter(EUNISa_2 != "Qa" & EUNISa_2 != "Qb") %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_2_label, EUNISa_2_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_NDVI, color = EUNIS, group = EUNIS)) +
+  geom_point() +
+  geom_line() +
+  #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly NDVI by Habitat Type",
+    x = "Month",
+    y = "NDVI",
+    color = "Habitat (EUNIS2)"
+  ) +
+  theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS2_Q_NDVI.jpeg"),
+  dpi = 300, width = 7, height = 2.5)
+
+# EVI
+ggplot(data_monthly_EUNISa_2 %>% 
+         dplyr::filter(EUNISa_1 == "Q" & !is.na(EUNISa_2)) %>%
+         # Remove those with EUNIS level 2 that does not match current classif
+         dplyr::filter(EUNISa_2 != "Qa" & EUNISa_2 != "Qb") %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_2_label, EUNISa_2_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_EVI, color = EUNIS, group = EUNIS)) +
+  geom_point() +
+  geom_line() +
+  #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly EVI by Habitat Type",
+    x = "Month",
+    y = "EVI",
+    color = "Habitat (EUNIS2)"
+  ) +
+  theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS2_Q_EVI.jpeg"),
+  dpi = 300, width = 7, height = 2.5)
+
+# SAVI
+ggplot(data_monthly_EUNISa_2 %>%
+         dplyr::filter(EUNISa_1 == "Q" & !is.na(EUNISa_2)) %>%
+         # Remove those with EUNIS level 2 that does not match current classif
+         dplyr::filter(EUNISa_2 != "Qa" & EUNISa_2 != "Qb") %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_2_label, EUNISa_2_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_SAVI, color = EUNIS, group = EUNIS)) +
+  geom_point() +
+  geom_line() +
+  #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly SAVI by Habitat Type",
+    x = "Month",
+    y = "SAVI",
+    color = "Habitat (EUNIS2)"
+  ) +
+  theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS2_Q_SAVI.jpeg"),
+  dpi = 300, width = 7, height = 2.5)
+```
+
+### R
+
+```{r}
+ggplot(data_monthly_EUNISa_2 %>% 
+         dplyr::filter(EUNISa_1 == "R" & !is.na(EUNISa_2)) %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_2_label, EUNISa_2_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_NDVI, color = EUNIS, group = EUNIS)) +
+  geom_point() +
+  geom_line() +
+  #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly NDVI by Habitat Type",
+    x = "Month",
+    y = "NDVI",
+    color = "Habitat (EUNIS2)"
+  ) +
+  theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS2_R_NDVI.jpeg"),
+  dpi = 300, width = 7, height = 2.5)
+
+ggplot(data_monthly_EUNISa_2 %>% 
+         dplyr::filter(EUNISa_1 == "R" & !is.na(EUNISa_2)) %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_2_label, EUNISa_2_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_EVI, color = EUNIS, group = EUNIS)) +
+  geom_point() +
+  geom_line() +
+  #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly EVI by Habitat Type",
+    x = "Month",
+    y = "EVI",
+    color = "Habitat (EUNIS2)"
+  ) +
+  theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS2_R_EVI.jpeg"),
+  dpi = 300, width = 7, height = 2.5)
+
+ggplot(data_monthly_EUNISa_2 %>% 
+         dplyr::filter(EUNISa_1 == "R" & !is.na(EUNISa_2)) %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_2_label, EUNISa_2_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_SAVI, color = EUNIS, group = EUNIS)) +
+  geom_point() +
+  geom_line() +
+  #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly SAVI by Habitat Type",
+    x = "Month",
+    y = "SAVI",
+    color = "Habitat (EUNIS2)"
+  ) +
+  theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS2_R_SAVI.jpeg"),
+  dpi = 300, width = 7, height = 2.5)
+```
+
+### S
+
+```{r}
+ggplot(data_monthly_EUNISa_2 %>% 
+         dplyr::filter(EUNISa_1 == "S" & !is.na(EUNISa_2)) %>%
+         # Remove those with EUNIS level 2 that does not match current classif
+         dplyr::filter(EUNISa_2 != "Sa" & EUNISa_2 != "Sb") %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_2_label, EUNISa_2_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_NDVI, color = EUNIS, group = EUNIS)) +
+  geom_point() +
+  geom_line() +
+  #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly NDVI by Habitat Type",
+    x = "Month",
+    y = "NDVI",
+    color = "Habitat (EUNIS2)"
+  ) +
+  theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS2_S_NDVI.jpeg"),
+  dpi = 300, width = 8, height = 2.5)
+
+ggplot(data_monthly_EUNISa_2 %>% 
+         dplyr::filter(EUNISa_1 == "S" & !is.na(EUNISa_2)) %>%
+         # Remove those with EUNIS level 2 that does not match current classif
+         dplyr::filter(EUNISa_2 != "Sa" & EUNISa_2 != "Sb") %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_2_label, EUNISa_2_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_EVI, color = EUNIS, group = EUNIS)) +
+  geom_point() +
+  geom_line() +
+  #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly EVI by Habitat Type",
+    x = "Month",
+    y = "EVI",
+    color = "Habitat (EUNIS2)"
+  ) +
+  theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS2_S_EVI.jpeg"),
+  dpi = 300, width = 8, height = 2.5)
+
+ggplot(data_monthly_EUNISa_2 %>% 
+         dplyr::filter(EUNISa_1 == "S" & !is.na(EUNISa_2)) %>%
+         # Remove those with EUNIS level 2 that does not match current classif
+         dplyr::filter(EUNISa_2 != "Sa" & EUNISa_2 != "Sb") %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_2_label, EUNISa_2_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_SAVI, color = EUNIS, group = EUNIS)) +
+  geom_point() +
+  geom_line() +
+  #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly SAVI by Habitat Type",
+    x = "Month",
+    y = "SAVI",
+    color = "Habitat (EUNIS2)"
+  ) +
+  theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS2_S_SAVI.jpeg"),
+  dpi = 300, width = 8, height = 2.5)
+```
+
+### T
+
+```{r}
+ggplot(data_monthly_EUNISa_2 %>% 
+         dplyr::filter(EUNISa_1 == "T" & !is.na(EUNISa_2)) %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_2_label, EUNISa_2_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_NDVI, color = EUNIS, group = EUNIS)) +
+  geom_point() +
+  geom_line() +
+  #geom(aes(ymin = mean_NDVI - sd_NDVI, ymax = mean_NDVI + sd_NDVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly NDVI by Habitat Type",
+    x = "Month",
+    y = "NDVI",
+    color = "Habitat (EUNIS2)"
+  ) +
+  theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS2_T_NDVI.jpeg"),
+  dpi = 300, width = 6, height = 2.5)
+
+ggplot(data_monthly_EUNISa_2 %>% 
+         dplyr::filter(EUNISa_1 == "T" & !is.na(EUNISa_2)) %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_2_label, EUNISa_2_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_EVI, color = EUNIS, group = EUNIS)) +
+  geom_point() +
+  geom_line() +
+  #geom(aes(ymin = mean_EVI - sd_EVI, ymax = mean_EVI + sd_EVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly EVI by Habitat Type",
+    x = "Month",
+    y = "EVI",
+    color = "Habitat (EUNIS2)"
+  ) +
+  theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS2_T_EVI.jpeg"),
+  dpi = 300, width = 6, height = 2.5)
+
+ggplot(data_monthly_EUNISa_2 %>% 
+         dplyr::filter(EUNISa_1 == "T" & !is.na(EUNISa_2)) %>%
+         # If we want to have n points
+         # mutate(EUNIS = paste(EUNISa_2_label, EUNISa_2_descr, sep = " - ")), 
+         mutate(EUNIS = paste(EUNISa_2, EUNISa_2_descr, sep = " - ")), 
+       aes(x = month, y = mean_SAVI, color = EUNIS, group = EUNIS)) +
+  geom_point() +
+  geom_line() +
+  #geom(aes(ymin = mean_SAVI - sd_SAVI, ymax = mean_SAVI + sd_SAVI), 
+                #width = 0.2) +
+  labs(
+    title = "Monthly SAVI by Habitat Type",
+    x = "Month",
+    y = "SAVI",
+    color = "Habitat (EUNIS2)"
+  ) +
+  theme_minimal()
+ggsave(
+  here("output", "figures", "monthly_spectrophenology_S2", "EUNIS2_T_SAVI.jpeg"),
+  dpi = 300, width = 6, height = 2.5)
+```
+
+# Calculate other phenological metrics
 
 ```{r}
 final_RS_data <- final_RS_data %>%
   mutate(
+    # with slope method
     # Growing season duration
-    NDVI_gsd = NDVI_eos_doy - NDVI_sos_doy,
-    EVI_gsd = NDVI_eos_doy - NDVI_sos_doy,
-    SAVI_gsd = SAVI_eos_doy - SAVI_sos_doy,
+    NDVI_slope_gsd = NDVI_eos_slope_doy - NDVI_sos_slope_doy,
+    EVI_slope_gsd = NDVI_eos_slope_doy - NDVI_sos_slope_doy,
+    SAVI_slope_gsd = SAVI_eos_slope_doy - SAVI_sos_slope_doy,
     # Difference in value between pos and sos
-    NDVI_diff_pos_sos_value = NDVI_pos_value - NDVI_sos_value,
-    EVI_diff_pos_sos_value = EVI_pos_value - EVI_sos_value,
-    SAVI_diff_pos_sos_value = SAVI_pos_value - SAVI_sos_value,
+    NDVI_diff_pos_sos_slope_value = NDVI_pos_value - NDVI_sos_slope_value,
+    EVI_diff_pos_sos_slope_value = EVI_pos_value - EVI_sos_slope_value,
+    SAVI_diff_pos_sos_slope_value = SAVI_pos_value - SAVI_sos_slope_value,
     # Difference in value between pos and eos
-    NDVI_diff_pos_eos_value = NDVI_pos_value - NDVI_eos_value,
-    EVI_diff_pos_eos_value = EVI_pos_value - EVI_eos_value,
-    SAVI_diff_pos_eos_value = SAVI_pos_value - SAVI_eos_value,
+    NDVI_diff_pos_eos_slope_value = NDVI_pos_value - NDVI_eos_slope_value,
+    EVI_diff_pos_eos_slope_value = EVI_pos_value - EVI_eos_slope_value,
+    SAVI_diff_pos_eos_slope_value = SAVI_pos_value - SAVI_eos_slope_value,
     # Difference in doy between pos and sos
-    NDVI_diff_pos_sos_doy = NDVI_pos_doy - NDVI_sos_doy,
-    EVI_diff_pos_sos_doy = EVI_pos_doy - EVI_sos_doy,
-    SAVI_diff_pos_sos_doy = SAVI_pos_doy - SAVI_sos_doy,
-    # Difference in doy between eos and pos
-    NDVI_diff_eos_pos_doy = NDVI_eos_doy - NDVI_pos_doy,
-    EVI_diff_eos_pos_doy = EVI_eos_doy - EVI_pos_doy,
-    SAVI_diff_eos_pos_doy = SAVI_eos_doy - SAVI_pos_doy
+    NDVI_diff_pos_sos_slope_doy = NDVI_pos_doy - NDVI_sos_slope_doy,
+    EVI_diff_pos_sos_slope_doy = EVI_pos_doy - EVI_sos_slope_doy,
+    SAVI_diff_pos_sos_slope_doy = SAVI_pos_doy - SAVI_sos_slope_doy,
+    # Absolute difference in doy between pos and eos
+    NDVI_diff_pos_eos_slope_doy = abs(NDVI_pos_doy - NDVI_eos_slope_doy),
+    EVI_diff_pos_eos_slope_doy = abs(EVI_pos_doy - EVI_eos_slope_doy),
+    SAVI_diff_pos_eos_slope_doy = abs(SAVI_pos_doy - SAVI_eos_slope_doy),
+    # With threshold method
+    # Growing season duration
+    NDVI_threshold_gsd = NDVI_eos_threshold_doy - NDVI_sos_threshold_doy,
+    EVI_threshold_gsd = NDVI_eos_threshold_doy - NDVI_sos_threshold_doy,
+    SAVI_threshold_gsd = SAVI_eos_threshold_doy - SAVI_sos_threshold_doy,
+    # Difference in value between pos and sos
+    NDVI_diff_pos_sos_threshold_value =
+      NDVI_pos_value - NDVI_sos_threshold_value,
+    EVI_diff_pos_sos_threshold_value = 
+      EVI_pos_value - EVI_sos_threshold_value,
+    SAVI_diff_pos_sos_threshold_value = 
+      SAVI_pos_value - SAVI_sos_threshold_value,
+    # Difference in value between pos and eos
+    NDVI_diff_pos_eos_threshold_value =
+      NDVI_pos_value - NDVI_eos_threshold_value,
+    EVI_diff_pos_eos_threshold_value = 
+      EVI_pos_value - EVI_eos_threshold_value,
+    SAVI_diff_pos_eos_threshold_value = 
+      SAVI_pos_value - SAVI_eos_threshold_value,
+    # Difference in doy between pos and sos
+    NDVI_diff_pos_sos_threshold_doy = NDVI_pos_doy - NDVI_sos_threshold_doy,
+    EVI_diff_pos_sos_threshold_doy = EVI_pos_doy - EVI_sos_threshold_doy,
+    SAVI_diff_pos_sos_threshold_doy = SAVI_pos_doy - SAVI_sos_threshold_doy,
+    # Absolute difference in doy between pos and eos
+    NDVI_diff_pos_eos_threshold_doy = 
+      abs(NDVI_pos_doy - NDVI_eos_threshold_doy),
+    EVI_diff_pos_eos_threshold_doy = 
+      abs(EVI_pos_doy - EVI_eos_threshold_doy),
+    SAVI_diff_pos_eos_threshold_doy = 
+      abs(SAVI_pos_doy - SAVI_eos_threshold_doy),
+    # With months method
+    # Difference in value between pos and march
+    NDVI_diff_pos_march_value = NDVI_pos_value - NDVI_avg_value_03,
+    EVI_diff_pos_march_value = EVI_pos_value - EVI_avg_value_03,
+    SAVI_diff_pos_march_value = SAVI_pos_value - SAVI_avg_value_03,
+    # Difference in value between pos and oct
+    NDVI_diff_pos_oct_value = NDVI_pos_value - NDVI_avg_value_10,
+    EVI_diff_pos_oct_value = EVI_pos_value - EVI_avg_value_10,
+    SAVI_diff_pos_oct_value = SAVI_pos_value - SAVI_avg_value_10,
+    # Difference in doy between pos and march
+    NDVI_diff_pos_march_doy = NDVI_pos_doy - 75, 
+    EVI_diff_pos_march_doy = EVI_pos_doy - 75,
+    SAVI_diff_pos_march_doy = SAVI_pos_doy - 75,
+    # Difference in doy between pos and oct
+    NDVI_diff_pos_oct_doy = abs(NDVI_pos_doy - 285),
+    EVI_diff_pos_oct_doy = abs(EVI_pos_doy - 285),
+    SAVI_diff_pos_oct_doy = abs(SAVI_pos_doy - 285)
   )
 ```
 
 ## Checks
 
+### Slope method
+
 ```{r}
 # Growing season duration should be positive
 nrow(final_RS_data %>% 
-       dplyr::filter(NDVI_gsd <= 0 | EVI_gsd <= 0 | SAVI_gsd <= 0))
+       dplyr::filter(NDVI_slope_gsd <= 0 | EVI_slope_gsd <= 0 | 
+                       SAVI_slope_gsd <= 0))
 # Difference in value between pos and sos should be positive
 nrow(final_RS_data %>%
-       dplyr::filter(NDVI_diff_pos_sos_value <= 0))
+       dplyr::filter(NDVI_diff_pos_sos_slope_value <= 0))
 nrow(final_RS_data %>%
-       dplyr::filter(EVI_diff_pos_sos_value <= 0))
+       dplyr::filter(EVI_diff_pos_sos_slope_value <= 0))
 nrow(final_RS_data %>%
-       dplyr::filter(SAVI_diff_pos_sos_value <= 0))
+       dplyr::filter(SAVI_diff_pos_sos_slope_value <= 0))
 # Difference in value between pos and eos should be positive
 nrow(final_RS_data %>%
-       dplyr::filter(NDVI_diff_pos_eos_value <= 0))
+       dplyr::filter(NDVI_diff_pos_eos_slope_value <= 0))
 nrow(final_RS_data %>%
-       dplyr::filter(EVI_diff_pos_eos_value <= 0))
+       dplyr::filter(EVI_diff_pos_eos_slope_value <= 0))
 nrow(final_RS_data %>%
-       dplyr::filter(SAVI_diff_pos_eos_value <= 0))
+       dplyr::filter(SAVI_diff_pos_eos_slope_value <= 0))
 # Difference in doy between pos and sos should be positive
 nrow(final_RS_data %>%
-       dplyr::filter(NDVI_diff_pos_sos_doy <= 0 | EVI_diff_pos_sos_doy <= 0 |
-                       SAVI_diff_pos_sos_doy <= 0))
+       dplyr::filter(NDVI_diff_pos_sos_slope_doy <= 0 |
+                       EVI_diff_pos_sos_slope_doy <= 0 |
+                       SAVI_diff_pos_sos_slope_doy <= 0))
 # Difference in doy between eos and pos should be positive
 nrow(final_RS_data %>%
-       dplyr::filter(NDVI_diff_eos_pos_doy <= 0 | EVI_diff_eos_pos_doy <= 0 |
-                       SAVI_diff_eos_pos_doy <= 0))
+       dplyr::filter(NDVI_diff_pos_eos_slope_doy <= 0 |
+                       EVI_diff_pos_eos_slope_doy <= 0 |
+                       SAVI_diff_pos_eos_slope_doy <= 0))
+```
+
+### Threshold method
+
+```{r}
+# Growing season duration should be positive
+nrow(final_RS_data %>% 
+       dplyr::filter(NDVI_threshold_gsd <= 0 | EVI_threshold_gsd <= 0 | 
+                       SAVI_threshold_gsd <= 0))
+# Difference in value between pos and sos should be positive
+nrow(final_RS_data %>%
+       dplyr::filter(NDVI_diff_pos_sos_threshold_value <= 0))
+nrow(final_RS_data %>%
+       dplyr::filter(EVI_diff_pos_sos_threshold_value <= 0))
+nrow(final_RS_data %>%
+       dplyr::filter(SAVI_diff_pos_sos_threshold_value <= 0))
+# Difference in value between pos and eos should be positive
+nrow(final_RS_data %>%
+       dplyr::filter(NDVI_diff_pos_eos_threshold_value <= 0))
+nrow(final_RS_data %>%
+       dplyr::filter(EVI_diff_pos_eos_threshold_value <= 0))
+nrow(final_RS_data %>%
+       dplyr::filter(SAVI_diff_pos_eos_threshold_value <= 0))
+# Difference in doy between pos and sos should be positive
+nrow(final_RS_data %>%
+       dplyr::filter(NDVI_diff_pos_sos_threshold_doy <= 0 |
+                       EVI_diff_pos_sos_threshold_doy <= 0 |
+                       SAVI_diff_pos_sos_threshold_doy <= 0))
+# Difference in doy between eos and pos should be positive
+nrow(final_RS_data %>%
+       dplyr::filter(NDVI_diff_pos_eos_threshold_doy <= 0 |
+                       EVI_diff_pos_eos_threshold_doy <= 0 |
+                       SAVI_diff_pos_eos_threshold_doy <= 0))
 ```
 
 # HERE: Run. Detect number of peaks in smoothed curves
@@ -1818,20 +1773,24 @@ print(plots_EVI_0peaks[[1]])
 
 ## Further checks (EVI)
 
+### Slope method
+
 ```{r}
 # Difference in value between pos and sos should be positive
 nrow(final_RS_data %>%
-       dplyr::filter(EVI_diff_pos_sos_value <= 0))
+       dplyr::filter(EVI_diff_pos_sos_slope_value <= 0))
 final_RS_data %>%
-  dplyr::filter(EVI_diff_pos_sos_value <= 0) %>%
+  dplyr::filter(EVI_diff_pos_sos_slope_value <= 0) %>%
   count(EVI_num_peaks)
 # Difference in value between pos and eos should be positive
 nrow(final_RS_data %>%
-       dplyr::filter(EVI_diff_pos_eos_value <= 0))
+       dplyr::filter(EVI_diff_pos_eos_slope_value <= 0))
 final_RS_data %>%
-  dplyr::filter(EVI_diff_pos_eos_value <= 0) %>%
+  dplyr::filter(EVI_diff_pos_eos_slope_value <= 0) %>%
   count(EVI_num_peaks)
 ```
+
+### Threshold method
 
 # Add some columns needed
 
@@ -1876,7 +1835,7 @@ final_RS_data <- final_RS_data %>%
 
 ```{r}
 write_tsv(final_RS_data,
-          here("data", "clean","final_RS_data_bands_S2_all.csv"))
+          here("data", "clean","final_RS_data_bands_S2_all_20250804.csv"))
 ```
 
 # Session info
@@ -1884,4 +1843,3 @@ write_tsv(final_RS_data,
 ```{r}
 sessionInfo()
 ```
-

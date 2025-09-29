@@ -1,0 +1,1078 @@
+---
+title: "Script to validate points in ReSurvey database using RS data (Satellite Embeddings Dataset)"
+subtitle: "Validation done with ALL points (all observations)"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This R script is used to validate the points in the ReSurvey database using only bands from the Google Satellite Embedding dataset: https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_SATELLITE_EMBEDDING_V1_ANNUAL#description
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(gridExtra)
+library(readxl)
+library(scales)
+library(sf)
+library(rnaturalearth)
+library(dtplyr)
+library(lme4)
+library(lmerTest)
+library(car)
+library(ggeffects)
+library(party)
+library(partykit)
+library(moreparty)
+library(doParallel)
+library(strucchange)
+library(ggparty)
+library(caret)
+library(moreparty)
+library(randomForest)
+library(pROC)
+library(corrplot)
+library(rlang)
+library(stringr)
+library(beepr)
+library(foreach)
+library(permimp)
+library(yardstick)
+```
+
+# Define printall function
+
+```{r}
+printall <- function(tibble) {
+  print(tibble, width = Inf)
+  }
+```
+
+# Load geom_flat_violin plot
+
+```{r}
+source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/fb53bd97121f7f9ce947837ef1a4c65a73bffb3f/geom_flat_violin.R")
+```
+
+# Load previously created objects
+
+```{r}
+# Define the folder path
+folder_path <- here("objects", "RF", "Satellite_Embeddings")
+
+# List all .RData or .rda files in the folder
+rdata_files <- list.files(folder_path, full.names = TRUE)
+
+# Load each file
+lapply(rdata_files, load, envir = .GlobalEnv)
+```
+
+# Read data
+
+```{r}
+data_validation <- read_tsv(here(
+  "data", "clean","final_RS_data_SatEmb_20250922.csv"))
+```
+
+No parsing issues!
+
+# Some data managenemt
+
+## TO-DO: Missing data checks
+
+Do when all RS data is ready!
+
+# Distributions all bioregions
+
+```{r}
+# Define a function to create histograms
+plot_histogram <- function(data, x_var, x_label) {
+  ggplot(data %>%
+           dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
+         aes(x = !!sym(x_var))) +
+    geom_histogram(color = "black", fill = "white") +
+    labs(x = x_label, y = "Frequency") +
+    theme_bw()
+}
+```
+
+```{r}
+# Define a function to create plots with violin + boxplot + points
+distr_plot <- function(data, y_vars, y_labels) {
+  for (i in seq_along(y_vars)) {
+    y_var <- y_vars[[i]]
+    y_label <- y_labels[[i]]
+    
+    p <- ggplot(data = data %>%
+                  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
+                aes(x = EUNISa_1_descr, y = !!sym(y_var), fill = EUNISa_1_descr)) +
+      geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+      geom_point(aes(y = !!sym(y_var), color = EUNISa_1_descr),
+                 position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+      geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+      stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
+      stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                     label = length(x)),
+                   geom = "text", aes(label = ..label..), vjust = 0.5) +
+      labs(y = y_label, x = "EUNIS level 1") +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+      guides(fill = FALSE, color = FALSE) +
+      theme_bw() + coord_flip()
+    
+    print(p)
+  }
+}
+```
+
+
+Histograms to check that max and min values are ok:
+
+```{r}
+plot_histogram(data_validation, "A00", "A00")
+plot_histogram(data_validation, "A01", "A01")
+plot_histogram(data_validation, "A23", "A23")
+plot_histogram(data_validation, "A32", "A32")
+plot_histogram(data_validation, "A50", "A50")
+plot_histogram(data_validation, "A61", "A61")
+plot_histogram(data_validation, "A63", "A63")
+```
+
+Distribution plots:
+
+```{r message=FALSE, warning=FALSE}
+distr_plot(data_validation,
+           c("A00", "A01", "A10", "A22", "A33",
+             "A40", "A53", "A61", "A62", "A63"),
+           c("A00", "A01", "A10", "A22", "A33",
+             "A40", "A53", "A61", "A62", "A63"))
+```
+
+# Distributions per bioregion
+
+```{r}
+# Define a function to create plots with violin + boxplot + points
+distr_plot_biogeo <- function(data, y_vars, y_labels) {
+  plots <- list()
+  
+  for (i in seq_along(y_vars)) {
+    y_var <- y_vars[[i]]
+    y_label <- y_labels[[i]]
+    
+    p <- ggplot(data = data %>%
+                  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
+                aes(x = EUNISa_1_descr, y = !!sym(y_var), fill = EUNISa_1_descr)) +
+      geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+      geom_point(aes(y = !!sym(y_var), color = EUNISa_1_descr),
+                 position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+      geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+      stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
+      stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                     label = length(x)),
+                   geom = "text", aes(label = ..label..), vjust = 0.5) +
+      labs(y = y_label, x = "EUNISa_1_descr") +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+      guides(fill = FALSE, color = FALSE) +
+      theme_bw() + coord_flip() + facet_wrap(~ biogeo)
+    
+    plots[[y_var]] <- p
+  }
+  
+  return(plots)
+}
+```
+
+Distribution plots:
+
+```{r message=FALSE, warning=FALSE}
+distr_plot_biogeo(data_validation,
+           c("A00", "A01", "A10", "A22", "A33",
+             "A40", "A53", "A61", "A62", "A63"),
+           c("A00", "A01", "A10", "A22", "A33",
+             "A40", "A53", "A61", "A62", "A63"))
+```
+
+# Define functions for RF models
+
+## Function for fitting RF models
+
+RF models fitted using the conditional inference version of random forest (first cforest in package party, now fastcforest in package moreparty). Suggested if the data are highly correlated. Cforest is more stable in deriving variable importance values in the presence of highly correlated variables, thus providing better accuracy in calculating variable importance (ref below).
+
+Hothorn, T., Hornik, K. and Zeileis, A. (2006) Unbiased Recursive Portioning: A Conditional Inference Framework. Journal of Computational and Graphical Statistics, 15, 651-
+674. http://dx.doi.org/10.1198/106186006X133933
+
+Choose the hyperparameter mtry based on the square root of the number of predictor variables:
+
+Hastie, T., Tibshirani, R., & Friedman, J. (2009). The elements of statistical
+learning: Data mining, inference, and prediction. Springer Science &
+Business Media.
+
+Maybe TO_DO:
+We variated ntree from 50 to 800 in steps of 50, leaving mtry constant at 2. Tis parameter variation showed that ntree=500 was optimal, while higher ntree led to no further model improvement (Supplementary Fig. S10). Subsequently, the hyperparameter mtry was varied from 2 to 8 with constant ntree=500. Here, mtry=3 led to the best results in almost all cases (Supplementary Fig. S11). Consequently, we chose ntree=500 and mtry=3 for our main analysis across all study sites.
+
+Define a function to run fastcforest models:
+
+```{r}
+run_rf <- function(vars_RF, train_data, response_var, ntree = 500) 
+  {
+  
+  # Detect and register available cores (leave one free)
+  n_cores <- parallel::detectCores() - 1
+  cl <- makeCluster(n_cores)
+  registerDoParallel(cl)
+  
+  train_name <- deparse(substitute(train_data))
+  
+  # Export necessary variables to the cluster
+  clusterExport(cl, varlist = c("vars_RF", "train_data", "response_var"),
+                envir = environment())
+
+  
+  # Set seed for reproducibility
+  set.seed(123)
+  
+  # Measure execution time
+  execution_time <- system.time({
+    rf_model <- fastcforest(
+      formula = reformulate(vars_RF, response = response_var),
+      data = train_data,
+      controls = party::cforest_control(
+        mtry = round(sqrt(length(vars_RF))),
+        ntree = ntree
+      ),
+      parallel = TRUE
+    )
+  })
+  
+  # Stop the cluster
+  stopCluster(cl)
+  
+  # Return both the model and execution time
+  list(model = rf_model, time = execution_time)
+}
+```
+
+## Function to compute variable importance
+
+```{r}
+# compute_varimp <- function(model, nperm = 100, 
+#                                    n_cores = parallel::detectCores() - 1) {
+#   # Set up parallel backend
+#   cl <- makeCluster(n_cores)
+#   registerDoParallel(cl)
+#   
+#   # Measure execution time
+#   execution_time <- system.time({
+#     varimp_list <- foreach(i = 1:nperm, .combine = '+', 
+#                            .packages = "party") %dopar% {
+#       varimp(model, conditional = FALSE, nperm = 1)
+#     }
+#   })
+#   
+#   stopCluster(cl)
+#   
+#   # Average the results
+#   varimp_avg <- varimp_list / nperm
+#   
+#   return(list(varimp = varimp_avg, time = execution_time))
+# }
+```
+
+Using permimp() en permimp package:
+https://cran.r-project.org/web/packages/permimp/vignettes/permimp-package.html#fn1
+
+```{r}
+compute_varimp <- function(model, nperm = 100) {
+
+  # Measure execution time
+  execution_time <- system.time({
+    varimp_result <- permimp(model, conditional = FALSE, progressBar = TRUE)
+  })
+
+  return(list(varimp = varimp_result, time = execution_time))
+}
+```
+
+## Function to compute CONDITIONAL variable importance
+
+```{r}
+compute_varimp_cond <- function(model, nperm = 100) {
+
+  # Measure execution time
+  execution_time <- system.time({
+    varimp_result <- permimp(model, conditional = TRUE, progressBar = TRUE)
+  })
+
+  return(list(varimp = varimp_result, time = execution_time))
+}
+```
+
+## Function to compute ROC (level 1)
+
+```{r}
+compute_roc_level1 <- function(model, test_data) {
+  # Measure execution time
+  execution_time <- system.time({
+    # Step 1: Predict probabilities
+    probabilities <- predict(model, newdata = test_data, type = "prob")
+    
+    # Step 2: Convert list of matrices to a proper data frame
+    prob_matrix <- t(sapply(probabilities, as.vector))
+    prob_df <- as.data.frame(prob_matrix)
+    colnames(prob_df) <- c("Q", "R", "S", "T")
+    
+    # Step 3: Prepare actual class labels
+    actual <- factor(test_data$EUNISa_1, levels = c("Q", "R", "S", "T"))
+    
+    # Step 4: Binarize actual labels
+    actual_bin <- model.matrix(~ actual - 1)
+    colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+    
+    # Step 5: Compute ROC data for each class
+    roc_data <- lapply(levels(actual), function(class) {
+      roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+      auc_val <- round(auc(roc_obj), 3)
+      data.frame(
+        FPR = rev(roc_obj$specificities),
+        TPR = rev(roc_obj$sensitivities),
+        Class = paste0(class, " (AUC = ", auc_val, ")")
+      )
+    }) %>% bind_rows()
+  })
+  
+  # Return both ROC data and execution time
+  return(list(roc = roc_data, time = execution_time))
+}
+```
+
+## Function to compute ROC (level 2)
+
+```{r}
+compute_roc_level2 <- function(model, test_data) {
+  # Measure execution time
+  execution_time <- system.time({
+    # Step 1: Predict probabilities
+    probabilities <- predict(model, newdata = test_data, type = "prob")
+    
+    # Step 2: Convert list of matrices to a proper data frame
+    prob_matrix <- t(sapply(probabilities, as.vector))
+    prob_df <- as.data.frame(prob_matrix)
+    colnames(prob_df) <- c("Q1", "Q2", "Q4", "Q5", "R1", "R2", "R3", "R4", "R5",
+                           "R6", "S3", "S4", "T1", "T3")
+    
+    # Step 3: Prepare actual class labels
+    actual <- factor(test_data$EUNISa_2, 
+                     levels = c("Q1", "Q2", "Q4", "Q5", "R1", "R2", "R3", "R4",
+                                "R5", "R6", "S3", "S4", "T1", "T3"))
+    
+    # Step 4: Binarize actual labels
+    actual_bin <- model.matrix(~ actual - 1)
+    colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+    
+    # Step 5: Compute ROC data for each class
+    roc_data <- lapply(levels(actual), function(class) {
+      roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+      auc_val <- round(auc(roc_obj), 3)
+      data.frame(
+        FPR = rev(roc_obj$specificities),
+        TPR = rev(roc_obj$sensitivities),
+        Class = paste0(class, " (AUC = ", auc_val, ")")
+      )
+    }) %>% bind_rows()
+  })
+  
+  # Return both ROC data and execution time
+  return(list(roc = roc_data, time = execution_time))
+}
+```
+
+# Define list of predictor vars
+
+```{r}
+vars_RF_SatEmb <- colnames(
+  data_validation)[startsWith(colnames(data_validation), "A")]
+vars_RF_SatEmb_CH <- c(vars_RF_SatEmb, "canopy_height")
+```
+
+# Correlation
+
+Correlation of all variables to be included in RF models:
+
+```{r}
+corrplot(data_validation %>% 
+           dplyr::select(starts_with("A")) %>%
+           cor(use = "pairwise.complete.obs"),
+         method = "color", type = "upper", tl.col = "black", tl.srt = 45)
+corrplot(data_validation %>% 
+           dplyr::select(starts_with("A"), canopy_height) %>%
+           cor(use = "pairwise.complete.obs"),
+         method = "color", type = "upper", tl.col = "black", tl.srt = 45)
+```
+
+# Rough validation
+
+Define a set of rules for a first validation of ALL ReSurvey data ("Expert-based" rules). Not very ambitious, only taking out observations that are clearly wrong on the basis of indicator values.
+
+Create column for first validation based on different indicators, where "wrong" is noted when the validation rule is not met. 
+
+Here only using validation based on canopy height, not NDWI.
+
+Define rules:
+
+```{r}
+data_validation <-
+  data_validation %>%
+  mutate(
+    valid_1_CH = case_when(
+      # R & Q points with high CH
+      EUNISa_1 %in% c("R", "Q") & canopy_height > 2 ~ "wrong",
+      # T points with low CH
+      EUNISa_1 == "T" & canopy_height < 3 ~ "wrong",
+      # S points with high CH
+      EUNISa_1 == "S" & canopy_height > 3 ~ "wrong",
+      TRUE ~ NA_character_),
+    # Count how many validation rules are not met
+    valid_1_count = rowSums(across(c(valid_1_CH), ~ . == "wrong"),
+                            na.rm = TRUE),
+    # Points where at least 1 rule not met
+    valid_1 = if_else(valid_1_count > 0, "At least 1 rule broken",
+                      "No rules broken so far")
+    )
+```
+
+# Fit RF models (level 1)
+
+## Without refinement
+
+### Get filtered data
+
+```{r}
+# No validation
+data_validation_novalid <- data_validation %>%
+  # Select only GPS points
+  dplyr::filter(Lctnmth == "Location with GPS" |
+                  Lctnmth == "Location with differential GPS") %>%
+  select(-Lctnmth) %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1))
+
+# Rough validation
+data_validation_roughvalid <- data_validation %>%
+  # Select only GPS points
+  dplyr::filter(Lctnmth == "Location with GPS" |
+                  Lctnmth == "Location with differential GPS") %>%
+  # Filter out points that have not passed the rough validation
+  dplyr::filter(valid_1 == "No rules broken so far") %>%
+  select(-Lctnmth, -valid_1) %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1))
+```
+
+### N points per category
+
+```{r}
+bind_rows(
+  data_validation_novalid %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(data = "data_validation_novalid") %>%
+    select(data, Q, R, S, T),
+  data_validation_roughvalid %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(data = "data_validation_roughvalid") %>%
+    select(data, Q, R, S, T),
+  )
+```
+
+### Split into training and test data sets
+
+```{r}
+set.seed(123)
+```
+
+```{r}
+train_indices_novalid <- sample(1:nrow(data_validation_novalid), 
+                         0.7 * nrow(data_validation_novalid))
+train_indices_roughvalid <- sample(1:nrow(data_validation_roughvalid), 
+                         0.7 * nrow(data_validation_roughvalid))
+```
+
+```{r}
+train_data_novalid <- data_validation_novalid[train_indices_novalid, ]
+train_data_roughvalid <- data_validation_roughvalid[train_indices_roughvalid, ]
+```
+
+```{r}
+test_data_novalid <- data_validation_novalid[-train_indices_novalid, ]
+test_data_roughvalid <- data_validation_roughvalid[-train_indices_roughvalid, ]
+```
+
+### Fit models
+
+```{r eval=FALSE, include=FALSE}
+# 1: No validation, SatEmb bands
+rf1 <- run_rf(vars_RF_SatEmb, train_data_novalid, "EUNISa_1")
+# 2: No validation, SatEmb bands + CH
+rf2 <- run_rf(vars_RF_SatEmb_CH, train_data_novalid, "EUNISa_1")
+# 3: Rough validation, SatEmb bands
+rf3 <- run_rf(vars_RF_SatEmb, train_data_roughvalid, "EUNISa_1")
+# 4: Rough validation, SatEmb bands + CH
+rf4 <- run_rf(vars_RF_SatEmb_CH, train_data_roughvalid, "EUNISa_1")
+```
+
+```{r}
+print(rf1$time)
+print(rf2$time)
+print(rf3$time)
+print(rf4$time)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(rf1, file = "objects/RF/Satellite_Embeddings/rf1_model_l1_novalid_norefin_SatEmb.Rdata")
+save(rf2, file = "objects/RF/Satellite_Embeddings/rf2_model_l1_novalid_norefin_Sat_Emb_CH.Rdata")
+save(rf3, file = "objects/RF/Satellite_Embeddings/rf3_model_l1_roughvalid_norefin_Sat_Emb.Rdata")
+save(rf4, file = "objects/RF/Satellite_Embeddings/rf4_model_l1_roughvalid_norefin_sat_Emb_CH.Rdata")
+```
+
+### Predictions
+
+```{r eval=FALSE, include=FALSE}
+predictions_rf1 <- predict(rf1$model, newdata = test_data_novalid,OOB = TRUE,
+                           type = "response")
+predictions_rf2 <- predict(rf2$model, newdata = test_data_novalid,OOB = TRUE,
+                           type = "response")
+predictions_rf3 <- predict(rf3$model, newdata = test_data_roughvalid,OOB = TRUE,
+                           type = "response")
+predictions_rf4 <- predict(rf4$model, newdata = test_data_roughvalid,OOB = TRUE,
+                           type = "response")
+```
+
+```{r eval=FALSE, include=FALSE}
+save(predictions_rf1, file = "objects/RF/Satellite_Embeddings/rf1_pred_l1_novalid_norefin_SatEmb.Rdata")
+save(predictions_rf2, file = "objects/RF/Satellite_Embeddings/rf1_pred_l1_novalid_norefin_SatEmb_CH.Rdata")
+save(predictions_rf3, file = "objects/RF/Satellite_Embeddings/rf3_pred_l1_roughvalid_norefin_Sat_Emb.Rdata")
+save(predictions_rf4, file = "objects/RF/Satellite_Embeddings/rf3_pred_l1_roughvalid_norefin_Sat_Emb_CH.Rdata")
+```
+
+### Confusion matrices
+
+```{r}
+# 1: No validation, SatEmb bands
+confusionMatrix(predictions_rf1, test_data_novalid$EUNISa_1)
+# 2: No validation, SatEmb bands + CH
+confusionMatrix(predictions_rf2, test_data_novalid$EUNISa_1)
+# 3: Rough validation, SatEmb bands
+confusionMatrix(predictions_rf3, test_data_roughvalid$EUNISa_1)
+# 4: Rough validation, SatEmb bands + CH
+confusionMatrix(predictions_rf4, test_data_roughvalid$EUNISa_1)
+```
+
+### Variable importance
+
+#### Unconditional
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf1 <- compute_varimp(rf1$model, nperm = 100)
+varimp_rf2 <- compute_varimp(rf2$model, nperm = 100)
+varimp_rf3 <- compute_varimp(rf3$model, nperm = 100)
+varimp_rf4 <- compute_varimp(rf4$model, nperm = 100)
+```
+
+```{r eval=FALSE, include=FALSE}
+print(varimp_rf1$time)
+print(varimp_rf2$time)
+print(varimp_rf3$time)
+print(varimp_rf4$time)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(varimp_rf1, file = "objects/RF/Satellite_Embeddings/rf1_varimp_l1_novalid_norefin_SatEmb.Rdata")
+save(varimp_rf2, file = "objects/RF/Satellite_Embeddings/rf2_varimp_l1_novalid_norefin_SatEmb_CH.Rdata")
+save(varimp_rf3, file = "objects/RF/Satellite_Embeddings/rf3_varimp_l1_roughvalid_norefin_SatEmb.Rdata")
+save(varimp_rf4, file = "objects/RF/Satellite_Embeddings/rf4_varimp_l1_roughvalid_norefin_SatEmb_CH.Rdata")
+```
+
+##### Plots
+
+```{r}
+plot(varimp_rf1$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf2$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf3$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf4$varimp, margin = c(10, 6, 2, 2))
+```
+
+
+
+
+# HERE
+
+
+
+## No validation
+
+### No refinement
+
+#### SatEmb bands
+
+#### SatEmb + CH
+
+### Refinement 10-90th: 1 variable
+
+### Refinement 10-90th: 2 variables
+
+### Refinement 10-90th: 3 variables
+
+### Refinement 10-90th: 4 variables
+
+
+## Rough validation
+
+
+## Without refinement
+
+### Get filtered data
+
+```{r}
+data_validation_GPS <- data_validation %>%
+  # Select only GPS points
+  dplyr::filter(Lctnmth == "Location with GPS" |
+                  Lctnmth == "Location with differential GPS") %>%
+  select(-Lctnmth) %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1))
+```
+
+#### N points per category
+
+```{r}
+data_validation_GPS %>% count(EUNISa_1)
+```
+
+### Split into training and test data sets
+
+```{r}
+set.seed(123)
+```
+
+```{r}
+train_indices1 <- sample(1:nrow(data_validation_GPS), 
+                         0.7 * nrow(data_validation_GPS))
+```
+
+```{r}
+train_data1 <- data_validation_GPS[train_indices1, ]
+```
+
+```{r}
+test_data1 <- data_validation_GPS[-train_indices1, ]
+```
+
+### Fit models
+
+```{r eval=FALSE, include=FALSE}
+rf1 <- run_rf(vars_RF_SatEmb, train_data1, "EUNISa_1")
+rf1_CH <- run_rf(vars_RF_SatEmb_CH, train_data1, "EUNISa_1")
+```
+
+```{r}
+print(rf1$time)
+print(rf1_CH$time)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(rf1, file = "objects/RF/Satellite_Embeddings/rf1_model_l1_novalid_GPS_SatEmb.Rdata")
+save(rf1_CH, file = "objects/RF/Satellite_Embeddings/rf1_model_l1_novalid_GPS_SatEmb_CH.Rdata")
+```
+
+### Predictions
+
+```{r eval=FALSE, include=FALSE}
+predictions_rf1 <- predict(rf1$model, newdata = test_data1,OOB = TRUE,
+                           type = "response")
+predictions_rf1_CH <- predict(rf1_CH$model, newdata = test_data1,OOB = TRUE,
+                           type = "response")
+```
+
+```{r eval=FALSE, include=FALSE}
+save(predictions_rf1, file = "objects/RF/Satellite_Embeddings/rf1_pred_l1_novalid_GPS_SatEmb.Rdata")
+save(predictions_rf1_CH, file = "objects/RF/Satellite_Embeddings/rf1_pred_l1_novalid_GPS_SatEmb_CH.Rdata")
+```
+
+### Confusion matrix
+
+```{r}
+confusionMatrix(predictions_rf1, test_data1$EUNISa_1)
+confusionMatrix(predictions_rf1_CH, test_data1$EUNISa_1)
+```
+### Variable importance
+
+#### Unconditional
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf1 <- compute_varimp(rf1$model, nperm = 100)
+```
+
+```{r eval=FALSE, include=FALSE}
+print(varimp_rf1$time)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(varimp_rf1, file = "objects/RF/S2/rf1_varimp_l1_slope_novalid_GPS_S2.Rdata")
+```
+
+##### Plot
+
+```{r}
+plot(varimp_rf1$varimp, margin = c(10, 6, 2, 2))
+```
+
+#### Conditional (TBD)
+
+```{r eval=FALSE, include=FALSE}
+varimp-cond_rf1 <- compute_varimp_cond(rf1$model, nperm = 100)
+```
+
+```{r eval=FALSE, include=FALSE}
+print(varimp-cond_rf1$time)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(varimp-cond_rf1, 
+     file = "objects/RF/S2/rf1_varimp-cond_l1_slope_novalid_GPS_S2.Rdata")
+```
+
+##### Plot
+
+```{r}
+plot(varimp-cond_rf1$varimp, margin = c(9, 3, 2, 2))
+```
+
+### ROC curves (TBD)
+
+```{r eval=FALSE, include=FALSE}
+roc_data1 <- compute_roc_level1(rf1$model, test_data1)
+```
+
+```{r}
+print(roc_data1$time)
+```
+
+```{r}
+save(roc_data1, 
+     file = "objects/RF/S2/rf1_rocdata_l1_slope_novalid_GPS_S2.Rdata")
+```
+
+#### Plot
+
+```{r}
+roc1 <- ggplot(roc_data1$roc, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+  labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+       y = "True Positive Rate", color = "Class (AUC)") +
+  theme_minimal() + theme(legend.position = "bottom")
+```
+
+```{r}
+roc1
+```
+
+## With refinement
+
+### Refinement
+
+Based on the 1st, 2nd, 3rd, 4th... most important variables: A59, A15, A12, A60.
+
+```{r}
+distr_plot_percentiles <- function(data, y_vars, y_labels) {
+  for (i in seq_along(y_vars)) {
+    y_var <- y_vars[[i]]
+    y_label <- y_labels[[i]]
+    
+    # Calculate percentiles per EUNISa_1 group
+    percentiles <- data %>%
+      group_by(EUNISa_1) %>%
+      summarise(
+        p10 = quantile(.data[[y_var]], 0.1, na.rm = TRUE),
+        p90 = quantile(.data[[y_var]], 0.9, na.rm = TRUE),
+        .groups = "drop"
+      )
+    
+    # Join percentiles back to data
+    data_flagged <- data %>%
+      left_join(percentiles, by = "EUNISa_1") %>%
+      mutate(outlier_flag = case_when(
+        .data[[y_var]] < p10 ~ "low",
+        .data[[y_var]] > p90 ~ "high",
+        TRUE ~ "mid"
+      ))
+    
+    # Filter and plot
+    p <- ggplot(data = data_flagged %>%
+                  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
+                aes(x = EUNISa_1_descr, y = .data[[y_var]])) +
+      geom_flat_violin(aes(fill = EUNISa_1_descr),
+                       position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+      geom_point(aes(color = ifelse(outlier_flag == "mid",
+                                    EUNISa_1_descr, "grey")),
+                 position = position_jitter(width = 0.15), size = 1,
+                 alpha = 0.6) +
+      geom_boxplot(aes(fill = EUNISa_1_descr), width = 0.2, outlier.shape = NA,
+                   alpha = 0.5) +
+      stat_summary(fun = mean, geom = "point", shape = 20, size = 1) +
+      stat_summary(fun.data = function(x) data.frame(y = max(x, na.rm = TRUE) +
+                                                       0.1, label = length(x)),
+                   geom = "text", aes(label = ..label..), vjust = 0.5) +
+      labs(y = y_label, x = "EUNIS level 1") +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+      guides(fill = FALSE, color = FALSE) +
+      theme_bw() + coord_flip() +
+      scale_color_manual(values = c(
+        "Forests and other wooded land" = "#F8766D",
+        "Grasslands" = "#7CAE00",
+        "Heathlands, scrub and tundra" = "#00BFC4",
+        "Wetlands" = "#C77CFF",
+        "grey" = "grey"))
+    
+    print(p)
+  }
+}
+```
+
+```{r}
+distr_plot_percentiles(
+  # GPS points
+  data_validation_GPS,
+  c("A59", "A15", "A12", "A60"),
+  c("A59", "A15", "A12", "A60"))
+```
+
+Calculate percentiles:
+
+```{r}
+percentiles <- 
+  data_validation_GPS %>%
+  group_by(EUNISa_1) %>%
+  summarize(
+    perc_10_A59 = quantile(A59, probs = 0.10, na.rm = T),
+    perc_20_A59 = quantile(A59, probs = 0.20, na.rm = T),
+    perc_80_A59 = quantile(A59, probs = 0.80, na.rm = T),
+    perc_90_A59 = quantile(A59, probs = 0.90, na.rm = T),
+    perc_10_A15 = quantile(A15, probs = 0.10, na.rm = T),
+    perc_20_A15 = quantile(A15, probs = 0.20, na.rm = T),
+    perc_80_A15 = quantile(A15, probs = 0.80, na.rm = T),
+    perc_90_A15 = quantile(A15, probs = 0.90, na.rm = T),
+    perc_10_A12 = quantile(A12, probs = 0.10, na.rm = T),
+    perc_20_A12 = quantile(A12, probs = 0.20, na.rm = T),
+    perc_80_A12 = quantile(A12, probs = 0.80, na.rm = T),
+    perc_90_A12 = quantile(A12, probs = 0.90, na.rm = T),
+    perc_10_A60 = quantile(A60, probs = 0.10, na.rm = T),
+    perc_20_A60 = quantile(A60, probs = 0.20, na.rm = T),
+    perc_80_A60 = quantile(A60, probs = 0.80, na.rm = T),
+    perc_90_A60 = quantile(A60, probs = 0.90, na.rm = T),
+    )
+```
+
+### Get filtered data
+
+```{r}
+data_validation_GPS_refin1 <- 
+  data_validation_GPS %>%
+  left_join(percentiles, by = "EUNISa_1") %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  dplyr::filter(
+    (A59 >= perc_10_A59 & A59 <= perc_90_A59)
+    )
+data_validation_GPS_refin2 <- 
+  data_validation_GPS %>%
+  left_join(percentiles, by = "EUNISa_1") %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  dplyr::filter(
+    (A59 >= perc_10_A59 & A59 <= perc_90_A59) &
+      (A15 >= perc_10_A15 & A15 <= perc_90_A15)
+    )
+data_validation_GPS_refin3 <- 
+  data_validation_GPS %>%
+  left_join(percentiles, by = "EUNISa_1") %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  dplyr::filter(
+    (A59 >= perc_10_A59 & A59 <= perc_90_A59) &
+      (A15 >= perc_10_A15 & A15 <= perc_90_A15) &
+      (A12 >= perc_10_A12 & A12 <= perc_90_A12)
+    )
+data_validation_GPS_refin4 <- 
+  data_validation_GPS %>%
+  left_join(percentiles, by = "EUNISa_1") %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  dplyr::filter(
+    (A59 >= perc_10_A59 & A59 <= perc_90_A59) &
+      (A15 >= perc_10_A15 & A15 <= perc_90_A15) &
+      (A12 >= perc_10_A12 & A12 <= perc_90_A12) &
+      (A60 >= perc_10_A60 & A60 <= perc_90_A60)
+    )
+```
+
+#### N plots per category
+
+```{r}
+bind_rows(
+  data_validation_GPS_refin1 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(data = "data_validation_GPS_refin1") %>%
+    select(data, Q, R, S, T),
+  data_validation_GPS_refin2 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(data = "data_validation_GPS_refin2") %>%
+    select(data, Q, R, S, T),
+  data_validation_GPS_refin3 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(data = "data_validation_GPS_refin3") %>%
+    select(data, Q, R, S, T),
+  data_validation_GPS_refin4 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(data = "data_validation_GPS_refin4") %>%
+    select(data, Q, R, S, T)
+  )
+```
+
+### Split into training and test data sets
+
+```{r}
+set.seed(123)
+```
+
+```{r}
+train_indices2 <- sample(1:nrow(data_validation_GPS_refin1), 
+                         0.7 * nrow(data_validation_GPS_refin1))
+train_indices3 <- sample(1:nrow(data_validation_GPS_refin2), 
+                         0.7 * nrow(data_validation_GPS_refin3))
+train_indices4 <- sample(1:nrow(data_validation_GPS_refin3), 
+                         0.7 * nrow(data_validation_GPS_refin3))
+train_indices5 <- sample(1:nrow(data_validation_GPS_refin4), 
+                         0.7 * nrow(data_validation_GPS_refin4))
+```
+
+```{r}
+train_data2 <- data_validation_GPS_refin1[train_indices2, ]
+train_data3 <- data_validation_GPS_refin2[train_indices3, ]
+train_data4 <- data_validation_GPS_refin3[train_indices4, ]
+train_data5 <- data_validation_GPS_refin4[train_indices5, ]
+```
+
+```{r}
+test_data2 <- data_validation_GPS_refin1[-train_indices2, ]
+test_data3 <- data_validation_GPS_refin2[-train_indices3, ]
+test_data4 <- data_validation_GPS_refin3[-train_indices4, ]
+test_data5 <- data_validation_GPS_refin4[-train_indices5, ]
+```
+
+### Fit models
+
+```{r eval=FALSE, include=FALSE}
+rf2 <- run_rf(vars_RF_SatEmb, train_data2, "EUNISa_1")
+rf3 <- run_rf(vars_RF_SatEmb, train_data3, "EUNISa_1")
+rf4 <- run_rf(vars_RF_SatEmb, train_data4, "EUNISa_1")
+rf5 <- run_rf(vars_RF_SatEmb, train_data5, "EUNISa_1")
+```
+
+```{r}
+print(rf2$time)
+print(rf3$time)
+print(rf4$time)
+print(rf5$time)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(rf2, 
+     file = "objects/RF/Satellite_Embeddings/rf2_model_l1_novalid-refin1090_1v_GPS_SatEmb.Rdata")
+save(rf3, 
+     file = "objects/RF/Satellite_Embeddings/rf3_model_l1_novalid-refin1090_2v_GPS_SatEmb.Rdata")
+save(rf4, 
+     file = "objects/RF/Satellite_Embeddings/rf4_model_l1_novalid-refin1090_3v_GPS_SatEmb.Rdata")
+save(rf5, 
+     file = "objects/RF/Satellite_Embeddings/rf5_model_l1_novalid-refin1090_4v_GPS_SatEmb.Rdata")
+```
+
+### Predictions
+
+```{r eval=FALSE, include=FALSE}
+predictions_rf2 <- predict(rf2$model, newdata = test_data2,OOB = TRUE,
+                           type = "response")
+predictions_rf3 <- predict(rf3$model, newdata = test_data3,OOB = TRUE,
+                           type = "response")
+predictions_rf4 <- predict(rf4$model, newdata = test_data4,OOB = TRUE,
+                           type = "response")
+predictions_rf5 <- predict(rf5$model, newdata = test_data5,OOB = TRUE,
+                           type = "response")
+```
+
+```{r eval=FALSE, include=FALSE}
+save(predictions_rf2, 
+     file = "objects/RF/Satellite_Embeddings/rf2_pred_l1_novalid-refin1090_1v_GPS_SatEmb.Rdata.Rdata")
+save(predictions_rf3, 
+     file = "objects/RF/Satellite_Embeddings/rf3_pred_l1_novalid-refin1090_2v_GPS_SatEmb.Rdata.Rdata")
+save(predictions_rf4, 
+     file = "objects/RF/Satellite_Embeddings/rf4_pred_l1_novalid-refin1090_3v_GPS_SatEmb.Rdata.Rdata")
+save(predictions_rf5, 
+     file = "objects/RF/Satellite_Embeddings/rf5_pred_l1_novalid-refin1090_4v_GPS_SatEmb.Rdata.Rdata")
+```
+
+### Confusion matrices
+
+```{r}
+confusionMatrix(predictions_rf2, test_data2$EUNISa_1)
+confusionMatrix(predictions_rf3, test_data3$EUNISa_1)
+confusionMatrix(predictions_rf4, test_data4$EUNISa_1)
+confusionMatrix(predictions_rf5, test_data5$EUNISa_1)
+```
+
+### Variable importance
+
+#### Unconditional
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf2 <- compute_varimp(rf2$model, nperm = 100)
+varimp_rf3 <- compute_varimp(rf3$model, nperm = 100)
+varimp_rf4 <- compute_varimp(rf4$model, nperm = 100)
+varimp_rf5 <- compute_varimp(rf5$model, nperm = 100)
+```
+
+```{r eval=FALSE, include=FALSE}
+print(varimp_rf2$time)
+print(varimp_rf3$time)
+print(varimp_rf4$time)
+print(varimp_rf5$time)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(varimp_rf2,
+     file = "objects/RF/Satellite_Embeddings/rf2_varimp_l1_novalid-refin1090_1v_GPS_SatEmb.Rdata.Rdata")
+save(varimp_rf3,
+     file = "objects/RF/Satellite_Embeddings/rf3_varimp_l1_novalid-refin1090_2v_GPS_SatEmb.Rdata.Rdata")
+save(varimp_rf4,
+     file = "objects/RF/Satellite_Embeddings/rf4_varimp_l1_novalid-refin1090_3v_GPS_SatEmb.Rdata.Rdata")
+save(varimp_rf5,
+     file = "objects/RF/Satellite_Embeddings/rf5_varimp_l1_novalid-refin1090_4v_GPS_SatEmb.Rdata.Rdata")
+```
+
+##### Plots
+
+```{r}
+plot(varimp_rf2$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf3$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf4$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf5$varimp, margin = c(10, 6, 2, 2))
+```
+
+# INSERT ABOVE: Fit RF models (level 1) with CH
+
+
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+

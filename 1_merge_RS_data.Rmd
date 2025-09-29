@@ -394,7 +394,7 @@ Save as csv for me to use in GEE:
 
 ```{r}
 write_csv(db_Europa_allobs,
-          file = "data/clean/db_Europa_allobst.csv")
+          file = "data/clean/db_Europa_allobs.csv")
 ```
 
 Save as shp to merge with bioregions:

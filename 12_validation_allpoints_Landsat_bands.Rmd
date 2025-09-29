@@ -1,0 +1,2295 @@
+---
+title: "Script to validate points in ReSurvey database using RS data (Landsat only)"
+subtitle: "Validation done with ALL points (all observations)"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This R script is used to validate the points in the ReSurvey database using RS indicators (indices + phenology + canopy height). Not fiting all the models that were fit / planned for S2 data. So far, using only months method for phenology, and fitting models with GPS points after rough validation with / without training data refinement. I have commented code lines that are not used so far.
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(gridExtra)
+library(readxl)
+library(scales)
+library(sf)
+library(rnaturalearth)
+library(dtplyr)
+library(lme4)
+library(lmerTest)
+library(car)
+library(ggeffects)
+library(party)
+library(partykit)
+library(moreparty)
+library(doParallel)
+library(strucchange)
+library(ggparty)
+library(caret)
+library(moreparty)
+library(randomForest)
+library(pROC)
+library(corrplot)
+library(rlang)
+library(stringr)
+library(beepr)
+library(foreach)
+library(permimp)
+library(yardstick)
+```
+
+# Define printall function
+
+```{r}
+printall <- function(tibble) {
+  print(tibble, width = Inf)
+  }
+```
+
+# Load geom_flat_violin plot
+
+```{r}
+source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/fb53bd97121f7f9ce947837ef1a4c65a73bffb3f/geom_flat_violin.R")
+```
+
+# Load previously created objects
+
+```{r}
+# Define the folder path
+folder_path <- here("objects", "RF", "Landsat")
+
+# List all .RData or .rda files in the folder
+rdata_files <- list.files(folder_path, full.names = TRUE)
+
+# Load each file
+lapply(rdata_files, load, envir = .GlobalEnv)
+```
+
+# Read data
+
+```{r}
+data_validation <- read_tsv(here(
+  "data", "clean","final_RS_data_bands_Landsat_all_20250918.csv"))
+```
+
+No parsing issues!
+
+# Some data managenemt
+
+## TO-DO: Missing data checks
+
+Do when all RS data is ready!
+
+# Distributions all bioregions
+
+## Indices
+
+```{r}
+# Define a function to create histograms
+plot_histogram <- function(data, x_var, x_label) {
+  ggplot(data %>%
+           dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
+         aes(x = !!sym(x_var))) +
+    geom_histogram(color = "black", fill = "white") +
+    labs(x = x_label, y = "Frequency") +
+    theme_bw()
+}
+```
+
+```{r}
+# Define a function to create plots with violin + boxplot + points
+distr_plot <- function(data, y_vars, y_labels) {
+  for (i in seq_along(y_vars)) {
+    y_var <- y_vars[[i]]
+    y_label <- y_labels[[i]]
+    
+    p <- ggplot(data = data %>%
+                  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
+                aes(x = EUNISa_1_descr, y = !!sym(y_var), fill = EUNISa_1_descr)) +
+      geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+      geom_point(aes(y = !!sym(y_var), color = EUNISa_1_descr),
+                 position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+      geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+      stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
+      stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                     label = length(x)),
+                   geom = "text", aes(label = ..label..), vjust = 0.5) +
+      labs(y = y_label, x = "EUNIS level 1") +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+      guides(fill = FALSE, color = FALSE) +
+      theme_bw() + coord_flip()
+    
+    print(p)
+  }
+}
+```
+
+### MODIFY COMMENTS: Ranges of min and max:
+
+```{r}
+range(data_validation$NDVI_max, na.rm = T) # NDVI_max > 1 (slightly)
+range(data_validation$NDMI_max, na.rm = T) # NDMI_max > 1 (slightly)
+range(data_validation$NDWI_max, na.rm = T)
+range(data_validation$SAVI_max, na.rm = T)
+range(data_validation$EVI_max, na.rm = T) # EVI_max > 1 (slightly)
+range(data_validation$NDVI_min, na.rm = T)
+range(data_validation$NDMI_min, na.rm = T)
+range(data_validation$NDWI_min, na.rm = T) # NDWI_min < -1 (slightly)
+range(data_validation$SAVI_min, na.rm = T)
+range(data_validation$EVI_min, na.rm = T) # EVI_min < -1!
+```
+
+```{r}
+nrow(data_validation %>% dplyr::filter(NDVI_max > 1))
+nrow(data_validation %>% dplyr::filter(NDMI_max > 1))
+nrow(data_validation %>% dplyr::filter(EVI_max > 1))
+nrow(data_validation %>% dplyr::filter(NDWI_min < -1))
+nrow(data_validation %>% dplyr::filter(EVI_min < -1))
+```
+
+Histograms to check that max and min values are ok:
+
+```{r}
+plot_histogram(data_validation, "NDVI_max", "NDVI max")
+plot_histogram(data_validation, "NDMI_max", "NDMI max")
+plot_histogram(data_validation, "NDWI_max", "NDWI max")
+plot_histogram(data_validation, "SAVI_max", "SAVI max")
+plot_histogram(data_validation, "EVI_max", "EVI max")
+plot_histogram(data_validation, "NDVI_min", "NDVI min")
+plot_histogram(data_validation, "NDMI_min", "NDMI min")
+plot_histogram(data_validation, "NDWI_min", "NDWI min")
+plot_histogram(data_validation, "SAVI_min", "SAVI min")
+plot_histogram(data_validation, "EVI_min", "EVI min")
+```
+
+```{r}
+nrow(data_validation %>%
+       dplyr::filter(EVI_max > 1 | EVI_max < -1))
+data_validation %>%
+  dplyr::filter(EVI_max > 1 | EVI_max < -1) %>%
+  count(biogeo, unit)
+```
+
+Most EVI values are ok!
+
+Distribution plots:
+
+```{r message=FALSE, warning=FALSE}
+distr_plot(data_validation %>% dplyr::filter(EVI_min > -0.5),
+           c("NDVI_max", "EVI_max", "SAVI_max", "NDMI_max", "NDWI_max",
+             "NDVI_min", "EVI_min", "SAVI_min", "NDMI_min", "NDWI_min"),
+           c("NDVI_max", "EVI_max", "SAVI_max", "NDMI_max", "NDWI_max",
+             "NDVI_min", "EVI_min", "SAVI_min", "NDMI_min", "NDWI_min"))
+```
+
+## CH
+
+```{r}
+distr_plot(data_validation, "canopy_height", "Canopy height (m)")
+```
+ 
+### Show habitats with CH categories
+
+```{r}
+ggplot(data_validation %>%
+         mutate(CH_cat =
+                  factor(
+                    case_when(canopy_height == 0 ~ "0 m",
+                              canopy_height > 0 & canopy_height <= 1 ~ "0-1 m",
+                              canopy_height > 1 & canopy_height <=2 ~ "1-2 m",
+                              canopy_height > 2 & canopy_height <=5 ~ "2-5 m",
+                              canopy_height > 5 & canopy_height <=8 ~ "5-8 m",
+                              canopy_height > 8 ~ "> 8 m",
+                              is.na(canopy_height) ~ NA_character_),
+                    levels = c(
+                      "0 m", "0-1 m", "1-2 m", "2-5 m", "5-8 m", "> 8 m"))),
+       aes(x = EUNISa_1_descr, fill = CH_cat)) +
+  geom_bar() + theme_bw() + coord_flip() +
+  scale_y_continuous(labels = label_number()) +
+  scale_fill_viridis_d(direction = -1) +
+  labs(x = "EUNIS level 1", fill = "Canopy height") +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  theme(legend.position = c(0.8, 0.75),
+        legend.direction = "vertical")
+```
+
+### Stats per habitat type
+
+```{r}
+data_validation %>%
+  group_by(EUNISa_1_descr) %>%
+  summarise(across(canopy_height, list(
+    mean = mean,
+    median = median,
+    sd = sd,
+    min = min,
+    max = max
+    ), na.rm = TRUE))
+```
+
+## Phenology
+
+Only using NDVI- and SAVI-based values so far.
+
+Maximum NDVI should be equal to value at peak?
+
+```{r}
+nrow(data_validation %>% dplyr::filter(NDVI_pos_value  != NDVI_max))
+```
+
+Not sure why this happens, but in most cases the difference is small (< -0.1). Anyway, we should use only one of these two in the RF models.
+
+```{r}
+plot_histogram(data_validation, "NDVI_sos_slope_doy", "NDVI_sos_slope_doy")
+plot_histogram(data_validation, "NDVI_pos_doy", "NDVI_pos_doy")
+plot_histogram(data_validation, "NDVI_eos_slope_doy", "NDVI_eos_slope_doy")
+plot_histogram(data_validation, "EVI_sos_slope_doy", "EVI_sos_slope_doy")
+plot_histogram(data_validation, "EVI_pos_doy", "EVI_pos_doy")
+plot_histogram(data_validation, "EVI_eos_slope_doy", "EVI_eos_slope_doy")
+plot_histogram(data_validation, "SAVI_sos_slope_doy", "SAVI_sos_slope_doy")
+plot_histogram(data_validation, "SAVI_pos_doy", "SAVI_pos_doy")
+plot_histogram(data_validation, "SAVI_eos_slope_doy", "SAVI_eos_slope_doy")
+plot_histogram(data_validation, "NDVI_sos_threshold_doy", "NDVI_sos_threshold_doy")
+plot_histogram(data_validation, "NDVI_pos_doy", "NDVI_pos_doy")
+plot_histogram(data_validation, "NDVI_eos_threshold_doy", "NDVI_eos_threshold_doy")
+plot_histogram(data_validation, "EVI_sos_threshold_doy", "EVI_sos_threshold_doy")
+plot_histogram(data_validation, "EVI_pos_doy", "EVI_pos_doy")
+plot_histogram(data_validation, "EVI_eos_threshold_doy", "EVI_eos_threshold_doy")
+plot_histogram(data_validation, "SAVI_sos_threshold_doy", "SAVI_sos_threshold_doy")
+plot_histogram(data_validation, "SAVI_pos_doy", "SAVI_pos_doy")
+plot_histogram(data_validation, "SAVI_eos_threshold_doy", "SAVI_eos_threshold_doy")
+```
+
+```{r}
+plot_histogram(data_validation, "NDVI_sos_slope_value", "NDVI_sos_slope_value")
+plot_histogram(data_validation, "NDVI_pos_value", "NDVI_pos_value")
+plot_histogram(data_validation, "NDVI_eos_slope_value", "NDVI_eos_slope_value")
+plot_histogram(data_validation, "EVI_sos_slope_value", "EVI_sos_slope_value")
+plot_histogram(data_validation, "EVI_pos_value", "EVI_pos_value")
+plot_histogram(data_validation, "EVI_eos_slope_value", "EVI_eos_slope_value")
+plot_histogram(data_validation, "NDVI_sos_threshold_value", "NDVI_sos_threshold_value")
+plot_histogram(data_validation, "NDVI_pos_value", "NDVI_pos_value")
+plot_histogram(data_validation, "NDVI_eos_threshold_value", "NDVI_eos_threshold_value")
+plot_histogram(data_validation, "EVI_sos_threshold_value", "EVI_sos_threshold_value")
+plot_histogram(data_validation, "EVI_pos_value", "EVI_pos_value")
+plot_histogram(data_validation, "EVI_eos_threshold_value", "EVI_eos_threshold_value")
+```
+
+```{r}
+plot_histogram(data_validation, "NDVI_slope_gsd", "NDVI_slope_gsd")
+plot_histogram(data_validation, "EVI_slope_gsd", "EVI_slope_gsd")
+plot_histogram(data_validation, "SAVI_slope_gsd", "SAVI_slope_gsd")
+plot_histogram(data_validation, "NDVI_diff_pos_sos_slope_value",
+               "NDVI_diff_pos_sos_slope_value")
+plot_histogram(data_validation, "EVI_diff_pos_sos_slope_value",
+               "EVI_diff_pos_sos_slope_value")
+plot_histogram(data_validation, "SAVI_diff_pos_sos_slope_value",
+               "SAVI_diff_pos_sos_slope_value")
+plot_histogram(data_validation, "NDVI_diff_pos_eos_slope_value",
+               "NDVI_diff_pos_eos_slope_value")
+plot_histogram(data_validation, "EVI_diff_pos_eos_slope_value",
+               "EVI_diff_pos_eos_slope_value")
+plot_histogram(data_validation, "SAVI_diff_pos_eos_slope_value",
+               "SAVI_diff_pos_eos_slope_value")
+plot_histogram(data_validation, "NDVI_diff_pos_sos_slope_doy",
+               "NDVI_diff_pos_sos_slope_doy")
+plot_histogram(data_validation, "EVI_diff_pos_sos_slope_doy",
+               "EVI_diff_pos_sos_slope_doy")
+plot_histogram(data_validation, "SAVI_diff_pos_sos_slope_doy",
+               "SAVI_diff_pos_sos_slope_doy")
+plot_histogram(data_validation, "NDVI_diff_pos_eos_slope_doy",
+               "NDVI_diff_pos_eos_slope_doy")
+plot_histogram(data_validation, "EVI_diff_pos_eos_slope_doy", 
+               "EVI_diff_pos_eos_slope_doy")
+plot_histogram(data_validation, "SAVI_diff_pos_eos_slope_doy", 
+               "SAVI_diff_pos_eos_slope_doy")
+plot_histogram(data_validation, "NDVI_threshold_gsd", "NDVI_threshold_gsd")
+plot_histogram(data_validation, "EVI_threshold_gsd", "EVI_threshold_gsd")
+plot_histogram(data_validation, "SAVI_threshold_gsd", "SAVI_threshold_gsd")
+plot_histogram(data_validation, "NDVI_diff_pos_sos_threshold_value",
+               "NDVI_diff_pos_sos_threshold_value")
+plot_histogram(data_validation, "EVI_diff_pos_sos_threshold_value",
+               "EVI_diff_pos_sos_threshold_value")
+plot_histogram(data_validation, "SAVI_diff_pos_sos_threshold_value",
+               "SAVI_diff_pos_sos_threshold_value")
+plot_histogram(data_validation, "NDVI_diff_pos_eos_threshold_value",
+               "NDVI_diff_pos_eos_threshold_value")
+plot_histogram(data_validation, "EVI_diff_pos_eos_threshold_value",
+               "EVI_diff_pos_eos_threshold_value")
+plot_histogram(data_validation, "SAVI_diff_pos_eos_threshold_value",
+               "SAVI_diff_pos_eos_threshold_value")
+plot_histogram(data_validation, "NDVI_diff_pos_sos_threshold_doy",
+               "NDVI_diff_pos_sos_threshold_doy")
+plot_histogram(data_validation, "EVI_diff_pos_sos_threshold_doy",
+               "EVI_diff_pos_sos_threshold_doy")
+plot_histogram(data_validation, "SAVI_diff_pos_sos_threshold_doy",
+               "SAVI_diff_pos_sos_threshold_doy")
+plot_histogram(data_validation, "NDVI_diff_pos_eos_threshold_doy",
+               "NDVI_diff_pos_eos_threshold_doy")
+plot_histogram(data_validation, "EVI_diff_pos_eos_threshold_doy", 
+               "EVI_diff_pos_eos_threshold_doy")
+plot_histogram(data_validation, "SAVI_diff_pos_eos_threshold_doy", 
+               "SAVI_diff_pos_eos_threshold_doy")
+```
+
+```{r}
+plot_histogram(data_validation, "NDVI_auc_slope", "NDVI_auc_slope")
+plot_histogram(data_validation, "EVI_auc_slope", "EVI_auc_slope")
+plot_histogram(data_validation, "SAVI_auc_slope", "SAVI_auc_slope")
+plot_histogram(data_validation, "NDVI_auc_threshold", "NDVI_auc_threshold")
+plot_histogram(data_validation, "EVI_auc_threshold", "EVI_auc_threshold")
+plot_histogram(data_validation, "SAVI_auc_threshold", "SAVI_auc_threshold")
+```
+
+```{r}
+distr_plot(data_validation,
+           c("NDVI_sos_slope_value","NDVI_pos_value", "NDVI_eos_slope_value",
+             "EVI_sos_slope_value","EVI_pos_value", "EVI_eos_slope_value",
+             "SAVI_sos_slope_value", "SAVI_pos_value", "SAVI_eos_slope_value",
+             "NDVI_sos_slope_doy","NDVI_pos_doy", "NDVI_eos_slope_doy",
+             "EVI_sos_slope_doy","EVI_pos_doy", "EVI_eos_slope_doy",
+             "SAVI_sos_slope_doy", "SAVI_pos_doy", "SAVI_eos_slope_doy",
+             "NDVI_sos_threshold_value","NDVI_pos_value", "NDVI_eos_threshold_value",
+             "EVI_sos_threshold_value","EVI_pos_value", "EVI_eos_threshold_value",
+             "SAVI_sos_threshold_value", "SAVI_pos_value", "SAVI_eos_threshold_value",
+             "NDVI_sos_threshold_doy","NDVI_pos_doy", "NDVI_eos_threshold_doy",
+             "EVI_sos_threshold_doy","EVI_pos_doy", "EVI_eos_threshold_doy",
+             "SAVI_sos_threshold_doy", "SAVI_pos_doy", "SAVI_eos_threshold_doy"),
+           c("NDVI_sos_slope_value","NDVI_pos_value", "NDVI_eos_slope_value",
+             "EVI_sos_slope_value","EVI_pos_value", "EVI_eos_slope_value",
+             "SAVI_sos_slope_value", "SAVI_pos_value", "SAVI_eos_slope_value",
+             "NDVI_sos_slope_doy","NDVI_pos_doy", "NDVI_eos_slope_doy",
+             "EVI_sos_slope_doy","EVI_pos_doy", "EVI_eos_slope_doy",
+             "SAVI_sos_slope_doy", "SAVI_pos_doy", "SAVI_eos_slope_doy",
+             "NDVI_sos_threshold_value","NDVI_pos_value", "NDVI_eos_threshold_value",
+             "EVI_sos_threshold_value","EVI_pos_value", "EVI_eos_threshold_value",
+             "SAVI_sos_threshold_value", "SAVI_pos_value", "SAVI_eos_threshold_value",
+             "NDVI_sos_threshold_doy","NDVI_pos_doy", "NDVI_eos_threshold_doy",
+             "EVI_sos_threshold_doy","EVI_pos_doy", "EVI_eos_threshold_doy",
+             "SAVI_sos_threshold_doy", "SAVI_pos_doy", "SAVI_eos_threshold_doy")
+           )
+```
+
+```{r}
+distr_plot(data_validation,
+           c("NDVI_slope_gsd","EVI_slope_gsd", "SAVI_slope_gsd",
+             "NDVI_diff_pos_sos_slope_value", "EVI_diff_pos_sos_slope_value",
+             "SAVI_diff_pos_sos_slope_value",
+             "NDVI_diff_pos_eos_slope_value", "EVI_diff_pos_eos_slope_value",
+             "SAVI_diff_pos_eos_slope_value",
+             "NDVI_diff_pos_sos_slope_doy", "EVI_diff_pos_sos_slope_doy",
+             "SAVI_diff_pos_sos_slope_doy",
+             "NDVI_diff_pos_eos_slope_doy", "EVI_diff_pos_eos_slope_doy",
+             "SAVI_diff_pos_eos_slope_doy",
+             "NDVI_threshold_gsd","EVI_threshold_gsd", "SAVI_threshold_gsd",
+             "NDVI_diff_pos_sos_threshold_value", "EVI_diff_pos_sos_threshold_value",
+             "SAVI_diff_pos_sos_threshold_value",
+             "NDVI_diff_pos_eos_threshold_value", "EVI_diff_pos_eos_threshold_value",
+             "SAVI_diff_pos_eos_threshold_value",
+             "NDVI_diff_pos_sos_threshold_doy", "EVI_diff_pos_sos_threshold_doy",
+             "SAVI_diff_pos_sos_threshold_doy",
+             "NDVI_diff_pos_eos_threshold_doy", "EVI_diff_pos_eos_threshold_doy",
+             "SAVI_diff_pos_eos_threshold_doy"),
+           c("NDVI_slope_gsd","EVI_slope_gsd", "SAVI_slope_gsd",
+             "NDVI_diff_pos_sos_slope_value", "EVI_diff_pos_sos_slope_value",
+             "SAVI_diff_pos_sos_slope_value",
+             "NDVI_diff_pos_eos_slope_value", "EVI_diff_pos_eos_slope_value",
+             "SAVI_diff_pos_eos_slope_value",
+             "NDVI_diff_pos_sos_slope_doy", "EVI_diff_pos_sos_slope_doy",
+             "SAVI_diff_pos_sos_slope_doy",
+             "NDVI_diff_pos_eos_slope_doy", "EVI_diff_pos_eos_slope_doy",
+             "SAVI_diff_pos_eos_slope_doy",
+             "NDVI_threshold_gsd","EVI_threshold_gsd", "SAVI_threshold_gsd",
+             "NDVI_diff_pos_sos_threshold_value", "EVI_diff_pos_sos_threshold_value",
+             "SAVI_diff_pos_sos_threshold_value",
+             "NDVI_diff_pos_eos_threshold_value", "EVI_diff_pos_eos_threshold_value",
+             "SAVI_diff_pos_eos_threshold_value",
+             "NDVI_diff_pos_sos_threshold_doy", "EVI_diff_pos_sos_threshold_doy",
+             "SAVI_diff_pos_sos_threshold_doy",
+             "NDVI_diff_pos_eos_threshold_doy", "EVI_diff_pos_eos_threshold_doy",
+             "SAVI_diff_pos_eos_threshold_doy")
+           )
+```
+
+```{r}
+distr_plot(data_validation,
+           c("NDVI_auc_slope", "EVI_auc_slope", "SAVI_auc_slope",
+             "NDVI_auc_threshold", "EVI_auc_threshold", "SAVI_auc_threshold",
+             "NDVI_auc_mar_oct", "EVI_auc_mar_oct", "SAVI_auc_mar_oct"),
+             c("NDVI_auc_slope", "EVI_auc_slope", "SAVI_auc_slope",
+               "NDVI_auc_threshold", "EVI_auc_threshold", "SAVI_auc_threshold",
+               "NDVI_auc_mar_oct", "EVI_auc_mar_oct", "SAVI_auc_mar_oct"))
+```
+
+# TBD: Distributions per bioregion
+
+```{r}
+# Define a function to create plots with violin + boxplot + points
+distr_plot_biogeo <- function(data, y_vars, y_labels) {
+  plots <- list()
+  
+  for (i in seq_along(y_vars)) {
+    y_var <- y_vars[[i]]
+    y_label <- y_labels[[i]]
+    
+    p <- ggplot(data = data %>%
+                  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
+                aes(x = EUNISa_1_descr, y = !!sym(y_var), fill = EUNISa_1_descr)) +
+      geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+      geom_point(aes(y = !!sym(y_var), color = EUNISa_1_descr),
+                 position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+      geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+      stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
+      stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
+                                                     label = length(x)),
+                   geom = "text", aes(label = ..label..), vjust = 0.5) +
+      labs(y = y_label, x = "EUNISa_1_descr") +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+      guides(fill = FALSE, color = FALSE) +
+      theme_bw() + coord_flip() + facet_wrap(~ biogeo)
+    
+    plots[[y_var]] <- p
+  }
+  
+  return(plots)
+}
+```
+
+## Indices
+
+Distribution plots:
+
+## CH
+
+```{r}
+distr_plot_biogeo(data_validation, "canopy_height", "Canopy height (m)")
+```
+
+## Phenology
+
+# Define functions for RF models
+
+## Function for fitting RF models
+
+RF models fitted using the conditional inference version of random forest (first cforest in package party, now fastcforest in package moreparty). Suggested if the data are highly correlated. Cforest is more stable in deriving variable importance values in the presence of highly correlated variables, thus providing better accuracy in calculating variable importance (ref below).
+
+Hothorn, T., Hornik, K. and Zeileis, A. (2006) Unbiased Recursive Portioning: A Conditional Inference Framework. Journal of Computational and Graphical Statistics, 15, 651-
+674. http://dx.doi.org/10.1198/106186006X133933
+
+Choose the hyperparameter mtry based on the square root of the number of predictor variables:
+
+Hastie, T., Tibshirani, R., & Friedman, J. (2009). The elements of statistical
+learning: Data mining, inference, and prediction. Springer Science &
+Business Media.
+
+Maybe TO_DO:
+We variated ntree from 50 to 800 in steps of 50, leaving mtry constant at 2. Tis parameter variation showed that ntree=500 was optimal, while higher ntree led to no further model improvement (Supplementary Fig. S10). Subsequently, the hyperparameter mtry was varied from 2 to 8 with constant ntree=500. Here, mtry=3 led to the best results in almost all cases (Supplementary Fig. S11). Consequently, we chose ntree=500 and mtry=3 for our main analysis across all study sites.
+
+Define a function to run fastcforest models:
+
+```{r}
+run_rf <- function(vars_RF, train_data, response_var, ntree = 500) 
+  {
+  
+  # Detect and register available cores (leave one free)
+  n_cores <- parallel::detectCores() - 1
+  cl <- makeCluster(n_cores)
+  registerDoParallel(cl)
+  
+  train_name <- deparse(substitute(train_data))
+  
+  # Export necessary variables to the cluster
+  clusterExport(cl, varlist = c("vars_RF", "train_data", "response_var"),
+                envir = environment())
+
+  
+  # Set seed for reproducibility
+  set.seed(123)
+  
+  # Measure execution time
+  execution_time <- system.time({
+    rf_model <- fastcforest(
+      formula = reformulate(vars_RF, response = response_var),
+      data = train_data,
+      controls = party::cforest_control(
+        mtry = round(sqrt(length(vars_RF))),
+        ntree = ntree
+      ),
+      parallel = TRUE
+    )
+  })
+  
+  # Stop the cluster
+  stopCluster(cl)
+  
+  # Return both the model and execution time
+  list(model = rf_model, time = execution_time)
+}
+```
+
+## Function to compute variable importance
+
+```{r}
+# compute_varimp <- function(model, nperm = 100, 
+#                                    n_cores = parallel::detectCores() - 1) {
+#   # Set up parallel backend
+#   cl <- makeCluster(n_cores)
+#   registerDoParallel(cl)
+#   
+#   # Measure execution time
+#   execution_time <- system.time({
+#     varimp_list <- foreach(i = 1:nperm, .combine = '+', 
+#                            .packages = "party") %dopar% {
+#       varimp(model, conditional = FALSE, nperm = 1)
+#     }
+#   })
+#   
+#   stopCluster(cl)
+#   
+#   # Average the results
+#   varimp_avg <- varimp_list / nperm
+#   
+#   return(list(varimp = varimp_avg, time = execution_time))
+# }
+```
+
+Using permimp() en permimp package:
+https://cran.r-project.org/web/packages/permimp/vignettes/permimp-package.html#fn1
+
+```{r}
+compute_varimp <- function(model, nperm = 100) {
+
+  # Measure execution time
+  execution_time <- system.time({
+    varimp_result <- permimp(model, conditional = FALSE, progressBar = TRUE)
+  })
+
+  return(list(varimp = varimp_result, time = execution_time))
+}
+```
+
+## Function to compute CONDITIONAL variable importance
+
+```{r}
+compute_varimp_cond <- function(model, nperm = 100) {
+
+  # Measure execution time
+  execution_time <- system.time({
+    varimp_result <- permimp(model, conditional = TRUE, progressBar = TRUE)
+  })
+
+  return(list(varimp = varimp_result, time = execution_time))
+}
+```
+
+## Function to compute ROC (level 1)
+
+```{r}
+compute_roc_level1 <- function(model, test_data) {
+  # Measure execution time
+  execution_time <- system.time({
+    # Step 1: Predict probabilities
+    probabilities <- predict(model, newdata = test_data, type = "prob")
+    
+    # Step 2: Convert list of matrices to a proper data frame
+    prob_matrix <- t(sapply(probabilities, as.vector))
+    prob_df <- as.data.frame(prob_matrix)
+    colnames(prob_df) <- c("Q", "R", "S", "T")
+    
+    # Step 3: Prepare actual class labels
+    actual <- factor(test_data$EUNISa_1, levels = c("Q", "R", "S", "T"))
+    
+    # Step 4: Binarize actual labels
+    actual_bin <- model.matrix(~ actual - 1)
+    colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+    
+    # Step 5: Compute ROC data for each class
+    roc_data <- lapply(levels(actual), function(class) {
+      roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+      auc_val <- round(auc(roc_obj), 3)
+      data.frame(
+        FPR = rev(roc_obj$specificities),
+        TPR = rev(roc_obj$sensitivities),
+        Class = paste0(class, " (AUC = ", auc_val, ")")
+      )
+    }) %>% bind_rows()
+  })
+  
+  # Return both ROC data and execution time
+  return(list(roc = roc_data, time = execution_time))
+}
+```
+
+## MODIFY EUNIS2 levels if needed: Function to compute ROC (level 2)
+
+```{r}
+compute_roc_level2 <- function(model, test_data) {
+  # Measure execution time
+  execution_time <- system.time({
+    # Step 1: Predict probabilities
+    probabilities <- predict(model, newdata = test_data, type = "prob")
+    
+    # Step 2: Convert list of matrices to a proper data frame
+    prob_matrix <- t(sapply(probabilities, as.vector))
+    prob_df <- as.data.frame(prob_matrix)
+    colnames(prob_df) <- c("Q1", "Q2", "Q4", "Q5", "R1", "R2", "R3", "R4", "R5",
+                           "R6", "S3", "S4", "T1", "T3")
+    
+    # Step 3: Prepare actual class labels
+    actual <- factor(test_data$EUNISa_2, 
+                     levels = c("Q1", "Q2", "Q4", "Q5", "R1", "R2", "R3", "R4",
+                                "R5", "R6", "S3", "S4", "T1", "T3"))
+    
+    # Step 4: Binarize actual labels
+    actual_bin <- model.matrix(~ actual - 1)
+    colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+    
+    # Step 5: Compute ROC data for each class
+    roc_data <- lapply(levels(actual), function(class) {
+      roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+      auc_val <- round(auc(roc_obj), 3)
+      data.frame(
+        FPR = rev(roc_obj$specificities),
+        TPR = rev(roc_obj$sensitivities),
+        Class = paste0(class, " (AUC = ", auc_val, ")")
+      )
+    }) %>% bind_rows()
+  })
+  
+  # Return both ROC data and execution time
+  return(list(roc = roc_data, time = execution_time))
+}
+```
+
+# Define lists of predictor vars
+
+<!-- ## Moments with slope method -->
+
+<!-- ```{r} -->
+<!-- vars_RF_slope <- c( -->
+<!--   # Min values of all indices -->
+<!--   "NDVI_min", "EVI_min", "NDMI_min", "NDWI_min", "SAVI_min", -->
+<!--   # Max values of NDMI and NDWI -->
+<!--   "NDMI_max", "NDWI_max", -->
+<!--   # AUC of NDVI, EVI and SAVI -->
+<!--   "NDVI_auc_slope", "EVI_auc_slope", "SAVI_auc_slope", -->
+<!--   # Values of NDVI, EVI and SAVI at sos, pos and eos -->
+<!--   "NDVI_sos_slope_value", "NDVI_pos_value", "NDVI_eos_slope_value", -->
+<!--   "EVI_sos_slope_value", "EVI_pos_value", "EVI_eos_slope_value",  -->
+<!--   "SAVI_sos_slope_value", "SAVI_pos_value", "SAVI_eos_slope_value", -->
+<!--   # Differences pos-sos in value and doy -->
+<!--   "NDVI_diff_pos_sos_slope_value", "EVI_diff_pos_sos_slope_value", -->
+<!--   "SAVI_diff_pos_sos_slope_value","NDVI_diff_pos_sos_slope_doy",  -->
+<!--   "EVI_diff_pos_sos_slope_doy", "SAVI_diff_pos_sos_slope_doy", -->
+<!--   # Differences pos-eos in value and doy -->
+<!--   "NDVI_diff_pos_eos_slope_value", "EVI_diff_pos_eos_slope_value", -->
+<!--   "SAVI_diff_pos_eos_slope_value", "NDVI_diff_pos_eos_slope_doy",  -->
+<!--   "EVI_diff_pos_eos_slope_doy", "SAVI_diff_pos_eos_slope_doy", -->
+<!--   # Growing season duration -->
+<!--   "NDVI_slope_gsd", "EVI_slope_gsd", "SAVI_slope_gsd", -->
+<!--   # Canopy height -->
+<!--   "canopy_height") -->
+<!-- ``` -->
+
+<!-- ## Moments with threshold method -->
+
+<!-- ```{r} -->
+<!-- vars_RF_threshold <- c( -->
+<!--   # Min values of all indices -->
+<!--   "NDVI_min", "EVI_min", "NDMI_min", "NDWI_min", "SAVI_min", -->
+<!--   # Max values of NDMI and NDWI -->
+<!--   "NDMI_max", "NDWI_max", -->
+<!--   # AUC of NDVI, EVI and SAVI -->
+<!--   "NDVI_auc_threshold", "EVI_auc_threshold", "SAVI_auc_threshold", -->
+<!--   # Values of NDVI, EVI and SAVI at sos, pos and eos -->
+<!--   "NDVI_sos_threshold_value", "NDVI_pos_value", "NDVI_eos_threshold_value", -->
+<!--   "EVI_sos_threshold_value", "EVI_pos_value", "EVI_eos_threshold_value",  -->
+<!--   "SAVI_sos_threshold_value", "SAVI_pos_value", "SAVI_eos_threshold_value", -->
+<!--   # Differences pos-sos in value and doy -->
+<!--   "NDVI_diff_pos_sos_threshold_value", "EVI_diff_pos_sos_threshold_value", -->
+<!--   "SAVI_diff_pos_sos_threshold_value","NDVI_diff_pos_sos_threshold_doy",  -->
+<!--   "EVI_diff_pos_sos_threshold_doy", "SAVI_diff_pos_sos_threshold_doy", -->
+<!--   # Differences pos-eos in value and doy -->
+<!--   "NDVI_diff_pos_eos_threshold_value", "EVI_diff_pos_eos_threshold_value", -->
+<!--   "SAVI_diff_pos_eos_threshold_value", "NDVI_diff_pos_eos_threshold_doy",  -->
+<!--   "EVI_diff_pos_eos_threshold_doy", "SAVI_diff_pos_eos_threshold_doy", -->
+<!--   # Growing season duration -->
+<!--   "NDVI_threshold_gsd", "EVI_threshold_gsd", "SAVI_threshold_gsd", -->
+<!--   # Canopy height -->
+<!--   "canopy_height") -->
+<!-- ``` -->
+
+## Months method
+
+```{r}
+vars_RF_months <- c(
+  # Min values of all indices
+  "NDVI_min", "EVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, EVI and SAVI between march and oct
+  "NDVI_auc_mar_oct", "EVI_auc_mar_oct", "SAVI_auc_mar_oct",
+  # Values of NDVI, EVI and SAVI at march, pos and oct
+  "NDVI_avg_value_03", "NDVI_pos_value", "NDVI_avg_value_10",
+  "EVI_avg_value_03", "EVI_pos_value", "EVI_avg_value_10", 
+  "SAVI_avg_value_03", "SAVI_pos_value", "SAVI_avg_value_10",
+  # Differences pos-march in value and doy
+  "NDVI_diff_pos_march_value", "EVI_diff_pos_march_value",
+  "SAVI_diff_pos_march_value","NDVI_diff_pos_march_doy", 
+  "EVI_diff_pos_march_doy", "SAVI_diff_pos_march_doy",
+  # Differences pos-oct in value and doy
+  "NDVI_diff_pos_oct_value", "EVI_diff_pos_oct_value",
+  "SAVI_diff_pos_oct_value", "NDVI_diff_pos_oct_doy", 
+  "EVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy",
+  # Canopy height
+  "canopy_height")
+```
+
+# Rough validation
+
+Define a set of rules for a first validation of ALL ReSurvey data ("Expert-based" rules). Not very ambitious, only taking out observations that are clearly wrong on the basis of indicator values.
+
+Create column for first validation based on different indicators, where "wrong" is noted when the validation rule is not met. 
+
+Define rules:
+
+```{r}
+data_validation <-
+  data_validation %>%
+  mutate(
+    valid_1_NDWI = case_when(
+      # Points that are basically water
+      NDWI_max > 0.3 ~ "wrong",
+      TRUE ~ NA_character_),
+    valid_1_CH = case_when(
+      # R & Q points with high CH
+      EUNISa_1 %in% c("R", "Q") & canopy_height > 2 ~ "wrong",
+      # T points with low CH
+      EUNISa_1 == "T" & canopy_height < 3 ~ "wrong",
+      # S points with high CH
+      EUNISa_1 == "S" & canopy_height > 3 ~ "wrong",
+      TRUE ~ NA_character_),
+    # No rules for NDVI, we will take out observations based on distributions
+    # Count how many validation rules are not met
+    valid_1_count = rowSums(across(c(valid_1_NDWI, valid_1_CH), ~ . == "wrong"),
+                            na.rm = TRUE),
+    # Points where at least 1 rule not met
+    valid_1 = if_else(valid_1_count > 0, "At least 1 rule broken",
+                      "No rules broken so far")
+    )
+```
+
+# Data to use in RF models
+
+<!-- ```{r} -->
+<!-- filtered_data0_slope <- data_validation %>% -->
+<!--   mutate(EUNISa_1 = as.factor(EUNISa_1)) %>% -->
+<!--   # Remove all rows with wrong values of indices (not between -1 and 1) -->
+<!--   dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>% -->
+<!--   dplyr::filter(NDVI_max <= 1) %>% -->
+<!--   dplyr::filter(NDMI_max <= 1) %>% -->
+<!--   dplyr::filter(NDWI_min >= -1) %>% -->
+<!--   # Remove rows with missing values in predictors -->
+<!--   dplyr::filter(if_all(all_of(vars_RF_slope), ~ !is.na(.))) %>% -->
+<!--   # Select only variables needed -->
+<!--   select(PlotObservationID, EUNISa_1, all_of(vars_RF_slope), Lctnmth, valid_1) %>% -->
+<!--   # Keep only rows with differences > 0 -->
+<!--   dplyr::filter(if_all(contains("diff"), ~ .x > 0)) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- filtered_data0_threshold <- data_validation %>% -->
+<!--   mutate(EUNISa_1 = as.factor(EUNISa_1)) %>% -->
+<!--   # Remove all rows with wrong values of indices (not between -1 and 1) -->
+<!--   dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>% -->
+<!--   dplyr::filter(NDVI_max <= 1) %>% -->
+<!--   dplyr::filter(NDMI_max <= 1) %>% -->
+<!--   dplyr::filter(NDWI_min >= -1) %>% -->
+<!--   # Remove rows with missing values in predictors -->
+<!--   dplyr::filter(if_all(all_of(vars_RF_threshold), ~ !is.na(.))) %>% -->
+<!--   # Select only variables needed -->
+<!--   select(PlotObservationID, EUNISa_1, all_of(vars_RF_threshold), Lctnmth, valid_1) %>% -->
+<!--   # Keep only rows with differences > 0 -->
+<!--   dplyr::filter(if_all(contains("diff"), ~ .x > 0)) -->
+<!-- ``` -->
+
+```{r}
+filtered_data0_months <- data_validation %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(NDVI_max <= 1) %>%
+  dplyr::filter(NDMI_max <= 1) %>%
+  dplyr::filter(NDWI_min >= -1) %>%
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_months), ~ !is.na(.))) %>%
+  # Select only variables needed
+  select(PlotObservationID, EUNISa_1, all_of(vars_RF_months), Lctnmth, valid_1) %>%
+  # Keep only rows with differences > 0
+  dplyr::filter(if_all(contains("diff"), ~ .x > 0))
+```
+
+# TBD: Correlation
+
+<!-- Correlation of all variables to be included in RF models: -->
+
+<!-- ```{r} -->
+<!-- corrplot(filtered_data0_slope %>%  -->
+<!--            dplyr::select(all_of(vars_RF_slope)) %>% -->
+<!--            cor(use = "pairwise.complete.obs"), -->
+<!--          method = "color", type = "upper", tl.col = "black", tl.srt = 45) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- # Compute correlation matrix -->
+<!-- cor_matrix_slope <- filtered_data0_slope %>% -->
+<!--   dplyr::select(all_of(vars_RF_slope)) %>% -->
+<!--   cor(use = "pairwise.complete.obs") -->
+
+<!-- # Set the diagonal to 0 to ignore self-correlation -->
+<!-- diag(cor_matrix_slope) <- 0 -->
+
+<!-- # Find variables where all absolute correlations are < 0.7 -->
+<!-- keep_vars <- apply(abs(cor_matrix_slope), 1, function(x) all(x < 0.7)) -->
+
+<!-- # Subset the original data frame to keep only those variables -->
+<!-- filtered_data0_slope_nocorr <- (filtered_data0_slope %>% -->
+<!--   dplyr::select(all_of(vars_RF_slope)))[, keep_vars] -->
+<!-- ``` -->
+
+# Fit RF models (level 1)
+
+## Without refinement
+
+### Get filtered data
+
+```{r}
+# # 1: Slope method, no previous validation, GPS points
+# filtered_data1_slope <- filtered_data0_slope %>%
+#   # Select only GPS points
+#   dplyr::filter(Lctnmth == "Location with GPS" |
+#                   Lctnmth == "Location with differential GPS") %>%
+#   select(-Lctnmth, -valid_1)
+# 
+# # 2: Slope method, no previous validation, GPS diff points
+# filtered_data2_slope <- filtered_data0_slope %>%
+#   # Select only GPS diff points
+#   dplyr::filter(Lctnmth == "Location with differential GPS") %>%
+#   select(-Lctnmth, -valid_1)
+# 
+# # 3: Slope method, rough validation, GPS points
+# filtered_data3_slope <- filtered_data0_slope %>%
+#   # Select only GPS points
+#   dplyr::filter(Lctnmth == "Location with GPS" |
+#                   Lctnmth == "Location with differential GPS") %>%
+#   # Filter out points that have not passed the rough validation
+#   dplyr::filter(valid_1 == "No rules broken so far") %>%
+#   select(-Lctnmth, -valid_1)
+# 
+# # 4: Slope method, rough validation, GPS diff points
+# filtered_data4_slope <- filtered_data0_slope %>%
+#   # Select only GPS diff points
+#   dplyr::filter(Lctnmth == "Location with differential GPS") %>%
+#   # Filter out points that have not passed the rough validation
+#   dplyr::filter(valid_1 == "No rules broken so far") %>%
+#   select(-Lctnmth, -valid_1)
+# 
+# # 5: Slope method, rough validation + refinement 10-90th, GPS points
+# # 6: Slope method, rough validation + refinement 10-90th, GPS diff points
+# # 7: Slope method, rough validation + refinement 20-80th, GPS points
+# # 8: Slope method, rough validation + refinement 20-80th, GPS diff points
+# 
+# # 9: Threshold method, no previous validation, GPS points
+# filtered_data9_threshold <- filtered_data0_threshold %>%
+#   # Select only GPS points
+#   dplyr::filter(Lctnmth == "Location with GPS" |
+#                   Lctnmth == "Location with differential GPS") %>%
+#   select(-Lctnmth, -valid_1)
+# 
+# # 10: Threshold method, no previous validation, GPS diff points
+# filtered_data10_threshold <- filtered_data0_threshold %>%
+#   # Select only GPS diff points
+#   dplyr::filter(Lctnmth == "Location with differential GPS") %>%
+#   select(-Lctnmth, -valid_1)
+# 
+# # 11: Threshold method, rough validation, GPS points
+# filtered_data11_threshold <- filtered_data0_threshold %>%
+#   # Select only GPS points
+#   dplyr::filter(Lctnmth == "Location with GPS" |
+#                   Lctnmth == "Location with differential GPS") %>%
+#   # Filter out points that have not passed the rough validation
+#   dplyr::filter(valid_1 == "No rules broken so far") %>%
+#   select(-Lctnmth, -valid_1)
+# 
+# # 12: Threshold method, rough validation, GPS diff points
+# filtered_data12_threshold <- filtered_data0_threshold %>%
+#   # Select only GPS diff points
+#   dplyr::filter(Lctnmth == "Location with differential GPS") %>%
+#   # Filter out points that have not passed the rough validation
+#   dplyr::filter(valid_1 == "No rules broken so far") %>%
+#   select(-Lctnmth, -valid_1)
+# 
+# # 13: Threshold method, rough validation + refinement 10-90th, GPS points
+# # 14: Threshold method, rough validation + refinement 10-90th, GPS diff points
+# # 15: Threshold method, rough validation + refinement 20-80th, GPS points
+# # 16: Threshold method, rough validation + refinement 20-80th, GPS diff points
+# 
+# # 17: Months method, no previous validation, GPS points
+# filtered_data17_months <- filtered_data0_months %>%
+#   # Select only GPS points
+#   dplyr::filter(Lctnmth == "Location with GPS" |
+#                   Lctnmth == "Location with differential GPS") %>%
+#   select(-Lctnmth, -valid_1)
+# 
+# # 18: Months method, no previous validation, GPS diff points
+# filtered_data18_months <- filtered_data0_months %>%
+#   # Select only GPS diff points
+#   dplyr::filter(Lctnmth == "Location with differential GPS") %>%
+#   select(-Lctnmth, -valid_1)
+
+# 19: Months method, rough validation, GPS points
+filtered_data19_months <- filtered_data0_months %>%
+  # Select only GPS points
+  dplyr::filter(Lctnmth == "Location with GPS" |
+                  Lctnmth == "Location with differential GPS") %>%
+  # Filter out points that have not passed the rough validation
+  dplyr::filter(valid_1 == "No rules broken so far") %>%
+  select(-Lctnmth, -valid_1)
+
+# # 20: Months method, rough validation, GPS diff points
+# filtered_data20_months <- filtered_data0_months %>%
+#   # Select only GPS diff points
+#   dplyr::filter(Lctnmth == "Location with differential GPS") %>%
+#   # Filter out points that have not passed the rough validation
+#   dplyr::filter(valid_1 == "No rules broken so far") %>%
+#   select(-Lctnmth, -valid_1)
+
+# 22: Months method, rough validation + refinement 10-90th, GPS diff points
+# 23: Months method, rough validation + refinement 20-80th, GPS points
+# 24: Months method, rough validation + refinement 20-80th, GPS diff points
+```
+
+#### N points per category
+
+```{r}
+bind_rows(
+  # filtered_data1_slope %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data1_slope") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data2_slope %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data2_slope") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data3_slope %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data3_slope") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data4_slope %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data4_slope") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data5_slope %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data5_slope") %>%
+  #   select(data, Q, R, S, T),
+  # iltered_data6_slope %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data6_slope") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data7_slope %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data7_slope") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data8_slope %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data8_slope") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data9_threshold %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data9_threshold") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data10_threshold %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data9_threshold") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data11_threshold %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data9_threshold") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data12_threshold %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data9_threshold") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data13_threshold %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data9_threshold") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data14_threshold %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data9_threshold") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data15_threshold %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data9_threshold") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data16_threshold %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data9_threshold") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data17_months %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data17_months") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data18_months %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data18_months") %>%
+  #   select(data, Q, R, S, T),
+  filtered_data19_months %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(data = "filtered_data19_months") %>%
+    select(data, Q, R, S, T)
+  #,
+  # filtered_data20_months %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>%
+  #   mutate(data = "filtered_data20_months") %>%
+  #   select(data, Q, R, S, T)
+  # filtered_data21_months %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data21_months") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data22_months %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data22_months") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data23_months %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data23_months") %>%
+  #   select(data, Q, R, S, T),
+  # filtered_data24_months %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data24_months") %>%
+  #   select(data, Q, R, S, T),
+  )
+```
+
+### Split into training and test data sets
+
+```{r}
+set.seed(123)
+```
+
+```{r}
+# train_indices1 <- sample(1:nrow(filtered_data1_slope), 
+#                          0.7 * nrow(filtered_data1_slope))
+# train_indices2 <- sample(1:nrow(filtered_data2_slope), 
+#                          0.7 * nrow(filtered_data2_slope))
+# train_indices3 <- sample(1:nrow(filtered_data3_slope), 
+#                          0.7 * nrow(filtered_data3_slope))
+# train_indices4 <- sample(1:nrow(filtered_data4_slope), 
+#                          0.7 * nrow(filtered_data4_slope))
+# # train_indices5 <- sample(1:nrow(filtered_data5_slope),
+# #                          0.7 * nrow(filtered_data5_slope))
+# # train_indices6 <- sample(1:nrow(filtered_data6_slope), 
+# #                          0.7 * nrow(filtered_data6_slope))
+# # train_indices7 <- sample(1:nrow(filtered_data7_slope), 
+# #                          0.7 * nrow(filtered_data7_slope))
+# # train_indices8 <- sample(1:nrow(filtered_data8_slope),
+# #                          0.7 * nrow(filtered_data8_slope))
+# train_indices9 <- sample(1:nrow(filtered_data9_threshold), 
+#                          0.7 * nrow(filtered_data9_threshold))
+# train_indices10 <- sample(1:nrow(filtered_data10_threshold), 
+#                           0.7 * nrow(filtered_data10_threshold))
+# train_indices11 <- sample(1:nrow(filtered_data11_threshold), 
+#                           0.7 * nrow(filtered_data11_threshold))
+# train_indices12 <- sample(1:nrow(filtered_data12_threshold), 
+#                           0.7 * nrow(filtered_data12_threshold))
+# # train_indices13 <- sample(1:nrow(filtered_data13_threshold), 
+# #                           0.7 * nrow(filtered_data13_threshold))
+# # train_indices14 <- sample(1:nrow(filtered_data14_threshold), 
+# #                           0.7 * nrow(filtered_data14_threshold))
+# # train_indices15 <- sample(1:nrow(filtered_data15_threshold), 
+# #                           0.7 * nrow(filtered_data15_threshold))
+# # train_indices16 <- sample(1:nrow(filtered_data16_threshold), 
+# #                           0.7 * nrow(filtered_data16_threshold))
+# train_indices17 <- sample(1:nrow(filtered_data17_months), 
+#                           0.7 * nrow(filtered_data17_months))
+# train_indices18 <- sample(1:nrow(filtered_data18_months), 
+#                           0.7 * nrow(filtered_data18_months))
+train_indices19 <- sample(1:nrow(filtered_data19_months), 
+                          0.7 * nrow(filtered_data19_months))
+# train_indices20 <- sample(1:nrow(filtered_data20_months), 
+#                           0.7 * nrow(filtered_data20_months))
+# # train_indices21 <- sample(1:nrow(filtered_data21_months), 
+# #                           0.7 * nrow(filtered_data21_months))
+# # train_indices22 <- sample(1:nrow(filtered_data22_months), 
+# #                           0.7 * nrow(filtered_data22_months))
+# # train_indices23 <- sample(1:nrow(filtered_data23_months), 
+# #                           0.7 * nrow(filtered_data23_months))
+# # train_indices24 <- sample(1:nrow(filtered_data24_months), 
+# #                           0.7 * nrow(filtered_data24_months))
+```
+
+```{r}
+# train_data1 <- filtered_data1_slope[train_indices1, ]
+# train_data2 <- filtered_data2_slope[train_indices2, ]
+# train_data3 <- filtered_data3_slope[train_indices3, ]
+# train_data4 <- filtered_data4_slope[train_indices4, ]
+# # train_data5 <- filtered_data5_slope[train_indices5, ]
+# # train_data6 <- filtered_data6_slope[train_indices6, ]
+# # train_data7 <- filtered_data7_slope[train_indices7, ]
+# # train_data8 <- filtered_data8_slope[train_indices8, ]
+# train_data9 <- filtered_data9_threshold[train_indices9, ]
+# train_data10 <- filtered_data10_threshold[train_indices10, ]
+# train_data11 <- filtered_data11_threshold[train_indices11, ]
+# train_data12 <- filtered_data12_threshold[train_indices12, ]
+# # train_data13 <- filtered_data13_threshold[train_indices13, ]
+# # train_data14 <- filtered_data14_threshold[train_indices14, ]
+# # train_data15 <- filtered_data15_threshold[train_indices15, ]
+# # train_data16 <- filtered_data16_threshold[train_indices16, ]
+# train_data17 <- filtered_data17_months[train_indices17, ]
+# train_data18 <- filtered_data18_months[train_indices18, ]
+train_data19 <- filtered_data19_months[train_indices19, ]
+# train_data20 <- filtered_data20_months[train_indices20, ]
+# # train_data21 <- filtered_data21_months[train_indices21, ]
+# # train_data22 <- filtered_data22_months[train_indices22, ]
+# # train_data23 <- filtered_data23_months[train_indices23, ]
+# # train_data24 <- filtered_data24_months[train_indices24, ]
+```
+
+```{r}
+# test_data1 <- filtered_data1_slope[-train_indices1, ]
+# test_data2 <- filtered_data2_slope[-train_indices2, ]
+# test_data3 <- filtered_data3_slope[-train_indices3, ]
+# test_data4 <- filtered_data4_slope[-train_indices4, ]
+# # test_data5 <- filtered_data5_slope[-train_indices5, ]
+# # test_data6 <- filtered_data6_slope[-train_indices6, ]
+# # test_data7 <- filtered_data7_slope[-train_indices7, ]
+# # test_data8 <- filtered_data8_slope[-train_indices8, ]
+# test_data9 <- filtered_data9_threshold[-train_indices9, ]
+# test_data10 <- filtered_data10_threshold[-train_indices10, ]
+# test_data11 <- filtered_data11_threshold[-train_indices11, ]
+# test_data12 <- filtered_data12_threshold[-train_indices12, ]
+# # test_data13 <- filtered_data13_threshold[-train_indices13, ]
+# # test_data14 <- filtered_data14_threshold[-train_indices14, ]
+# # test_data15 <- filtered_data15_threshold[-train_indices15, ]
+# # test_data16 <- filtered_data16_threshold[-train_indices16, ]
+# test_data17 <- filtered_data17_months[-train_indices17, ]
+# test_data18 <- filtered_data18_months[-train_indices18, ]
+test_data19 <- filtered_data19_months[-train_indices19, ]
+# test_data20 <- filtered_data20_months[-train_indices20, ]
+# # test_data21 <- filtered_data21_months[-train_indices21, ]
+# # test_data22 <- filtered_data22_months[-train_indices22, ]
+# # test_data23 <- filtered_data23_months[-train_indices23, ]
+# # test_data24 <- filtered_data24_months[-train_indices24, ]
+```
+
+### Fit models
+
+```{r eval=FALSE, include=FALSE}
+# rf1 <- run_rf(vars_RF_slope, train_data1, "EUNISa_1")
+# rf2 <- run_rf(vars_RF_slope, train_data2, "EUNISa_1")
+# rf3 <- run_rf(vars_RF_slope, train_data3, "EUNISa_1")
+# rf4 <- run_rf(vars_RF_slope, train_data4, "EUNISa_1")
+# # rf5 <- run_rf(vars_RF_slope, train_data5, "EUNISa_1")
+# # rf6 <- run_rf(vars_RF_slope, train_data6, "EUNISa_1")
+# # rf7 <- run_rf(vars_RF_slope, train_data7, "EUNISa_1")
+# # rf8 <- run_rf(vars_RF_slope, train_data8, "EUNISa_1")
+# rf9 <- run_rf(vars_RF_threshold, train_data9, "EUNISa_1")
+# rf10 <- run_rf(vars_RF_threshold, train_data10, "EUNISa_1")
+# rf11 <- run_rf(vars_RF_threshold, train_data11, "EUNISa_1")
+# rf12 <- run_rf(vars_RF_threshold, train_data12, "EUNISa_1")
+# # rf13 <- run_rf(vars_RF_threshold, train_data13, "EUNISa_1")
+# # rf14 <- run_rf(vars_RF_threshold, train_data14, "EUNISa_1")
+# # rf15 <- run_rf(vars_RF_threshold, train_data15, "EUNISa_1")
+# # rf16 <- run_rf(vars_RF_threshold, train_data16, "EUNISa_1")
+# rf17 <- run_rf(vars_RF_months, train_data17, "EUNISa_1")
+# rf18 <- run_rf(vars_RF_months, train_data18, "EUNISa_1")
+rf19 <- run_rf(vars_RF_months, train_data19, "EUNISa_1")
+# rf20 <- run_rf(vars_RF_months, train_data20, "EUNISa_1")
+# # rf21 <- run_rf(vars_RF_months, train_data21, "EUNISa_1")
+# # rf22 <- run_rf(vars_RF_months, train_data22, "EUNISa_1")
+# # rf23 <- run_rf(vars_RF_months, train_data23, "EUNISa_1")
+# # rf24 <- run_rf(vars_RF_months, train_data24, "EUNISa_1")
+```
+
+```{r}
+# print(rf1$time)
+# print(rf2$time)
+# print(rf3$time)
+# print(rf4$time)
+# # print(rf5$time)
+# # print(rf6$time)
+# # print(rf7$time)
+# # print(rf8$time)
+# print(rf9$time)
+# print(rf10$time)
+# print(rf11$time)
+# print(rf12$time)
+# # print(rf13$time)
+# # print(rf14$time)
+# # print(rf15$time)
+# # print(rf16$time)
+# print(rf17$time)
+# print(rf18$time)
+print(rf19$time)
+# print(rf20$time)
+# # print(rf21$time)
+# # print(rf22$time)
+# # print(rf23$time)
+# # print(rf24$time)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+# save(rf1, file = "objects/RF/Landsat/rf1_model_l1_slope_novalid_GPS_Landsat.Rdata")
+# save(rf2, file = "objects/RF/Landsat/rf2_model_l1_slope_novalid_GPSdiff_Landsat.Rdata")
+# save(rf3, file = "objects/RF/Landsat/rf3_model_l1_slope_roughvalid_GPS_Landsat.Rdata")
+# save(rf4, file = "objects/RF/Landsat/rf4_model_l1_slope_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(rf5,
+# #      file = "objects/RF/Landsat/rf5_model_l1_slope_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(rf6,
+# #      file = "objects/RF/Landsat/rf6_model_l1_slope_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(rf7,
+# #      file = "objects/RF/Landsat/rf7_model_l1_slope_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(rf8,
+# #      file = "objects/RF/Landsat/rf8_model_l1_slope_roughvalid-refin2080_GPSdiff_Landsat.Rdata")
+# save(rf9, file = "objects/RF/Landsat/rf9_model_l1_treshold_novalid_GPS_Landsat.Rdata")
+# save(rf10, file = "objects/RF/Landsat/rf10_model_l1_treshold_novalid_GPSdiff_Landsat.Rdata")
+# save(rf11, file = "objects/RF/Landsat/rf11_model_l1_treshold_roughvalid_GPS_Landsat.Rdata")
+# save(rf12, file = "objects/RF/Landsat/rf12_model_l1_treshold_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(rf13,
+# #      file = "objects/RF/Landsat/rf13_model_l1_treshold_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(rf14,
+# #      file = "objects/RF/Landsat/rf14_model_l1_treshold_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(rf15,
+# #      file = "objects/RF/Landsat/rf15_model_l1_treshold_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(rf16,
+# #      file = "objects/RF/Landsat/rf16_model_l1_treshold_roughvalid-refin2080_GPSdiff_Landsat.Rdata")
+# save(rf17, file = "objects/RF/Landsat/rf17_model_l1_months_novalid_GPS_Landsat.Rdata")
+# save(rf18, file = "objects/RF/Landsat/rf18_model_l1_months_novalid_GPSdiff_Landsat.Rdata")
+save(rf19, file = "objects/RF/Landsat/rf19_model_l1_months_roughvalid_GPS_Landsat.Rdata")
+# save(rf20, file = "objects/RF/Landsat/rf20_model_l1_months_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(rf21, 
+# #      file = "objects/RF/Landsat/rf21_model_l1_months_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(rf22,
+# #      file = "objects/RF/Landsat/rf22_model_l1_months_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(rf23,
+# #      file = "objects/RF/Landsat/rf23_model_l1_months_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(rf24, 
+# #      file = "objects/RF/Landsat/rf24_model_l1_months_roughvalid-refin2080_GPS_Landsat.Rdata")
+```
+
+### Predictions
+
+```{r eval=FALSE, include=FALSE}
+# predictions_rf1 <- predict(rf1$model, newdata = test_data1,OOB = TRUE,
+#                            type = "response")
+# predictions_rf2 <- predict(rf2$model, newdata = test_data2,OOB = TRUE,
+#                            type = "response")
+# predictions_rf3 <- predict(rf3$model, newdata = test_data3,OOB = TRUE,
+#                            type = "response")
+# predictions_rf4 <- predict(rf4$model, newdata = test_data4,OOB = TRUE,
+#                            type = "response")
+# # predictions_rf5 <- predict(rf5$model, newdata = test_data5,OOB = TRUE,
+# #                            type = "response")
+# # predictions_rf6 <- predict(rf6$model, newdata = test_data6,OOB = TRUE,
+# #                            type = "response")
+# # predictions_rf7 <- predict(rf7$model, newdata = test_data7,OOB = TRUE,
+# #                            type = "response")
+# # predictions_rf8 <- predict(rf8$model, newdata = test_data8,OOB = TRUE,
+# #                            type = "response")
+# predictions_rf9 <- predict(rf9$model, newdata = test_data9,OOB = TRUE,
+#                            type = "response")
+# predictions_rf10 <- predict(rf10$model, newdata = test_data10,OOB = TRUE,
+#                            type = "response")
+# predictions_rf11 <- predict(rf11$model, newdata = test_data11,OOB = TRUE,
+#                            type = "response")
+# predictions_rf12 <- predict(rf12$model, newdata = test_data12,OOB = TRUE,
+#                            type = "response")
+# # predictions_rf13 <- predict(rf13$model, newdata = test_data13,OOB = TRUE,
+# #                            type = "response")
+# # predictions_rf14 <- predict(rf14$model, newdata = test_data14,OOB = TRUE,
+# #                            type = "response")
+# # predictions_rf15 <- predict(rf15$model, newdata = test_data15,OOB = TRUE,
+# #                            type = "response")
+# # predictions_rf16 <- predict(rf16$model, newdata = test_data16,OOB = TRUE,
+# #                            type = "response")
+# predictions_rf17 <- predict(rf17$model, newdata = test_data17,OOB = TRUE,
+#                            type = "response")
+# predictions_rf18 <- predict(rf18$model, newdata = test_data18,OOB = TRUE,
+#                            type = "response")
+predictions_rf19 <- predict(rf19$model, newdata = test_data19,OOB = TRUE,
+                           type = "response")
+# predictions_rf20 <- predict(rf20$model, newdata = test_data20,OOB = TRUE,
+#                            type = "response")
+# # predictions_rf21 <- predict(rf21$model, newdata = test_data21,OOB = TRUE,
+# #                            type = "response")
+# # predictions_rf22 <- predict(rf22$model, newdata = test_data22,OOB = TRUE,
+# #                            type = "response")
+# # predictions_rf23 <- predict(rf23$model, newdata = test_data23,OOB = TRUE,
+# #                            type = "response")
+# # predictions_rf24 <- predict(rf24$model, newdata = test_data24,OOB = TRUE,
+# #                            type = "response")
+```
+
+```{r eval=FALSE, include=FALSE}
+# save(predictions_rf1, file = "objects/RF/Landsat/rf1_pred_l1_slope_novalid_GPS_Landsat.Rdata")
+# save(predictions_rf2, file = "objects/RF/Landsat/rf2_pred_l1_slope_novalid_GPSdiff_Landsat.Rdata")
+# save(predictions_rf3, file = "objects/RF/Landsat/rf3_pred_l1_slope_roughvalid_GPS_Landsat.Rdata")
+# save(predictions_rf4, file = "objects/RF/Landsat/rf4_pred_l1_slope_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(predictions_rf5,
+# #      file = "objects/RF/Landsat/rf5_pred_l1_slope_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(predictions_rf6,
+# #      file = "objects/RF/Landsat/rf6_pred_l1_slope_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(predictions_rf7,
+# #      file = "objects/RF/Landsat/rf7_pred_l1_slope_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(predictions_rf8,
+# #      file = "objects/RF/Landsat/rf8_pred_l1_slope_roughvalid-refin2080_GPSdiff_Landsat.Rdata")
+# save(predictions_rf9, file = "objects/RF/Landsat/rf9_pred_l1_treshold_novalid_GPS_Landsat.Rdata")
+# save(predictions_rf10, file = "objects/RF/Landsat/rf10_pred_l1_treshold_novalid_GPSdiff_Landsat.Rdata")
+# save(predictions_rf11, file = "objects/RF/Landsat/rf11_pred_l1_treshold_roughvalid_GPS_Landsat.Rdata")
+# save(predictions_rf12, file = "objects/RF/Landsat/rf12_pred_l1_treshold_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(predictions_rf13,
+# #      file = "objects/RF/Landsat/rf13_pred_l1_treshold_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(predictions_rf14,
+# #      file = "objects/RF/Landsat/rf14_pred_l1_treshold_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(predictions_rf15,
+# #      file = "objects/RF/Landsat/rf15_pred_l1_treshold_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(predictions_rf16,
+# #      file = "objects/RF/Landsat/rf16_pred_l1_treshold_roughvalid-refin2080_GPSdiff_Landsat.Rdata")
+# save(predictions_rf17, file = "objects/RF/Landsat/rf17_pred_l1_months_novalid_GPS_Landsat.Rdata")
+# save(predictions_rf18, file = "objects/RF/Landsat/rf18_pred_l1_months_novalid_GPSdiff_Landsat.Rdata")
+save(predictions_rf19, file = "objects/RF/Landsat/rf19_pred_l1_months_roughvalid_GPS_Landsat.Rdata")
+# save(predictions_rf20, file = "objects/RF/Landsat/rf20_pred_l1_months_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(predictions_rf21, 
+# #      file = "objects/RF/Landsat/rf21_pred_l1_months_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(predictions_rf22,
+# #      file = "objects/RF/Landsat/rf22_pred_l1_months_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(predictions_rf23,
+# #      file = "objects/RF/Landsat/rf23_pred_l1_months_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(predictions_rf24, 
+# #      file = "objects/RF/Landsat/rf24_pred_l1_months_roughvalid-refin2080_GPS_Landsat.Rdata")
+```
+
+### Confusion matrices
+
+```{r}
+# # 1: Slope method, no previous validation, GPS points
+# confusionMatrix(predictions_rf1, test_data1$EUNISa_1)
+# # 2: Slope method, no previous validation, GPS diff points
+# confusionMatrix(predictions_rf2, test_data2$EUNISa_1)
+# # 3: Slope method, rough validation, GPS points
+# confusionMatrix(predictions_rf3, test_data3$EUNISa_1)
+# # 4: Slope method, rough validation, GPS diff points
+# confusionMatrix(predictions_rf4, test_data4$EUNISa_1)
+# # 5: Slope method, rough validation + refinement 10-90th, GPS points
+# # confusionMatrix(predictions_rf5, test_data5$EUNISa_1)
+# # 6: Slope method, rough validation + refinement 10-90th, GPS diff points
+# # confusionMatrix(predictions_rf6, test_data6$EUNISa_1)
+# # 7: Slope method, rough validation + refinement 20-80th, GPS points
+# # confusionMatrix(predictions_rf7, test_data7$EUNISa_1)
+# # 8: Slope method, rough validation + refinement 20-80th, GPS diff points
+# # confusionMatrix(predictions_rf8, test_data8$EUNISa_1)
+# # 9: Threshold method, no previous validation, GPS points
+# confusionMatrix(predictions_rf9, test_data9$EUNISa_1)
+# # 10: Threshold method, no previous validation, GPS diff points
+# confusionMatrix(predictions_rf10, test_data10$EUNISa_1)
+# # 11: Threshold method, rough validation, GPS points
+# confusionMatrix(predictions_rf11, test_data11$EUNISa_1)
+# # 12: Threshold method, rough validation, GPS diff points
+# confusionMatrix(predictions_rf12, test_data12$EUNISa_1)
+# # 13: Threshold method, rough validation + refinement 10-90th, GPS points
+# # confusionMatrix(predictions_rf13, test_data13$EUNISa_1)
+# # 14: Threshold method, rough validation + refinement 10-90th, GPS diff points
+# # confusionMatrix(predictions_rf14, test_data14$EUNISa_1)
+# # 15: Threshold method, rough validation + refinement 20-80th, GPS points
+# # confusionMatrix(predictions_rf15, test_data15$EUNISa_1)
+# # 16: Threshold method, rough validation + refinement 20-80th, GPS diff points
+# # confusionMatrix(predictions_rf16, test_data16$EUNISa_1)
+# # 17: Months method, no previous validation, GPS points
+# confusionMatrix(predictions_rf17, test_data17$EUNISa_1)
+# # 18: Months method, no previous validation, GPS diff points
+# confusionMatrix(predictions_rf18, test_data18$EUNISa_1)
+# 19: Months method, rough validation, GPS points
+confusionMatrix(predictions_rf19, test_data19$EUNISa_1)
+# # 20: Months method, rough validation, GPS diff points
+# confusionMatrix(predictions_rf20, test_data20$EUNISa_1)
+# # 21: Months method, rough validation + refinement 10-90th, GPS points
+# # confusionMatrix(predictions_rf21, test_data21$EUNISa_1)
+# # 22: Months method, rough validation + refinement 10-90th, GPS diff points
+# # confusionMatrix(predictions_rf22, test_data22$EUNISa_1)
+# # 23: Months method, rough validation + refinement 20-80th, GPS points
+# # confusionMatrix(predictions_rf23, test_data23$EUNISa_1)
+# # 24: Months method, rough validation + refinement 20-80th, GPS diff points
+# # confusionMatrix(predictions_rf24, test_data24$EUNISa_1)
+```
+
+#### Plots
+
+```{r}
+cm_rf19<- as.data.frame(as.table(confusionMatrix(predictions_rf19,
+                                                 test_data19$EUNISa_1)))
+colnames(cm_rf19) <- c("Prediction", "Reference", "Freq")
+```
+
+```{r}
+plot_cm_rf19 <- ggplot(cm_rf19, 
+                       aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Confusion Matrix", x = "Reference", y = "Prediction") +
+  theme_minimal() + theme(legend.position = "none") +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14),
+        plot.title = element_text(size = 16, face = "bold"))
+plot_cm_rf19
+ggsave(here("output", "figures", "RF", "plot_cm_rf19.jpeg"), plot_cm_rf19,
+       dpi = 300, width = 3, height = 3)
+```
+
+### Variable importance
+
+#### Unconditional
+
+```{r eval=FALSE, include=FALSE}
+# varimp_rf1 <- compute_varimp(rf1$model, nperm = 100)
+# varimp_rf2 <- compute_varimp(rf2$model, nperm = 100)
+# varimp_rf3 <- compute_varimp(rf3$model, nperm = 100)
+# varimp_rf4 <- compute_varimp(rf4$model, nperm = 100)
+# # varimp_rf5 <- compute_varimp(rf5$model, nperm = 100)
+# # varimp_rf6 <- compute_varimp(rf6$model, nperm = 100)
+# # varimp_rf7 <- compute_varimp(rf7$model, nperm = 100)
+# # varimp_rf8 <- compute_varimp(rf8$model, nperm = 100)
+# varimp_rf9 <- compute_varimp(rf9$model, nperm = 100)
+# varimp_rf10 <- compute_varimp(rf10$model, nperm = 100)
+# varimp_rf11 <- compute_varimp(rf11$model, nperm = 100)
+# varimp_rf12 <- compute_varimp(rf12$model, nperm = 100)
+# # varimp_rf13 <- compute_varimp(rf13$model, nperm = 100)
+# # varimp_rf14 <- compute_varimp(rf14$model, nperm = 100)
+# # varimp_rf15 <- compute_varimp(rf15$model, nperm = 100)
+# # varimp_rf16 <- compute_varimp(rf16$model, nperm = 100)
+# varimp_rf17 <- compute_varimp(rf17$model, nperm = 100)
+# varimp_rf18 <- compute_varimp(rf18$model, nperm = 100)
+varimp_rf19 <- compute_varimp(rf19$model, nperm = 100)
+# varimp_rf20 <- compute_varimp(rf20$model, nperm = 100)
+# # varimp_rf21 <- compute_varimp(rf21$model, nperm = 100)
+# # varimp_rf22 <- compute_varimp(rf22$model, nperm = 100)
+# # varimp_rf23 <- compute_varimp(rf23$model, nperm = 100)
+# # varimp_rf24 <- compute_varimp(rf24$model, nperm = 100)
+```
+
+```{r eval=FALSE, include=FALSE}
+# print(varimp_rf1$time)
+# print(varimp_rf2$time)
+# print(varimp_rf3$time)
+# print(varimp_rf4$time)
+# # print(varimp_rf5$time)
+# # print(varimp_rf6$time)
+# # print(varimp_rf7$time)
+# # print(varimp_rf8$time)
+# print(varimp_rf9$time)
+# print(varimp_rf10$time)
+# print(varimp_rf11$time)
+# print(varimp_rf12$time)
+# # print(varimp_rf13$time)
+# # print(varimp_rf14$time)
+# # print(varimp_rf15$time)
+# # print(varimp_rf16$time)
+# print(varimp_rf17$time)
+# print(varimp_rf18$time)
+print(varimp_rf19$time)
+# print(varimp_rf20$time)
+# # print(varimp_rf21$time)
+# # print(varimp_rf22$time)
+# # print(varimp_rf23$time)
+# # print(varimp_rf24$time)
+```
+
+```{r eval=FALSE, include=FALSE}
+# save(varimp_rf1, file = "objects/RF/Landsat/rf1_varimp_l1_slope_novalid_GPS_Landsat.Rdata")
+# save(varimp_rf2, file = "objects/RF/Landsat/rf2_varimp_l1_slope_novalid_GPSdiff_Landsat.Rdata")
+# save(varimp_rf3, file = "objects/RF/Landsat/rf3_varimp_l1_slope_roughvalid_GPS_Landsat.Rdata")
+# save(varimp_rf4, file = "objects/RF/Landsat/rf4_varimp_l1_slope_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(varimp_rf5, 
+# #      file = "objects/RF/Landsat/rf5_varimp_l1_slope_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(varimp_rf6, 
+# #      file = "objects/RF/Landsat/rf6_varimp_l1_slope_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(varimp_rf7,
+# #      file = "objects/RF/Landsat/rf7_varimp_l1_slope_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(varimp_rf8, 
+# #      file = "objects/RF/Landsat/rf8_varimp_l1_slope_roughvalid-refin2080_GPSdiff_Landsat.Rdata")
+# save(varimp_rf9, file = "objects/RF/Landsat/rf9_varimp_l1_threshold_novalid_GPS_Landsat.Rdata")
+# save(varimp_rf10, file = "objects/RF/Landsat/rf10_varimp_l1_threshold_novalid_GPSdiff_Landsat.Rdata")
+# save(varimp_rf11, file = "objects/RF/Landsat/rf11_varimp_l1_threshold_roughvalid_GPS_Landsat.Rdata")
+# save(varimp_rf12, file = "objects/RF/Landsat/rf12_varimp_l1_threshold_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(varimp_rf13, 
+# #      file = "objects/RF/Landsat/rf13_varimp_l1_threshold_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(varimp_rf14, 
+# #      file = "objects/RF/Landsat/rf14_varimp_l1_threshold_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(varimp_rf15,
+# #      file = "objects/RF/Landsat/rf15_varimp_l1_threshold_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(varimp_rf16, 
+# #      file = "objects/RF/Landsat/rf16_varimp_l1_threshold_roughvalid-refin2080_GPSdiff_Landsat.Rdata")
+# save(varimp_rf17, file = "objects/RF/Landsat/rf17_varimp_l1_months_novalid_GPS_Landsat.Rdata")
+# save(varimp_rf18, file = "objects/RF/Landsat/rf18_varimp_l1_months_novalid_GPSdiff_Landsat.Rdata")
+save(varimp_rf19, file = "objects/RF/Landsat/rf19_varimp_l1_months_roughvalid_GPS_Landsat.Rdata")
+# save(varimp_rf20, file = "objects/RF/Landsat/rf20_varimp_l1_months_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(varimp_rf21,
+# #      file = "objects/RF/Landsat/rf21_varimp_l1_months_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(varimp_rf22, 
+# #      file = "objects/RF/Landsat/rf22_varimp_l1_months_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(varimp_rf23, 
+# #      file = "objects/RF/Landsat/rf23_varimp_l1_months_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(varimp_rf24, 
+# #      file = "objects/RF/Landsat/rf24_varimp_l1_months_roughvalid-refin2080_GPSdiff_Landsat.Rdata")
+```
+
+##### Plots
+
+```{r}
+# plot(varimp_rf1$varimp, margin = c(10, 6, 2, 2))
+# plot(varimp_rf2$varimp, margin = c(10, 6, 2, 2))
+# plot(varimp_rf3$varimp, margin = c(10, 6, 2, 2))
+# plot(varimp_rf4$varimp, margin = c(10, 6, 2, 2))
+# # plot(varimp_rf5$varimp, margin = c(10, 6, 2, 2))
+# # plot(varimp_rf6$varimp, margin = c(10, 6, 2, 2))
+# # plot(varimp_rf7$varimp, margin = c(10, 6, 2, 2))
+# # plot(varimp_rf8$varimp, margin = c(10, 6, 2, 2))
+# plot(varimp_rf9$varimp, margin = c(10, 6, 2, 2))
+# plot(varimp_rf10$varimp, margin = c(10, 6, 2, 2))
+# plot(varimp_rf11$varimp, margin = c(10, 6, 2, 2))
+# plot(varimp_rf12$varimp, margin = c(10, 6, 2, 2))
+# # plot(varimp_rf13$varimp, margin = c(10, 6, 2, 2))
+# # plot(varimp_rf14$varimp, margin = c(10, 6, 2, 2))
+# # plot(varimp_rf15$varimp, margin = c(10, 6, 2, 2))
+# # plot(varimp_rf16$varimp, margin = c(10, 6, 2, 2))
+# plot(varimp_rf17$varimp, margin = c(10, 6, 2, 2))
+# plot(varimp_rf18$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf19$varimp, margin = c(10, 6, 2, 2))
+# plot(varimp_rf20$varimp, margin = c(10, 6, 2, 2))
+# # plot(varimp_rf21$varimp, margin = c(10, 6, 2, 2))
+# # plot(varimp_rf22$varimp, margin = c(10, 6, 2, 2))
+# # plot(varimp_rf23$varimp, margin = c(10, 6, 2, 2))
+# # plot(varimp_rf24$varimp, margin = c(10, 6, 2, 2))
+```
+
+#### Conditional (TBD)
+
+```{r eval=FALSE, include=FALSE}
+# varimp-cond_rf1 <- compute_varimp_cond(rf1$model, nperm = 100)
+# varimp-cond_rf2 <- compute_varimp_cond(rf2$model, nperm = 100)
+# varimp-cond_rf3 <- compute_varimp_cond(rf3$model, nperm = 100)
+# varimp-cond_rf4 <- compute_varimp_cond(rf4$model, nperm = 100)
+# # varimp-cond_rf5 <- compute_varimp_cond(rf5$model, nperm = 100)
+# # varimp-cond_rf6 <- compute_varimp_cond(rf6$model, nperm = 100)
+# # varimp-cond_rf7 <- compute_varimp_cond(rf7$model, nperm = 100)
+# # varimp-cond_rf8 <- compute_varimp_cond(rf8$model, nperm = 100)
+# varimp-cond_rf9 <- compute_varimp_cond(rf9$model, nperm = 100)
+# varimp-cond_rf10 <- compute_varimp_cond(rf10$model, nperm = 100)
+# varimp-cond_rf11 <- compute_varimp_cond(rf11$model, nperm = 100)
+# varimp-cond_rf12 <- compute_varimp_cond(rf12$model, nperm = 100)
+# # varimp-cond_rf13 <- compute_varimp_cond(rf13$model, nperm = 100)
+# # varimp-cond_rf14 <- compute_varimp_cond(rf14$model, nperm = 100)
+# # varimp-cond_rf15 <- compute_varimp_cond(rf15$model, nperm = 100)
+# # varimp-cond_rf16 <- compute_varimp_cond(rf16$model, nperm = 100)
+# varimp-cond_rf17 <- compute_varimp_cond(rf17$model, nperm = 100)
+# varimp-cond_rf18 <- compute_varimp_cond(rf18$model, nperm = 100)
+varimp-cond_rf19 <- compute_varimp_cond(rf19$model, nperm = 100)
+# varimp-cond_rf20 <- compute_varimp_cond(rf20$model, nperm = 100)
+# varimp-cond_rf21 <- compute_varimp_cond(rf21$model, nperm = 100)
+# # varimp-cond_rf22 <- compute_varimp_cond(rf22$model, nperm = 100)
+# # varimp-cond_rf23 <- compute_varimp_cond(rf23$model, nperm = 100)
+# # varimp-cond_rf24 <- compute_varimp_cond(rf24$model, nperm = 100)
+```
+
+```{r eval=FALSE, include=FALSE}
+# print(varimp-cond_rf1$time)
+# print(varimp-cond_rf2$time)
+# print(varimp-cond_rf3$time)
+# print(varimp-cond_rf4$time)
+# # print(varimp-cond_rf5$time)
+# # print(varimp-cond_rf6$time)
+# # print(varimp-cond_rf7$time)
+# # print(varimp-cond_rf8$time)
+# print(varimp-cond_rf9$time)
+# print(varimp-cond_rf10$time)
+# print(varimp-cond_rf11$time)
+# print(varimp-cond_rf12$time)
+# # print(varimp-cond_rf13$time)
+# # print(varimp-cond_rf14$time)
+# # print(varimp-cond_rf15$time)
+# # print(varimp-cond_rf16$time)
+# print(varimp-cond_rf17$time)
+# print(varimp-cond_rf18$time)
+print(varimp-cond_rf19$time)
+# print(varimp-cond_rf20$time)
+# # print(varimp-cond_rf21$time)
+# # print(varimp-cond_rf22$time)
+# # print(varimp-cond_rf23$time)
+# # print(varimp-cond_rf24$time)
+```
+
+```{r eval=FALSE, include=FALSE}
+# save(varimp-cond_rf1, 
+#      file = "objects/RF/Landsat/rf1_varimp-cond_l1_slope_novalid_GPS_Landsat.Rdata")
+# save(varimp-cond_rf2,
+#      file = "objects/RF/Landsat/rf2_varimp-cond_l1_slope_novalid_GPSdiff_Landsat.Rdata")
+# save(varimp-cond_rf3,
+#      file = "objects/RF/Landsat/rf3_varimp-cond_l1_slope_roughvalid_GPS_Landsat.Rdata")
+# save(varimp-cond_rf4,
+#      file = "objects/RF/Landsat/rf4_varimp-cond_l1_slope_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(varimp-cond_rf5, 
+# #      file = "objects/RF/Landsat/rf5_varimp-cond_l1_slope_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(varimp-cond_rf6, 
+# #      file = "objects/RF/Landsat/rf6_varimp-cond_l1_slope_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(varimp-cond_rf7,
+# #      file = "objects/RF/Landsat/rf7_varimp-cond_l1_slope_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(varimp-cond_rf8, 
+# #      file = "objects/RF/Landsat/rf8_varimp-cond_l1_slope_roughvalid-refin2080_GPSdiff_Landsat.Rdata")
+# save(varimp-cond_rf9, 
+#      file = "objects/RF/Landsat/rf9_varimp-cond_l1_threshold_novalid_GPS_Landsat.Rdata")
+# save(varimp-cond_rf10,
+#      file = "objects/RF/Landsat/rf10_varimp-cond_l1_threshold_novalid_GPSdiff_Landsat.Rdata")
+# save(varimp-cond_rf11,
+#      file = "objects/RF/Landsat/rf11_varimp-cond_l1_threshold_roughvalid_GPS_Landsat.Rdata")
+# save(varimp-cond_rf12, 
+#      file = "objects/RF/Landsat/rf12_varimp-cond_l1_threshold_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(varimp-cond_rf13, 
+# #      file = "objects/RF/Landsat/rf13_varimp-cond_l1_threshold_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(varimp-cond_rf14, 
+# #      file = "objects/RF/Landsat/rf14_varimp-cond_l1_threshold_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(varimp-cond_rf15,
+# #      file = "objects/RF/Landsat/rf15_varimp-cond_l1_threshold_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(varimp-cond_rf16, 
+# #      file = "objects/RF/Landsat/rf16_varimp-cond_l1_threshold_roughvalid-refin2080_GPSdiff_Landsat.Rdata")
+# save(varimp-cond_rf17,
+#      file = "objects/RF/Landsat/rf17_varimp-cond_l1_months_novalid_GPS_Landsat.Rdata")
+# save(varimp-cond_rf18, 
+#      file = "objects/RF/Landsat/rf18_varimp-cond_l1_months_novalid_GPSdiff_Landsat.Rdata")
+save(varimp-cond_rf19, 
+     file = "objects/RF/Landsat/rf19_varimp-cond_l1_months_roughvalid_GPS_Landsat.Rdata")
+# save(varimp-cond_rf20, 
+#      file = "objects/RF/Landsat/rf20_varimp-cond_l1_months_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(varimp-cond_rf21,
+# #      file = "objects/RF/Landsat/rf21_varimp-cond_l1_months_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(varimp-cond_rf22, 
+# #      file = "objects/RF/Landsat/rf22_varimp-cond_l1_months_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(varimp-cond_rf23, 
+# #      file = "objects/RF/Landsat/rf23_varimp-cond_l1_months_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(varimp-cond_rf24, 
+# #      file = "objects/RF/Landsat/rf24_varimp-cond_l1_months_roughvalid-refin2080_GPSdiff_Landsat.Rdata")
+```
+
+##### Plots
+
+```{r}
+# plot(varimp-cond_rf1$varimp, margin = c(9, 3, 2, 2))
+# plot(varimp-cond_rf2$varimp, margin = c(9, 3, 2, 2))
+# plot(varimp-cond_rf3$varimp, margin = c(9, 3, 2, 2))
+# plot(varimp-cond_rf4$varimp, margin = c(9, 3, 2, 2))
+# # plot(varimp-cond_rf5$varimp, margin = c(9, 3, 2, 2))
+# # plot(varimp-cond_rf6$varimp, margin = c(9, 3, 2, 2))
+# # plot(varimp-cond_rf7$varimp, margin = c(9, 3, 2, 2))
+# # plot(varimp-cond_rf8$varimp, margin = c(9, 3, 2, 2))
+# plot(varimp-cond_rf9$varimp, margin = c(9, 3, 2, 2))
+# plot(varimp-cond_rf10$varimp, margin = c(9, 3, 2, 2))
+# plot(varimp-cond_rf11$varimp, margin = c(9, 3, 2, 2))
+# plot(varimp-cond_rf12$varimp, margin = c(9, 3, 2, 2))
+# # plot(varimp-cond_rf13$varimp, margin = c(9, 3, 2, 2))
+# # plot(varimp-cond_rf14$varimp, margin = c(9, 3, 2, 2))
+# # plot(varimp-cond_rf15$varimp, margin = c(9, 3, 2, 2))
+# # plot(varimp-cond_rf16$varimp, margin = c(9, 3, 2, 2))
+# plot(varimp-cond_rf17$varimp, margin = c(9, 3, 2, 2))
+# plot(varimp-cond_rf18$varimp, margin = c(9, 3, 2, 2))
+plot(varimp-cond_rf19$varimp, margin = c(9, 3, 2, 2))
+# plot(varimp-cond_rf20$varimp, margin = c(9, 3, 2, 2))
+# # plot(varimp-cond_rf21$varimp, margin = c(9, 3, 2, 2))
+# # plot(varimp-cond_rf22$varimp, margin = c(9, 3, 2, 2))
+# # plot(varimp-cond_rf23$varimp, margin = c(9, 3, 2, 2))
+# # plot(varimp-cond_rf24$varimp, margin = c(9, 3, 2, 2))
+```
+
+### ROC curves (TBD)
+
+```{r eval=FALSE, include=FALSE}
+# roc_data1 <- compute_roc_level1(rf1$model, test_data1)
+# roc_data2 <- compute_roc_level1(rf2$model, test_data2)
+# roc_data3 <- compute_roc_level1(rf3$model, test_data3)
+# roc_data4 <- compute_roc_level1(rf4$model, test_data4)
+# # roc_data5 <- compute_roc_level1(rf5$model, test_data5)
+# # roc_data6 <- compute_roc_level1(rf6$model, test_data6)
+# # roc_data7 <- compute_roc_level1(rf7$model, test_data7)
+# # roc_data8 <- compute_roc_level1(rf8$model, test_data8)
+# roc_data9 <- compute_roc_level1(rf9$model, test_data9)
+# roc_data10 <- compute_roc_level1(rf10$model, test_data10)
+# roc_data11 <- compute_roc_level1(rf11$model, test_data11)
+# roc_data12 <- compute_roc_level1(rf12$model, test_data12)
+# # roc_data13 <- compute_roc_level1(rf13$model, test_data13)
+# # roc_data14 <- compute_roc_level1(rf14$model, test_data14)
+# # roc_data15 <- compute_roc_level1(rf15$model, test_data15)
+# # roc_data16 <- compute_roc_level1(rf16$model, test_data16)
+# roc_data17 <- compute_roc_level1(rf17$model, test_data17)
+# roc_data18 <- compute_roc_level1(rf18$model, test_data18)
+roc_data19 <- compute_roc_level1(rf19$model, test_data19)
+# roc_data20 <- compute_roc_level1(rf20$model, test_data20)
+# # roc_data21 <- compute_roc_level1(rf21$model, test_data21)
+# # roc_data22 <- compute_roc_level1(rf22$model, test_data22)
+# # roc_data23 <- compute_roc_level1(rf23$model, test_data23)
+# # roc_data24 <- compute_roc_level1(rf24$model, test_data24)
+```
+
+```{r}
+# print(roc_data1$time)
+# print(roc_data2$time)
+# print(roc_data3$time)
+# print(roc_data4$time)
+# # print(roc_data5$time)
+# # print(roc_data6$time)
+# # print(roc_data7$time)
+# # print(roc_data8$time)
+# print(roc_data9$time)
+# print(roc_data10$time)
+# print(roc_data11$time)
+# print(roc_data12$time)
+# # print(roc_data13$time)
+# # print(roc_data14$time)
+# # print(roc_data15$time)
+# # print(roc_data16$time)
+# print(roc_data17$time)
+# print(roc_data18$time)
+print(roc_data19$time)
+# print(roc_data20$time)
+# # print(roc_data21$time)
+# # print(roc_data22$time)
+# # print(roc_data23$time)
+# # print(roc_data24$time)
+```
+
+```{r}
+# save(roc_data1, 
+#      file = "objects/RF/Landsat/rf1_rocdata_l1_slope_novalid_GPS_Landsat.Rdata")
+# save(roc_data2,
+#      file = "objects/RF/Landsat/rf2_rocdata_l1_slope_novalid_GPSdiff_Landsat.Rdata")
+# save(roc_data3,
+#      file = "objects/RF/Landsat/rf3_rocdata_l1_slope_roughvalid_GPS_Landsat.Rdata")
+# save(roc_data4,
+#      file = "objects/RF/Landsat/rf4_rocdata_l1_slope_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(roc_data5, 
+# #      file = "objects/RF/Landsat/rf5_rocdata_l1_slope_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(roc_data6, 
+# #      file = "objects/RF/Landsat/rf6_rocdata_l1_slope_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(roc_data7,
+# #      file = "objects/RF/Landsat/rf7_rocdata_l1_slope_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(roc_data8, 
+# #      file = "objects/RF/Landsat/rf8_rocdata_l1_slope_roughvalid-refin2080_GPSdiff_Landsat.Rdata")
+# save(roc_data9,
+#      file = "objects/RF/Landsat/rf9_rocdata_l1_threshold_novalid_GPS_Landsat.Rdata")
+# save(roc_data10,
+#      file = "objects/RF/Landsat/rf10_rocdata_l1_threshold_novalid_GPSdiff_Landsat.Rdata")
+# save(roc_data11, 
+#      file = "objects/RF/Landsat/rf11_rocdata_l1_threshold_roughvalid_GPS_Landsat.Rdata")
+# save(roc_data12, 
+#      file = "objects/RF/Landsat/rf12_rocdata_l1_threshold_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(roc_data13, 
+# #      file = "objects/RF/Landsat/rf13_rocdata_l1_threshold_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(roc_data14, 
+# #      file = "objects/RF/Landsat/rf14_rocdata_l1_threshold_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(roc_data15,
+# #      file = "objects/RF/Landsat/rf15_rocdata_l1_threshold_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(roc_data16, 
+# #      file = "objects/RF/Landsat/rf16_rocdata_l1_threshold_roughvalid-refin2080_GPSdiff_Landsat.Rdata")
+# save(roc_data17, 
+#      file = "objects/RF/Landsat/rf17_rocdata_l1_months_novalid_GPS_Landsat.Rdata")
+# save(roc_data18, 
+#      file = "objects/RF/Landsat/rf18_rocdata_l1_months_novalid_GPSdiff_Landsat.Rdata")
+save(roc_data19, 
+     file = "objects/RF/Landsat/rf19_rocdata_l1_months_roughvalid_GPS_Landsat.Rdata")
+# save(roc_data20, 
+#      file = "objects/RF/Landsat/rf20_rocdata_l1_months_roughvalid_GPSdiff_Landsat.Rdata")
+# # save(roc_data21,
+# #      file = "objects/RF/Landsat/rf21_rocdata_l1_months_roughvalid-refin1090_GPS_Landsat.Rdata")
+# # save(roc_data22, 
+# #      file = "objects/RF/Landsat/rf22_rocdata_l1_months_roughvalid-refin1090_GPSdiff_Landsat.Rdata")
+# # save(roc_data23, 
+# #      file = "objects/RF/Landsat/rf23_rocdata_l1_months_roughvalid-refin2080_GPS_Landsat.Rdata")
+# # save(roc_data24, 
+# #      file = "objects/RF/Landsat/rf24_rocdata_l1_months_roughvalid-refin2080_GPSdiff_Landsat.Rdata")
+```
+
+#### Plots
+
+```{r}
+# roc1 <- ggplot(roc_data1$roc, aes(x = FPR, y = TPR, color = Class)) +
+#   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+#   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+#        y = "True Positive Rate", color = "Class (AUC)") +
+#   theme_minimal() + theme(legend.position = "bottom")
+# roc2 <- ggplot(roc_data2$roc, aes(x = FPR, y = TPR, color = Class)) +
+#   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+#   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+#        y = "True Positive Rate", color = "Class (AUC)") +
+#   theme_minimal() + theme(legend.position = "bottom")
+# roc3 <- ggplot(roc_data3$roc, aes(x = FPR, y = TPR, color = Class)) +
+#   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+#   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+#        y = "True Positive Rate", color = "Class (AUC)") +
+#   theme_minimal() + theme(legend.position = "bottom")
+# roc4 <- ggplot(roc_data4$roc, aes(x = FPR, y = TPR, color = Class)) +
+#   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+#   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+#        y = "True Positive Rate", color = "Class (AUC)") +
+#   theme_minimal() + theme(legend.position = "bottom")
+# # roc5 <- ggplot(roc_data5$roc, aes(x = FPR, y = TPR, color = Class)) +
+# #   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+# #   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+# #        y = "True Positive Rate", color = "Class (AUC)") +
+# #   theme_minimal() + theme(legend.position = "bottom")
+# # roc6 <- ggplot(roc_data6$roc, aes(x = FPR, y = TPR, color = Class)) +
+# #   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+# #   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+# #        y = "True Positive Rate", color = "Class (AUC)") +
+# #   theme_minimal() + theme(legend.position = "bottom")
+# # roc7 <- ggplot(roc_data7$roc, aes(x = FPR, y = TPR, color = Class)) +
+# #   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+# #   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+# #        y = "True Positive Rate", color = "Class (AUC)") +
+# #   theme_minimal() + theme(legend.position = "bottom")
+# # roc8 <- ggplot(roc_data8$roc, aes(x = FPR, y = TPR, color = Class)) +
+# #   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+# #   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+# #        y = "True Positive Rate", color = "Class (AUC)") +
+# #   theme_minimal() + theme(legend.position = "bottom")
+# roc9 <- ggplot(roc_data9$roc, aes(x = FPR, y = TPR, color = Class)) +
+#   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+#   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+#        y = "True Positive Rate", color = "Class (AUC)") +
+#   theme_minimal() + theme(legend.position = "bottom")
+# roc10 <- ggplot(roc_data10$roc, aes(x = FPR, y = TPR, color = Class)) +
+#   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+#   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+#        y = "True Positive Rate", color = "Class (AUC)") +
+#   theme_minimal() + theme(legend.position = "bottom")
+# roc11 <- ggplot(roc_data11$roc, aes(x = FPR, y = TPR, color = Class)) +
+#   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+#   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+#        y = "True Positive Rate", color = "Class (AUC)") +
+#   theme_minimal() + theme(legend.position = "bottom")
+# roc12 <- ggplot(roc_data12$roc, aes(x = FPR, y = TPR, color = Class)) +
+#   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+#   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+#        y = "True Positive Rate", color = "Class (AUC)") +
+#   theme_minimal() + theme(legend.position = "bottom")
+# # roc13 <- ggplot(roc_data13$roc, aes(x = FPR, y = TPR, color = Class)) +
+# #   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+# #   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+# #        y = "True Positive Rate", color = "Class (AUC)") +
+# #   theme_minimal() + theme(legend.position = "bottom")
+# # roc14 <- ggplot(roc_data14$roc, aes(x = FPR, y = TPR, color = Class)) +
+# #   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+# #   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+# #        y = "True Positive Rate", color = "Class (AUC)") +
+# #   theme_minimal() + theme(legend.position = "bottom")
+# # roc15 <- ggplot(roc_data15$roc, aes(x = FPR, y = TPR, color = Class)) +
+# #   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+# #   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+# #        y = "True Positive Rate", color = "Class (AUC)") +
+# #   theme_minimal() + theme(legend.position = "bottom")
+# # roc16 <- ggplot(roc_data16$roc, aes(x = FPR, y = TPR, color = Class)) +
+# #   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+# #   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+# #        y = "True Positive Rate", color = "Class (AUC)") +
+# #   theme_minimal() + theme(legend.position = "bottom")
+# roc17 <- ggplot(roc_data17$roc, aes(x = FPR, y = TPR, color = Class)) +
+#   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+#   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+#        y = "True Positive Rate", color = "Class (AUC)") +
+#   theme_minimal() + theme(legend.position = "bottom")
+# roc18 <- ggplot(roc_data18$roc, aes(x = FPR, y = TPR, color = Class)) +
+#   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+#   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+#        y = "True Positive Rate", color = "Class (AUC)") +
+#   theme_minimal() + theme(legend.position = "bottom")
+roc19 <- ggplot(roc_data19$roc, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+  labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+       y = "True Positive Rate", color = "Class (AUC)") +
+  theme_minimal() + theme(legend.position = "bottom")
+# roc20 <- ggplot(roc_data20$roc, aes(x = FPR, y = TPR, color = Class)) +
+#   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+#   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+#        y = "True Positive Rate", color = "Class (AUC)") +
+#   theme_minimal() + theme(legend.position = "bottom")
+# # roc21 <- ggplot(roc_data21$roc, aes(x = FPR, y = TPR, color = Class)) +
+# #   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+# #   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+# #        y = "True Positive Rate", color = "Class (AUC)") +
+# #   theme_minimal() + theme(legend.position = "bottom")
+# # roc22 <- ggplot(roc_data22$roc, aes(x = FPR, y = TPR, color = Class)) +
+# #   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+# #   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+# #        y = "True Positive Rate", color = "Class (AUC)") +
+# #   theme_minimal() + theme(legend.position = "bottom")
+# # roc23 <- ggplot(roc_data23$roc, aes(x = FPR, y = TPR, color = Class)) +
+# #   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+# #   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+# #        y = "True Positive Rate", color = "Class (AUC)") +
+# #   theme_minimal() + theme(legend.position = "bottom")
+# # roc24 <- ggplot(roc_data24$roc, aes(x = FPR, y = TPR, color = Class)) +
+# #   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+# #   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+# #        y = "True Positive Rate", color = "Class (AUC)") +
+# #   theme_minimal() + theme(legend.position = "bottom")
+```
+
+```{r}
+# roc1
+# roc2
+# roc3
+# roc4
+# # roc5
+# # roc6
+# # roc7
+# # roc8
+# roc9
+# roc10
+# roc11
+# roc12
+# # roc13
+# # roc14
+# # roc15
+# # roc16
+# roc17
+# roc18
+roc19
+# roc20
+# # roc21
+# # roc22
+# # roc23
+# # roc24
+```
+
+## With refinement
+
+### Refinement
+
+Based on the 4 most important variables (except canopy_height). If the same type of variable is within the 4 most important for different indices, take next variable of different type.
+For rf19 (Months method, rough validation, GPS points), variables for refinement are: EVI_pos_value, SAVI_auc_mar_oct, SAVI_avg_value_03, NDVI_min. 
+
+```{r}
+distr_plot_percentiles <- function(data, y_vars, y_labels) {
+  for (i in seq_along(y_vars)) {
+    y_var <- y_vars[[i]]
+    y_label <- y_labels[[i]]
+    
+    # Calculate percentiles per EUNISa_1 group
+    percentiles <- data %>%
+      group_by(EUNISa_1) %>%
+      summarise(
+        p10 = quantile(.data[[y_var]], 0.1, na.rm = TRUE),
+        p90 = quantile(.data[[y_var]], 0.9, na.rm = TRUE),
+        .groups = "drop"
+      )
+    
+    # Join percentiles back to data
+    data_flagged <- data %>%
+      left_join(percentiles, by = "EUNISa_1") %>%
+      mutate(outlier_flag = case_when(
+        .data[[y_var]] < p10 ~ "low",
+        .data[[y_var]] > p90 ~ "high",
+        TRUE ~ "mid"
+      ))
+    
+    # Filter and plot
+    p <- ggplot(data = data_flagged %>%
+                  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
+                aes(x = EUNISa_1_descr, y = .data[[y_var]])) +
+      geom_flat_violin(aes(fill = EUNISa_1_descr),
+                       position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+      geom_point(aes(color = ifelse(outlier_flag == "mid",
+                                    EUNISa_1_descr, "grey")),
+                 position = position_jitter(width = 0.15), size = 1,
+                 alpha = 0.6) +
+      geom_boxplot(aes(fill = EUNISa_1_descr), width = 0.2, outlier.shape = NA,
+                   alpha = 0.5) +
+      stat_summary(fun = mean, geom = "point", shape = 20, size = 1) +
+      stat_summary(fun.data = function(x) data.frame(y = max(x, na.rm = TRUE) +
+                                                       0.1, label = length(x)),
+                   geom = "text", aes(label = ..label..), vjust = 0.5) +
+      labs(y = y_label, x = "EUNIS level 1") +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+      guides(fill = FALSE, color = FALSE) +
+      theme_bw() + coord_flip() +
+      scale_color_manual(values = c(
+        "Forests and other wooded land" = "#F8766D",
+        "Grasslands" = "#7CAE00",
+        "Heathlands, scrub and tundra" = "#00BFC4",
+        "Wetlands" = "#C77CFF",
+        "grey" = "grey"))
+    
+    print(p)
+  }
+}
+```
+
+```{r}
+distr_plot_percentiles(
+  # GPS points after rough validation
+  filtered_data19_months %>%
+    # Join to get EUNIS 1 descriptions
+    left_join(data_validation %>%
+                select(PlotObservationID, EUNISa_1_descr)),
+  c("EVI_pos_value", "SAVI_auc_mar_oct", "SAVI_avg_value_03", "NDVI_min"),
+  c("EVI max value", "SAVI AUC", "AVerage SAVI value for March", "NDVI min value"))
+```
+
+Calculate percentiles:
+
+```{r}
+percentiles_months <- 
+  # GPS points after rough validation
+  filtered_data19_months %>%
+  group_by(EUNISa_1) %>%
+  summarize(
+    perc_10_SAVI_diff_pos_march_value = quantile(SAVI_diff_pos_march_value, 
+                                            probs = 0.10, na.rm = T),
+    perc_20_SAVI_diff_pos_march_value = quantile(SAVI_diff_pos_march_value, 
+                                            probs = 0.20, na.rm = T),
+    perc_80_SAVI_diff_pos_march_value = quantile(SAVI_diff_pos_march_value, 
+                                            probs = 0.80, na.rm = T),
+    perc_90_SAVI_diff_pos_march_value = quantile(SAVI_diff_pos_march_value,
+                                            probs = 0.90, na.rm = T),
+    perc_10_EVI_auc_mar_oct = quantile(EVI_auc_mar_oct, 
+                                            probs = 0.10, na.rm = T),
+    perc_20_EVI_auc_mar_oct = quantile(EVI_auc_mar_oct, 
+                                            probs = 0.20, na.rm = T),
+    perc_80_EVI_auc_mar_oct = quantile(EVI_auc_mar_oct, 
+                                            probs = 0.80, na.rm = T),
+    perc_90_EVI_auc_mar_oct = quantile(EVI_auc_mar_oct,
+                                            probs = 0.90, na.rm = T),
+    perc_10_SAVI_diff_pos_oct_doy = quantile(SAVI_diff_pos_oct_doy, 
+                                            probs = 0.10, na.rm = T),
+    perc_20_SAVI_diff_pos_oct_doy = quantile(SAVI_diff_pos_oct_doy, 
+                                            probs = 0.20, na.rm = T),
+    perc_80_SAVI_diff_pos_oct_doy = quantile(SAVI_diff_pos_oct_doy, 
+                                            probs = 0.80, na.rm = T),
+    perc_90_SAVI_diff_pos_oct_doy = quantile(SAVI_diff_pos_oct_doy,
+                                            probs = 0.90, na.rm = T),
+    perc_10_EVI_pos_value = quantile(EVI_pos_value, 
+                                            probs = 0.10, na.rm = T),
+    perc_20_EVI_pos_value = quantile(EVI_pos_value, 
+                                            probs = 0.20, na.rm = T),
+    perc_80_EVI_pos_value = quantile(EVI_pos_value, 
+                                            probs = 0.80, na.rm = T),
+    perc_90_EVI_pos_value = quantile(EVI_pos_value,
+                                            probs = 0.90, na.rm = T)
+            )
+```
+
+### Get filtered data
+
+```{r}
+# 21: Months method, rough validation + refinement 10-90th, GPS points
+filtered_data21_months <- 
+  # GPS points after rough validation
+  filtered_data19_months %>%
+  left_join(percentiles_months, by = "EUNISa_1") %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  dplyr::filter(
+    (SAVI_diff_pos_march_value >= perc_10_SAVI_diff_pos_march_value &
+       SAVI_diff_pos_march_value <= perc_90_SAVI_diff_pos_march_value) &
+      (EVI_auc_mar_oct >= perc_10_EVI_auc_mar_oct &
+         EVI_auc_mar_oct <= perc_90_EVI_auc_mar_oct) &
+      (SAVI_diff_pos_oct_doy >= perc_10_SAVI_diff_pos_oct_doy &
+         SAVI_diff_pos_oct_doy <= perc_90_SAVI_diff_pos_oct_doy) &
+      (EVI_pos_value >= perc_10_EVI_pos_value &
+         EVI_pos_value <= perc_90_EVI_pos_value)
+    )
+
+# # 23: Months method, rough validation + refinement 20-80th, GPS points
+# filtered_data23_months <- 
+#   # GPS points after rough validation
+#   filtered_data19_months %>%
+#   left_join(percentiles_months, by = "EUNISa_1") %>%
+#   mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+#   dplyr::filter(
+#     (SAVI_diff_pos_march_value >= perc_20_SAVI_diff_pos_march_value &
+#        SAVI_diff_pos_march_value <= perc_80_SAVI_diff_pos_march_value) &
+#       (EVI_auc_mar_oct >= perc_20_EVI_auc_mar_oct &
+#          EVI_auc_mar_oct <= perc_80_EVI_auc_mar_oct) &
+#       (SAVI_diff_pos_oct_doy >= perc_20_SAVI_diff_pos_oct_doy &
+#          SAVI_diff_pos_oct_doy <= perc_80_SAVI_diff_pos_oct_doy) &
+#       (EVI_pos_value >= perc_20_EVI_pos_value &
+#          EVI_pos_value <= perc_80_EVI_pos_value)
+#     )
+```
+
+#### N plots per category
+
+```{r}
+bind_rows(
+  filtered_data21_months %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(data = "filtered_data21_months") %>%
+    select(data, Q, R, S, T)
+  #,
+  # filtered_data23_months %>% count(EUNISa_1) %>%
+  #   pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+  #   mutate(data = "filtered_data23_months") %>%
+  #   select(data, Q, R, S, T),
+)
+```
+
+### Split into training and test data sets
+
+```{r}
+set.seed(123)
+```
+
+```{r}
+train_indices21 <- sample(1:nrow(filtered_data21_months), 
+                         0.7 * nrow(filtered_data21_months))
+# train_indices23 <- sample(1:nrow(filtered_data23_months), 
+#                          0.7 * nrow(filtered_data23_months))
+```
+
+```{r}
+train_data21 <- filtered_data21_months[train_indices21, ]
+# train_data23 <- filtered_data23_months[train_indices23, ]
+```
+
+```{r}
+test_data21 <- filtered_data21_months[-train_indices21, ]
+# test_data23 <- filtered_data23_months[-train_indices23, ]
+```
+
+### Fit models
+
+```{r eval=FALSE, include=FALSE}
+rf21 <- run_rf(vars_RF_months, train_data21, "EUNISa_1")
+# rf23 <- run_rf(vars_RF_months, train_data23, "EUNISa_1")
+```
+
+```{r}
+print(rf21$time)
+# print(rf23$time)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(rf21, 
+     file = "objects/RF/Landsat/rf21_model_l1_months_roughvalid-refin1090_GPS_Landsat.Rdata")
+# save(rf23, 
+#      file = "objects/RF/Landsat/rf23_model_l1_months_roughvalid-refin2080_GPS_Landsat.Rdata")
+```
+
+### Predictions
+
+```{r eval=FALSE, include=FALSE}
+predictions_rf21 <- predict(rf21$model, newdata = test_data21,OOB = TRUE,
+                           type = "response")
+# predictions_rf23 <- predict(rf23$model, newdata = test_data23,OOB = TRUE,
+#                            type = "response")
+```
+
+```{r eval=FALSE, include=FALSE}
+save(predictions_rf21, 
+     file = "objects/RF/Landsat/rf21_pred_l1_months_roughvalid-refin1090_GPS_Landsat.Rdata")
+# save(predictions_rf23, 
+#      file = "objects/RF/Landsat/rf23_pred_l1_months_roughvalid-refin2080_GPS_Landsat.Rdata")
+```
+
+### Confusion matrices
+
+```{r}
+# 21: Months method, rough validation + refinement 10-90th, GPS points
+confusionMatrix(predictions_rf21, test_data21$EUNISa_1)
+
+# # 23: Months method, rough validation + refinement 20-80th, GPS points
+# confusionMatrix(predictions_rf23, test_data23$EUNISa_1)
+```
+
+#### Plots
+
+```{r}
+cm_rf21<- as.data.frame(as.table(confusionMatrix(predictions_rf21,
+                                                 test_data21$EUNISa_1)))
+colnames(cm_rf21) <- c("Prediction", "Reference", "Freq")
+# cm_rf23<- as.data.frame(as.table(confusionMatrix(predictions_rf23,
+#                                                  test_data23$EUNISa_1)))
+# colnames(cm_rf23) <- c("Prediction", "Reference", "Freq")
+```
+
+```{r}
+plot_cm_rf21 <- ggplot(cm_rf21, 
+                       aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Confusion Matrix", x = "Reference", y = "Prediction") +
+  theme_minimal() + theme(legend.position = "none") +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14),
+        plot.title = element_text(size = 16, face = "bold"))
+# plot_cm_rf23 <- ggplot(cm_rf23, 
+#                        aes(x = Reference, y = Prediction, fill = Freq)) +
+#   geom_tile(color = "white") +
+#   geom_text(aes(label = Freq), color = "black", size = 5) +
+#   scale_fill_gradient(low = "white", high = "steelblue") +
+#   labs(title = "Confusion Matrix", x = "Reference", y = "Prediction") +
+#   theme_minimal() + theme(legend.position = "none") +
+#   theme(axis.text = element_text(size = 12),
+#         axis.title = element_text(size = 14),
+#         plot.title = element_text(size = 16, face = "bold"))
+plot_cm_rf21
+# plot_cm_rf23
+ggsave(here("output", "figures", "RF", "plot_cm_rf21.jpeg"), plot_cm_rf21,
+       dpi = 300, width = 3, height = 3)
+# ggsave(here("output", "figures", "RF", "plot_cm_rf23.jpeg"), plot_cm_rf23,
+#        dpi = 300, width = 3, height = 3)
+```
+
+### Variable importance
+
+#### Unconditional
+
+```{r eval=FALSE, include=FALSE}
+varimp_rf21 <- compute_varimp(rf21$model, nperm = 100)
+# varimp_rf23 <- compute_varimp(rf23$model, nperm = 100)
+```
+
+```{r eval=FALSE, include=FALSE}
+print(varimp_rf21$time)
+# print(varimp_rf23$time)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(varimp_rf21,
+     file = "objects/RF/Landsat/rf21_varimp_l1_months_roughvalid-refin1090_GPS_Landsat.Rdata")
+# save(varimp_rf23, 
+#      file = "objects/RF/Landsat/rf23_varimp_l1_months_roughvalid-refin2080_GPS_Landsat.Rdata")
+```
+
+##### Plots
+
+```{r}
+plot(varimp_rf21$varimp, margin = c(10, 6, 2, 2))
+# plot(varimp_rf23$varimp, margin = c(10, 6, 2, 2))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
