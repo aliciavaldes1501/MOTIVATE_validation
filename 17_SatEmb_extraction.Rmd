@@ -1,0 +1,167 @@
+---
+title: "Script to work with Satellite Embeddings dataset bands derived from GEE"
+subtitle: "Read and manipulation data, calculate indices"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+# Load libraries
+
+```{r}
+library(signal)
+library(tidyverse)
+library(here)
+library(lubridate)
+library(dtplyr)
+library(sf)
+library(knitr)
+library(mgcv)
+library(future)
+library(furrr)
+library(progressr)
+library(pracma)
+```
+
+# Load functions
+
+```{r}
+knitr::purl("functions.Rmd", output = "functions.R")
+source("functions.R")
+```
+
+
+# Supress package messages
+
+```{r}
+suppressPackageStartupMessages({
+  library(mgcv)
+  library(nlme)
+})
+```
+
+# Load Resurvey db
+
+```{r}
+ReSurvey_data <- read_csv(
+  here("data", "clean", "ReSurvey_QRST_data_V2025.2_20251003.csv")) %>%
+  select(PlotObservationID, EUNISa_1, EUNISa_1_descr,
+         EUNISa_2, EUNISa_2_descr) %>%
+  mutate(PlotObservationID = factor(PlotObservationID),
+         EUNISa_1 = factor(EUNISa_1), EUNISa_2 = factor(EUNISa_2))
+```
+
+# Read files with band data
+
+I got these files using the GEE code prepared by Bea.
+
+These files contain all observations in the ReSurvey database from 2016 onward. In order to avoid computation problems in GEE, biogeographical units that contain more than 4500 points have been subdivided in ArcGIS.
+
+```{r}
+# Set the folder path
+folder_path <- "C:/Data/MOTIVATE/MOTIVATE_RS_data/Satellite_Embeddings"
+
+# List CSV files
+csv_files <- list.files(folder_path, full.names = TRUE, recursive = TRUE)
+
+# Define column types: force RSrvypl to character, others auto-detected
+custom_col_types <- cols(
+  RSrvypl = col_character(),
+  RSrvyst = col_character(),
+  default = col_guess()
+)
+
+# Read and process each file
+data_list <- lapply(csv_files, function(file) {
+  info <- extract_info(basename(file)) # Use only the filename
+  
+  # Read the file
+  df <- read_csv(file, col_types = custom_col_types) %>%
+    # Remove columns that give column type problems when combining data
+    select(-starts_with("EUNIS"), -starts_with("ReSurvey")) %>%
+    mutate(biogeo = info$biogeo, unit = info$unit)
+  
+  return(df)
+  })
+
+# Combine all data
+data_RS_S2_bands <- bind_rows(data_list) %>%
+  rename(PlotObservationID = PltObID)
+
+# View the resulting tibble
+print(data_RS_S2_bands)
+
+# Counts per biogeo and unit
+print(data_RS_S2_bands %>% count(biogeo, unit), n = 100)
+```
+
+# Remove unneded cols
+
+```{r}
+data_RS_SatEmb_bands <- data_RS_SatEmb_bands %>%
+  select(-X1, -X2, -X3)
+```
+
+# Add EUNIS codes
+
+```{r}
+final_RS_data <- data_RS_SatEmb_bands %>% 
+  mutate(PlotObservationID = as.factor(PlotObservationID)) %>%
+  left_join(ReSurvey_data)
+```
+
+# HERE, CAREFUL! Add canopy height data
+
+Does this match with the new data? Any points without canopy height data?
+Just in case, downloading again from GEE with new script.
+
+Then we also avoid the problem with not having PlotObservationID, but obs_unique.
+
+NEED to modify chunks below...
+
+Read the data:
+
+```{r}
+data_RS_CH <- read_csv(
+  "C:/Data/MOTIVATE/MOTIVATE_RS_data/Canopy_Height_1m/Europe_points_CanopyHeight_1m.csv")
+db_Europa <- read_csv(
+  here("..", "DB_first_check", "data", "clean","db_Europa_20250107.csv")
+  )
+```
+
+```{r}
+data_RS_CH_ID <- db_Europa %>%
+  select(PlotObservationID, obs_unique_id) %>%
+  right_join(data_RS_CH %>%
+              # Rename to be able to join on this column
+              rename(obs_unique_id = obs_unique)) %>%
+  select(PlotObservationID, canopy_height)
+```
+
+Join:
+
+```{r}
+final_RS_data <- final_RS_data %>%
+  mutate(PlotObservationID = factor(PlotObservationID)) %>%
+  left_join(data_RS_CH_ID %>%
+              mutate(PlotObservationID = factor(PlotObservationID)))
+```
+
+# Save to clean data
+
+```{r}
+write_tsv(final_RS_data,
+          here("data", "clean","final_RS_data_SatEmb_20250922.csv"))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```

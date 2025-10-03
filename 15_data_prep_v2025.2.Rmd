@@ -1,0 +1,500 @@
+---
+title: "Script to prepare data from ReSurvey database v2025.2"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This R script is used to prepare data of the ReSurvey database for further analyses, starting from the raw data downloaded from:
+https://onedrive.live.com/?redeem=aHR0cHM6Ly8xZHJ2Lm1zL2YvYy8zOWE2ZDZiNzFmMzM1ZTE4L0VoaGVNeC0zMXFZZ2dEbmo0d0lBQUFBQkEwdmo5RjRyYTRnd1VyUGVXQy1UbEE%5FZT1yMUNHVlk&id=39A6D6B71F335E18%21sc5fde9e31e1d49aaab78bfe905b546d1&cid=39A6D6B71F335E18&sb=name&sd=1
+
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(readxl)
+```
+
+# Read data
+
+```{r}
+data_V2025.2 <- read_tsv(
+  "C:/Data/MOTIVATE/MOTIVATE_data/Data/EVA and ReSurvey Data/2025 data - V2025.2/Core data/200_Motivate20250415_notJUICE_header_with_precise_coordinates.csv")
+```
+
+No parsing issues!
+
+# Keep only the columns needed
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  select(PlotObservationID, PlotID, Country, `Date of recording`, 
+         `Expert system`, `ReSurvey plot (Y/N)`, `For EVA (Y/N)`, 
+         `ReSurvey project`, `ReSurvey site`, `ReSurvey plot`,
+         `ReSurvey observation`, `Manipulate (y/n)`, `Type of manipulation`,
+         `Location method`, RS_CODE, RS_DUPL, RS_PROJTYP, Dataset, Longitude, 
+         Latitude, Lon_prec, Lat_prec)
+```
+
+# Filter only ReSurvey part
+
+```{r}
+data_V2025.2 %>% count(`ReSurvey plot (Y/N)`)
+```
+
+What about NAs?
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  dplyr::filter(`ReSurvey plot (Y/N)` == "Y") %>%
+  select(-`ReSurvey plot (Y/N)`)
+```
+
+# Data manipulation
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  # Update coordinates
+  mutate(Lon_updated = ifelse(is.na(Lon_prec), Longitude, Lon_prec),
+        Lat_updated = ifelse(is.na(Lat_prec), Latitude, Lat_prec)) %>%
+  # Remove old coordinate columns
+  select(-Longitude, -Latitude, -Lon_prec, -Lat_prec) %>%
+  # Remove 586 observations without coordinates
+  dplyr::filter(!is.na(Lon_updated)) %>%
+  # Translate codes from Location method to words
+  # Update `Location method`if edit_loc_method = TRUE
+  mutate(`Location method` = 
+           str_replace_all(
+             `Location method`,
+             c("01" = "Permanently marked plot isolated (i.e. somewhere within the site)",
+               "02" = "Marked plot in a grid (i.e. with regularly spaced neighbor plots)",
+               "03" = "Location with differential GPS",
+               "04" = "Location with GPS",
+               "05" = "Location from accurate map",
+               "06" = "Location from a description",
+               "07" = "Other",
+               "08" = "Marked plot in a transect")), `Location method`) %>%
+  # Unify codes for ReSurvey project types
+  mutate(
+    RS_PROJTYP = str_replace(RS_PROJTYP, "^Resampling$", "resampling"), 
+    RS_PROJTYP = str_replace(RS_PROJTYP, 
+                             "^Permanent \\(man\\)$", "permanent (man)")
+    ) %>%
+  # Add columns date and year
+  mutate(date = dmy(`Date of recording`), year = year(date))
+```
+
+### Clean info on Expert system column and separate it
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>% 
+  mutate(
+    # Clean 'Expert System' column by removing "!" and replacing "~" with NA
+    `Expert system` = case_when(
+      `Expert system` == "~" ~ NA_character_,  # Replace "~" with NA
+      TRUE ~ str_replace_all(`Expert system`, "!", "")  # Remove "!"
+    )
+  ) %>%
+  # Separate the values in 'Expert System' into multiple columns
+  separate(
+    `Expert system`,
+    into = c("EUNISa", "EUNISb", "EUNISc"), # At most, there are 3 diff values
+    sep = ",",
+    extra = "drop",  # Drop extra values if there are more than columns
+    fill = "right",   # Fill missing values with NA for cases with fewer values
+    remove = FALSE    # Keep the original 'Expert System' column
+  ) %>%
+  # Add columns for the different EUNIS levels
+  mutate(
+    # EUNISa levels
+    EUNISa_1 = substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 2, 1)),
+    EUNISa_2 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 3, 2), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 3, 2)),
+      NA_character_
+    ),
+    EUNISa_3 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 4, 3), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 4, 3)),
+      NA_character_
+      ),
+    EUNISa_4 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 5, 4), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 5, 4)),
+      NA_character_
+    ),
+    # EUNISb levels
+    EUNISb_1 = substr(EUNISb, 1, ifelse(str_starts(EUNISb, "MA"), 2, 1)),
+    EUNISb_2 = ifelse(
+      nchar(EUNISb) >= ifelse(str_starts(EUNISb, "MA"), 3, 2), 
+      substr(EUNISb, 1, ifelse(str_starts(EUNISb, "MA"), 3, 2)),
+      NA_character_
+    ),
+    EUNISb_3 = ifelse(
+      nchar(EUNISb) >= ifelse(str_starts(EUNISb, "MA"), 4, 3), 
+      substr(EUNISb, 1, ifelse(str_starts(EUNISb, "MA"), 4, 3)),
+      NA_character_
+    ),
+    EUNISb_4 = ifelse(
+      nchar(EUNISb) >= ifelse(str_starts(EUNISb, "MA"), 5, 4), 
+      substr(EUNISb, 1, ifelse(str_starts(EUNISb, "MA"), 5, 4)),
+      NA_character_
+    ),
+    # EUNISc levels
+    EUNISc_1 = substr(EUNISc, 1, ifelse(str_starts(EUNISc, "MA"), 2, 1)),
+    EUNISc_2 = ifelse(
+      nchar(EUNISc) >= ifelse(str_starts(EUNISc, "MA"), 3, 2), 
+      substr(EUNISc, 1, ifelse(str_starts(EUNISc, "MA"), 3, 2)),
+      NA_character_
+    ),
+    EUNISc_3 = ifelse(
+      nchar(EUNISc) >= ifelse(str_starts(EUNISc, "MA"), 4, 3), 
+      substr(EUNISc, 1, ifelse(str_starts(EUNISc, "MA"), 4, 3)),
+      NA_character_
+    ),
+    EUNISc_4 = ifelse(
+      nchar(EUNISc) >= ifelse(str_starts(EUNISc, "MA"), 5, 4), 
+      substr(EUNISc, 1, ifelse(str_starts(EUNISc, "MA"), 5, 4)),
+      NA_character_
+    )
+  )
+```
+
+### Add descriptions
+
+#### Level 1
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(
+    EUNISa_1_descr = case_when(
+      EUNISa_1 == "V" ~ "Vegetated man-made habitats",
+      EUNISa_1 == "U" ~ "Inland habitats with no or little soil",
+      EUNISa_1 == "T" ~ "Forests and other wooded land",
+      EUNISa_1 == "S" ~ "Heathlands, scrub and tundra",
+      EUNISa_1 == "R" ~ "Grasslands",
+      EUNISa_1 == "Q" ~ "Wetlands",
+      EUNISa_1 == "P" ~ "Inland waters",
+      EUNISa_1 == "N" ~ "Coastal habitats",
+      EUNISa_1 == "MA" ~ "Marine habitats",
+      TRUE ~ NA_character_
+    ),
+    EUNISb_1_descr = case_when(
+      EUNISb_1 == "V" ~ "Vegetated man-made habitats",
+      EUNISb_1 == "U" ~ "Inland habitats with no or little soil",
+      EUNISb_1 == "T" ~ "Forests and other wooded land",
+      EUNISb_1 == "S" ~ "Heathlands, scrub and tundra",
+      EUNISb_1 == "R" ~ "Grasslands",
+      EUNISb_1 == "Q" ~ "Wetlands",
+      EUNISb_1 == "P" ~ "Inland waters",
+      EUNISb_1 == "N" ~ "Coastal habitats",
+      EUNISb_1 == "MA" ~ "Marine habitats",
+      TRUE ~ NA_character_
+    ),
+    EUNISc_1_descr = case_when(
+      EUNISc_1 == "V" ~ "Vegetated man-made habitats",
+      EUNISc_1 == "U" ~ "Inland habitats with no or little soil",
+      EUNISc_1 == "T" ~ "Forests and other wooded land",
+      EUNISc_1 == "S" ~ "Heathlands, scrub and tundra",
+      EUNISc_1 == "R" ~ "Grasslands",
+      EUNISc_1 == "Q" ~ "Wetlands",
+      EUNISc_1 == "P" ~ "Inland waters",
+      EUNISc_1 == "N" ~ "Coastal habitats",
+      EUNISc_1 == "MA" ~ "Marine habitats",
+      TRUE ~ NA_character_
+    )
+  )
+```
+
+#### Level 2
+
+```{r}
+descriptions<-read_excel(here("..", "DB_first_check", "data", "edited",
+                                 "EUNIS-Habitats-2021-06-01_modified.xlsx"))
+```
+
+```{r}
+# Define the columns and corresponding description column names
+eunis_cols <- c("EUNISa_2", "EUNISa_3", "EUNISa_4",
+                "EUNISb_2", "EUNISb_3", "EUNISb_4", 
+                "EUNISc_2", "EUNISc_3", "EUNISc_4")
+
+# Create corresponding description column names
+descr_col_names <- paste0(eunis_cols, "_descr")
+
+# Use reduce to loop through the columns and join dynamically based on level
+data_V2025.2 <- reduce(seq_along(eunis_cols), function(data, i) {
+  # Extract level number from the column name (e.g., EUNISa_2 -> 2)
+  level <- as.numeric(gsub("\\D", "", eunis_cols[i]))
+  
+  # Filter descriptions for the corresponding level
+  descriptions_level <- descriptions %>%
+    dplyr::filter(level == level) %>%
+    select(`EUNIS 2020 code`, `EUNIS-2021 habitat name`)
+  
+  # Perform the left_join and rename the column dynamically
+  data %>%
+    left_join(
+      descriptions_level,
+      by = setNames("EUNIS 2020 code", eunis_cols[i])
+    ) %>%
+    rename(!!descr_col_names[i] := `EUNIS-2021 habitat name`)
+}, .init = data_V2025.2)
+```
+
+See where matching did not work:
+
+```{r}
+data_V2025.2 %>% 
+  dplyr::filter(!is.na(EUNISa_2) & is.na(EUNISa_2_descr)) %>% count(EUNISa_2)
+data_V2025.2 %>% 
+  dplyr::filter(!is.na(EUNISa_3) & is.na(EUNISa_3_descr)) %>% count(EUNISa_3)
+data_V2025.2 %>% 
+  dplyr::filter(!is.na(EUNISa_4) & is.na(EUNISa_4_descr)) %>% count(EUNISa_4)
+```
+
+The matching did not work sometimes, correct!
+
+```{r}
+# Correct EUNISa levels 2-4 descriptions
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(EUNISa_2_descr = 
+           ifelse(!is.na(EUNISa_2_descr), EUNISa_2_descr,
+                  case_when(
+                    EUNISa_2 == "P2" ~ "Running aquatic habitats",
+                    EUNISa_2 == "P3" ~ "Aquatic plant communities",
+                    EUNISa_2 == "Pf" ~ "Fresh-water submerged vegetation",
+                    EUNISa_2 == "Pj" ~ "Stonewort vegetation",
+                    EUNISa_2 == "R4" ~ "Alpine and subalpine grasslands",
+                    EUNISa_2 == "Pb" ~ "Calcareous spring and spring brook",
+                    EUNISa_2 == "Qb" ~ "Wetlands",
+                    EUNISa_2 == "R3" ~ "Seasonally wet and wet grasslands",
+                    EUNISa_2 == "Qa" ~ "Mires",
+                    EUNISa_2 == "Pa" ~ "Base-poor spring and spring brook",
+                    EUNISa_2 == "Ph" ~ "Oligotrophic-water vegetation",
+                    EUNISa_2 == "Pg" ~ "Fresh-water nymphaeid vegetation",
+                    EUNISa_2 ==
+                      "Pd" ~ "Fresh-water small pleustophyte vegetation",
+                    EUNISa_2 == "Pc" ~ "Brackish-water vegetation",
+                    EUNISa_2 ==
+                      "Pe" ~ "Fresh-water large pleustophyte vegetation",
+                    EUNISa_2 == "Pi" ~ "Dystrophic-water vegetation",
+                    EUNISa_2 == "S1" ~ "Tundra",
+                    EUNISa_2 ==
+                      "U7" ~ "Unvegetated or sparsely vegetated gravel bars",
+                    EUNISa_2 == "Q6" ~ "Periodically exposed shores",
+                    EUNISa_2 == "R3" ~ "Seasonally wet and wet grasslands",
+                    EUNISa_2 == "R4" ~ "Alpine and subalpine grasslands",
+                    EUNISa_2 == "U7" ~ "Unvegetated or sparsely vegetated gravel bars",
+                    # Sa & Sb, not sure what these are, left without descr
+                    TRUE ~ NA_character_)
+                  ),
+         EUNISa_3_descr = 
+           ifelse(!is.na(EUNISa_3_descr), EUNISa_3_descr,
+                  case_when(
+                    EUNISa_3 =="U71" ~ "Unvegetated or sparsely vegetated gravel bar in montane and alpine regions",
+                    EUNISa_3 =="Q61" ~ "Periodically exposed shore with stable, eutrophic sediments with pioneer or ephemeral vegetation",
+                    EUNISa_3 =="Q62" ~ "Periodically exposed shore with stable, mesotrophic sediments with pioneer or ephemeral vegetation",
+                    EUNISa_3 == "P2N" ~ "Spring",
+                    EUNISa_3 == "P3a" ~ "Brackish-water vegetation",
+                    EUNISa_3 == "P3b" ~ "Fresh-water small pleustophyte vegetation",
+                    EUNISa_3 == "P3c" ~ "Fresh-water large pleustophyte vegetation",
+                    EUNISa_3 == "P3d" ~ "Fresh-water submerged vegetation",
+                    EUNISa_3 == "P3e" ~ "Fresh-water nymphaeid vegetation",
+                    EUNISa_3 == "P3f" ~ "Oligotrophic-water vegetation",
+                    EUNISa_3 == "P3g" ~ "Dystrophic-water vegetation",
+                    EUNISa_3 == "P3h" ~ "Stonewort vegetation",
+                    TRUE ~ NA_character_
+                    ))
+         )
+```
+
+# Add EUNIS from info on HabitatID from DK 
+
+Based on information got from Jesper.
+
+### Read the data sent by Jesper from DK
+
+```{r}
+db_DK_J<-read_tsv(
+  "C:/Data/MOTIVATE/DK_Naturdata_Res_habitat_hab_codes_Jesper/DK_Naturdata_Res_habitat_hab_codes.txt")
+```
+
+## Add info on HabitatID
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  # Keeping all obs in data_V2025.2 but not all in db_DK_J
+  left_join(db_DK_J %>% select(PlotObservationID, HabitatID))
+```
+
+## Change some Annex I habitat codes that were wrong
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(HabitatID = as.character(HabitatID)) %>%
+  mutate(HabitatID = ifelse(HabitatID == "9998", "91D0",
+                            ifelse(HabitatID == "9999", "91E0", HabitatID)))
+```
+
+## Add info on correspondences HabitatID (DK, Jesper) - EUNIS
+
+Read correspondences file:
+
+```{r}
+correspondences<-read_excel(here("..", "DB_first_check", "data", "edited",
+                                 "correspondence_HabitatID_DK.xlsx"))
+```
+
+Add info to data_V2025.2:
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  # Keeping all obs in data_V2025.2 but not all in db_DK_J
+  left_join(correspondences %>% select(HabitatID, EUNIS))
+```
+
+Correct NA values in EUNIS
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(EUNIS = ifelse(EUNIS == "NA", NA, EUNIS))
+```
+
+Add info on EUNIS (DK) to EUNISa:
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(EUNISa =
+           # If EUNIS (DK) is available, add as EUNISa
+           ifelse(!is.na(EUNIS), EUNIS, 
+                  # Otherwise keep EUNISa
+                  EUNISa),
+         EUNIS_assignation = ifelse(!is.na(EUNIS), "Info from DK",
+                                    ifelse(is.na(EUNISa), "Not possible",
+                                           "Expert system"))) %>%
+  # Remove unneeded columns
+  select(-EUNIS, -HabitatID)
+```
+
+## Update columns for EUNIS levels and descriptions
+
+Update the columns for the different EUNIS levels:
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(
+    # EUNISa levels
+    EUNISa_1 = substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 2, 1)),
+    EUNISa_2 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 3, 2), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 3, 2)),
+      NA_character_
+    ),
+    EUNISa_3 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 4, 3), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 4, 3)),
+      NA_character_
+      ),
+    EUNISa_4 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 5, 4), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 5, 4)),
+      NA_character_
+    )
+  ) 
+```
+
+Update columns with descriptions for the level 1 codes:
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(
+    EUNISa_1_descr = case_when(
+      EUNISa_1 == "V" ~ "Vegetated man-made habitats",
+      EUNISa_1 == "U" ~ "Inland habitats with no or little soil",
+      EUNISa_1 == "T" ~ "Forests and other wooded land",
+      EUNISa_1 == "S" ~ "Heathlands, scrub and tundra",
+      EUNISa_1 == "R" ~ "Grasslands",
+      EUNISa_1 == "Q" ~ "Wetlands",
+      EUNISa_1 == "P" ~ "Inland waters",
+      EUNISa_1 == "N" ~ "Coastal habitats",
+      EUNISa_1 == "MA" ~ "Marine habitats",
+      TRUE ~ NA_character_
+    )
+  )
+```
+
+## Update number of different EUNIS codes
+
+Recalculate how many different EUNIS codes have been assigned:
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(
+    # Count the number of non-NA values across the EUNIS columns
+    n_EUNIS = rowSums(!is.na(select(., EUNISa:EUNISc)))
+  )
+```
+
+New plot for EUNISa_1 (the first assigned EUNIS in cases of multiple assignations, level 1):
+
+```{r}
+ggplot(data_V2025.2, aes(EUNISa_1_descr)) +
+         geom_bar(aes(y = (..count..) / sum(..count..) * 100)) +
+  labs(y = "Percentage of ReSurvey observations",
+       x = "EUNIS level 1") + coord_flip()
+ggplot(data_V2025.2 %>% filter(!is.na(EUNISa_1_descr)),
+       aes(EUNISa_1_descr)) +
+         geom_bar(aes(y = (..count..) / sum(..count..) * 100)) +
+  labs(y = "Percentage of ReSurvey observations",
+       x = "EUNIS level 1") + coord_flip()
+```
+
+# Notes EUNIS codes - to change?
+
+This classification of Q + numbers is now coexisting in the database with Qa & Qb (metadata). How to proceed?
+
+```{r}
+data_V2025.2 %>% filter(EUNISa_1 == "Q") %>% distinct(EUNISa_2)
+```
+
+What are Sa and Sb in S?
+
+# Save to clean datafiles
+
+## All ReSurvey data
+
+```{r}
+write_csv(data_V2025.2,here("data", "clean","ReSurvey_data_V2025.2_20251003.csv"))
+```
+
+## Only Q, R, S & T
+
+```{r}
+write_csv(data_V2025.2 %>% 
+            dplyr::filter(EUNISa_1 %in% c("Q", "R", "S", "T")),
+          here("data", "clean","ReSurvey_QRST_data_V2025.2_20251003.csv"))
+```
+
+## Only Q, R, S & T & from 2016 onwards
+
+```{r}
+write_csv(data_V2025.2 %>% 
+            dplyr::filter(EUNISa_1 %in% c("Q", "R", "S", "T")) %>%
+            dplyr::filter(year >= 2016),
+          here("data", "clean","ReSurvey_QRST_from2016_data_V2025.2_20251003.csv"))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```

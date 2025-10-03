@@ -132,8 +132,7 @@ distr_plot <- function(data, y_vars, y_labels) {
 }
 ```
 
-
-Histograms to check that max and min values are ok:
+Histograms for some bands:
 
 ```{r}
 plot_histogram(data_validation, "A00", "A00")
@@ -145,7 +144,7 @@ plot_histogram(data_validation, "A61", "A61")
 plot_histogram(data_validation, "A63", "A63")
 ```
 
-Distribution plots:
+Distribution plots for some bands:
 
 ```{r message=FALSE, warning=FALSE}
 distr_plot(data_validation,
@@ -189,7 +188,7 @@ distr_plot_biogeo <- function(data, y_vars, y_labels) {
 }
 ```
 
-Distribution plots:
+Distribution plots for some bands:
 
 ```{r message=FALSE, warning=FALSE}
 distr_plot_biogeo(data_validation,
@@ -262,6 +261,7 @@ run_rf <- function(vars_RF, train_data, response_var, ntree = 500)
 ## Function to compute variable importance
 
 ```{r}
+# OLD
 # compute_varimp <- function(model, nperm = 100, 
 #                                    n_cores = parallel::detectCores() - 1) {
 #   # Set up parallel backend
@@ -513,14 +513,73 @@ test_data_roughvalid <- data_validation_roughvalid[-train_indices_roughvalid, ]
 
 ### Fit models
 
+```{r}
+# Define model configurations
+rf_configs_norefin <- tibble(
+  model_id = paste0("rf", 1:4),
+  vars = list(vars_RF_SatEmb, vars_RF_SatEmb_CH, vars_RF_SatEmb, 
+              vars_RF_SatEmb_CH),
+  train_data = list(train_data_novalid, train_data_novalid, 
+                    train_data_roughvalid, train_data_roughvalid),
+  save_path = c(
+    # 1: No validation, SatEmb bands
+    "objects/RF/Satellite_Embeddings/rf1_model_l1_novalid_norefin_SatEmb.Rdata",
+    # 2: No validation, SatEmb bands + CH
+    "objects/RF/Satellite_Embeddings/rf2_model_l1_novalid_norefin_Sat_Emb_CH.Rdata",
+    # 3: Rough validation, SatEmb bands
+    "objects/RF/Satellite_Embeddings/rf3_model_l1_roughvalid_norefin_Sat_Emb.Rdata",
+    # 4: Rough validation, SatEmb bands + CH
+    "objects/RF/Satellite_Embeddings/rf4_model_l1_roughvalid_norefin_sat_Emb_CH.Rdata"
+    )
+  )
+
+# Fit models, print time, and save
+rf_models_norefin <- list()
+
+for (i in seq_len(nrow(rf_configs_norefin))) {
+  config <- rf_configs_norefin[i, ]
+  
+  cat("Fitting", config$model_id, "...\n")
+  
+  rf <- run_rf(config$vars[[1]], config$train_data[[1]], "EUNISa_1")
+  
+  print(rf$time)
+  
+  save(rf, file = config$save_path)
+  
+  rf_models_norefin[[config$model_id]] <- rf
+  }
+```
+
+```{r}
+# Fit models and save them
+rf_models_norefin <- rf_configs_norefin %>%
+  mutate(
+    model = map2(vars, train_data, ~run_rf(.x, .y, "EUNISa_1")),
+    time = map(model, ~.x$time)
+  )
+```
+
+```{r}
+# Save models
+pwalk(
+  list(rf_models_norefin$model, rf_configs_norefin$save_path),
+  ~save(..1, file = ..2)
+)
+```
+
+
+```{r}
+# Print execution times
+rf_models_norefin$time %>% walk(print)
+```
+
+# HERE: move comments above
+
 ```{r eval=FALSE, include=FALSE}
-# 1: No validation, SatEmb bands
 rf1 <- run_rf(vars_RF_SatEmb, train_data_novalid, "EUNISa_1")
-# 2: No validation, SatEmb bands + CH
 rf2 <- run_rf(vars_RF_SatEmb_CH, train_data_novalid, "EUNISa_1")
-# 3: Rough validation, SatEmb bands
 rf3 <- run_rf(vars_RF_SatEmb, train_data_roughvalid, "EUNISa_1")
-# 4: Rough validation, SatEmb bands + CH
 rf4 <- run_rf(vars_RF_SatEmb_CH, train_data_roughvalid, "EUNISa_1")
 ```
 
@@ -553,9 +612,9 @@ predictions_rf4 <- predict(rf4$model, newdata = test_data_roughvalid,OOB = TRUE,
 
 ```{r eval=FALSE, include=FALSE}
 save(predictions_rf1, file = "objects/RF/Satellite_Embeddings/rf1_pred_l1_novalid_norefin_SatEmb.Rdata")
-save(predictions_rf2, file = "objects/RF/Satellite_Embeddings/rf1_pred_l1_novalid_norefin_SatEmb_CH.Rdata")
+save(predictions_rf2, file = "objects/RF/Satellite_Embeddings/rf2_pred_l1_novalid_norefin_SatEmb_CH.Rdata")
 save(predictions_rf3, file = "objects/RF/Satellite_Embeddings/rf3_pred_l1_roughvalid_norefin_Sat_Emb.Rdata")
-save(predictions_rf4, file = "objects/RF/Satellite_Embeddings/rf3_pred_l1_roughvalid_norefin_Sat_Emb_CH.Rdata")
+save(predictions_rf4, file = "objects/RF/Satellite_Embeddings/rf4_pred_l1_roughvalid_norefin_Sat_Emb_CH.Rdata")
 ```
 
 ### Confusion matrices
@@ -605,170 +664,54 @@ plot(varimp_rf3$varimp, margin = c(10, 6, 2, 2))
 plot(varimp_rf4$varimp, margin = c(10, 6, 2, 2))
 ```
 
-
-
-
-# HERE
-
-
-
-## No validation
-
-### No refinement
-
-#### SatEmb bands
-
-#### SatEmb + CH
-
-### Refinement 10-90th: 1 variable
-
-### Refinement 10-90th: 2 variables
-
-### Refinement 10-90th: 3 variables
-
-### Refinement 10-90th: 4 variables
-
-
-## Rough validation
-
-
-## Without refinement
-
-### Get filtered data
-
-```{r}
-data_validation_GPS <- data_validation %>%
-  # Select only GPS points
-  dplyr::filter(Lctnmth == "Location with GPS" |
-                  Lctnmth == "Location with differential GPS") %>%
-  select(-Lctnmth) %>%
-  mutate(EUNISa_1 = as.factor(EUNISa_1))
-```
-
-#### N points per category
-
-```{r}
-data_validation_GPS %>% count(EUNISa_1)
-```
-
-### Split into training and test data sets
-
-```{r}
-set.seed(123)
-```
-
-```{r}
-train_indices1 <- sample(1:nrow(data_validation_GPS), 
-                         0.7 * nrow(data_validation_GPS))
-```
-
-```{r}
-train_data1 <- data_validation_GPS[train_indices1, ]
-```
-
-```{r}
-test_data1 <- data_validation_GPS[-train_indices1, ]
-```
-
-### Fit models
-
-```{r eval=FALSE, include=FALSE}
-rf1 <- run_rf(vars_RF_SatEmb, train_data1, "EUNISa_1")
-rf1_CH <- run_rf(vars_RF_SatEmb_CH, train_data1, "EUNISa_1")
-```
-
-```{r}
-print(rf1$time)
-print(rf1_CH$time)
-```
-
-```{r eval=FALSE, include=FALSE}
-save(rf1, file = "objects/RF/Satellite_Embeddings/rf1_model_l1_novalid_GPS_SatEmb.Rdata")
-save(rf1_CH, file = "objects/RF/Satellite_Embeddings/rf1_model_l1_novalid_GPS_SatEmb_CH.Rdata")
-```
-
-### Predictions
-
-```{r eval=FALSE, include=FALSE}
-predictions_rf1 <- predict(rf1$model, newdata = test_data1,OOB = TRUE,
-                           type = "response")
-predictions_rf1_CH <- predict(rf1_CH$model, newdata = test_data1,OOB = TRUE,
-                           type = "response")
-```
-
-```{r eval=FALSE, include=FALSE}
-save(predictions_rf1, file = "objects/RF/Satellite_Embeddings/rf1_pred_l1_novalid_GPS_SatEmb.Rdata")
-save(predictions_rf1_CH, file = "objects/RF/Satellite_Embeddings/rf1_pred_l1_novalid_GPS_SatEmb_CH.Rdata")
-```
-
-### Confusion matrix
-
-```{r}
-confusionMatrix(predictions_rf1, test_data1$EUNISa_1)
-confusionMatrix(predictions_rf1_CH, test_data1$EUNISa_1)
-```
-### Variable importance
-
-#### Unconditional
-
-```{r eval=FALSE, include=FALSE}
-varimp_rf1 <- compute_varimp(rf1$model, nperm = 100)
-```
-
-```{r eval=FALSE, include=FALSE}
-print(varimp_rf1$time)
-```
-
-```{r eval=FALSE, include=FALSE}
-save(varimp_rf1, file = "objects/RF/S2/rf1_varimp_l1_slope_novalid_GPS_S2.Rdata")
-```
-
-##### Plot
-
-```{r}
-plot(varimp_rf1$varimp, margin = c(10, 6, 2, 2))
-```
-
-#### Conditional (TBD)
-
-```{r eval=FALSE, include=FALSE}
-varimp-cond_rf1 <- compute_varimp_cond(rf1$model, nperm = 100)
-```
-
-```{r eval=FALSE, include=FALSE}
-print(varimp-cond_rf1$time)
-```
-
-```{r eval=FALSE, include=FALSE}
-save(varimp-cond_rf1, 
-     file = "objects/RF/S2/rf1_varimp-cond_l1_slope_novalid_GPS_S2.Rdata")
-```
-
-##### Plot
-
-```{r}
-plot(varimp-cond_rf1$varimp, margin = c(9, 3, 2, 2))
-```
+#### TBD: Conditional
 
 ### ROC curves (TBD)
 
 ```{r eval=FALSE, include=FALSE}
-roc_data1 <- compute_roc_level1(rf1$model, test_data1)
+roc_data1 <- compute_roc_level1(rf1$model, test_data_novalid)
+roc_data2 <- compute_roc_level1(rf2$model, test_data_novalid)
+roc_data3 <- compute_roc_level1(rf3$model, test_data_roughvalid)
+roc_data4 <- compute_roc_level1(rf4$model, test_data_roughvalid)
 ```
 
 ```{r}
 print(roc_data1$time)
+print(roc_data2$time)
+print(roc_data3$time)
+print(roc_data4$time)
 ```
 
 ```{r}
-save(roc_data1, 
-     file = "objects/RF/S2/rf1_rocdata_l1_slope_novalid_GPS_S2.Rdata")
+save(roc_data1,
+     file = "objects/RF/Satellite_Embeddings/rf1_rocdata_l1_novalid_norefin_SatEmb.Rdata")
+save(roc_data2, 
+     file = "objects/RF/Satellite_Embeddings/rf2_rocdata_l1_novalid_norefin_SatEmb_CH.Rdata")
+save(roc_data3, 
+     file = "objects/RF/Satellite_Embeddings/rf3_rocdata_l1_roughvalid_norefin_SatEmb.Rdata")
+save(roc_data4, 
+     file = "objects/RF/Satellite_Embeddings/rf4_rocdata_l1_roughvalid_norefin_SatEmb_CH.Rdata")
 ```
 
-#### Plot
+#### Plots
 
 ```{r}
 roc1 <- ggplot(roc_data1$roc, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+  labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+       y = "True Positive Rate", color = "Class (AUC)") +
+  theme_minimal() + theme(legend.position = "bottom")
+roc2 <- ggplot(roc_data2$roc, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+  labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+       y = "True Positive Rate", color = "Class (AUC)") +
+  theme_minimal() + theme(legend.position = "bottom")
+roc3 <- ggplot(roc_data3$roc, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
+  labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
+       y = "True Positive Rate", color = "Class (AUC)") +
+  theme_minimal() + theme(legend.position = "bottom")
+roc4 <- ggplot(roc_data4$roc, aes(x = FPR, y = TPR, color = Class)) +
   geom_line(size = 1.2) + geom_abline(linetype = "dashed", color = "gray") +
   labs(title = "Multiclass ROC Curves with AUC", x = "False Positive Rate",
        y = "True Positive Rate", color = "Class (AUC)") +
@@ -777,13 +720,16 @@ roc1 <- ggplot(roc_data1$roc, aes(x = FPR, y = TPR, color = Class)) +
 
 ```{r}
 roc1
+roc2
+roc3
+roc4
 ```
 
 ## With refinement
 
 ### Refinement
 
-Based on the 1st, 2nd, 3rd, 4th... most important variables: A59, A15, A12, A60.
+Based on the 1st, 2nd, 3rd, 4th... most important variables: A59, A12, A15, A60.
 
 ```{r}
 distr_plot_percentiles <- function(data, y_vars, y_labels) {
@@ -844,30 +790,62 @@ distr_plot_percentiles <- function(data, y_vars, y_labels) {
 ```{r}
 distr_plot_percentiles(
   # GPS points
-  data_validation_GPS,
-  c("A59", "A15", "A12", "A60"),
-  c("A59", "A15", "A12", "A60"))
+  data_validation_novalid,
+  c("A59", "A12", "A15", "A60"),
+  c("A59", "A12", "A15", "A60"))
+```
+
+```{r}
+distr_plot_percentiles(
+  # GPS points
+  data_validation_roughvalid,
+  c("A59", "A12", "A15", "A60"),
+  c("A59", "A12", "A15", "A60"))
 ```
 
 Calculate percentiles:
 
 ```{r}
-percentiles <- 
-  data_validation_GPS %>%
+percentiles_novalid <- 
+  data_validation_novalid %>%
   group_by(EUNISa_1) %>%
   summarize(
     perc_10_A59 = quantile(A59, probs = 0.10, na.rm = T),
     perc_20_A59 = quantile(A59, probs = 0.20, na.rm = T),
     perc_80_A59 = quantile(A59, probs = 0.80, na.rm = T),
     perc_90_A59 = quantile(A59, probs = 0.90, na.rm = T),
-    perc_10_A15 = quantile(A15, probs = 0.10, na.rm = T),
-    perc_20_A15 = quantile(A15, probs = 0.20, na.rm = T),
-    perc_80_A15 = quantile(A15, probs = 0.80, na.rm = T),
-    perc_90_A15 = quantile(A15, probs = 0.90, na.rm = T),
     perc_10_A12 = quantile(A12, probs = 0.10, na.rm = T),
     perc_20_A12 = quantile(A12, probs = 0.20, na.rm = T),
     perc_80_A12 = quantile(A12, probs = 0.80, na.rm = T),
     perc_90_A12 = quantile(A12, probs = 0.90, na.rm = T),
+    perc_10_A15 = quantile(A15, probs = 0.10, na.rm = T),
+    perc_20_A15 = quantile(A15, probs = 0.20, na.rm = T),
+    perc_80_A15 = quantile(A15, probs = 0.80, na.rm = T),
+    perc_90_A15 = quantile(A15, probs = 0.90, na.rm = T),
+    perc_10_A60 = quantile(A60, probs = 0.10, na.rm = T),
+    perc_20_A60 = quantile(A60, probs = 0.20, na.rm = T),
+    perc_80_A60 = quantile(A60, probs = 0.80, na.rm = T),
+    perc_90_A60 = quantile(A60, probs = 0.90, na.rm = T),
+    )
+```
+
+```{r}
+percentiles_roughvalid <- 
+  data_validation_roughvalid %>%
+  group_by(EUNISa_1) %>%
+  summarize(
+    perc_10_A59 = quantile(A59, probs = 0.10, na.rm = T),
+    perc_20_A59 = quantile(A59, probs = 0.20, na.rm = T),
+    perc_80_A59 = quantile(A59, probs = 0.80, na.rm = T),
+    perc_90_A59 = quantile(A59, probs = 0.90, na.rm = T),
+    perc_10_A12 = quantile(A12, probs = 0.10, na.rm = T),
+    perc_20_A12 = quantile(A12, probs = 0.20, na.rm = T),
+    perc_80_A12 = quantile(A12, probs = 0.80, na.rm = T),
+    perc_90_A12 = quantile(A12, probs = 0.90, na.rm = T),
+    perc_10_A15 = quantile(A15, probs = 0.10, na.rm = T),
+    perc_20_A15 = quantile(A15, probs = 0.20, na.rm = T),
+    perc_80_A15 = quantile(A15, probs = 0.80, na.rm = T),
+    perc_90_A15 = quantile(A15, probs = 0.90, na.rm = T),
     perc_10_A60 = quantile(A60, probs = 0.10, na.rm = T),
     perc_20_A60 = quantile(A60, probs = 0.20, na.rm = T),
     perc_80_A60 = quantile(A60, probs = 0.80, na.rm = T),
@@ -878,62 +856,107 @@ percentiles <-
 ### Get filtered data
 
 ```{r}
-data_validation_GPS_refin1 <- 
-  data_validation_GPS %>%
-  left_join(percentiles, by = "EUNISa_1") %>%
+# No validation
+
+# Refin 10-90th, 1 variable
+data_validation_novalid_refin1 <- data_validation_novalid %>%
+  left_join(percentiles_novalid, by = "EUNISa_1") %>%
   mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
-  dplyr::filter(
-    (A59 >= perc_10_A59 & A59 <= perc_90_A59)
-    )
-data_validation_GPS_refin2 <- 
-  data_validation_GPS %>%
-  left_join(percentiles, by = "EUNISa_1") %>%
+  dplyr::filter((A59 >= perc_10_A59 & A59 <= perc_90_A59))
+
+# Refin 10-90th, 2 variables
+data_validation_novalid_refin2 <- data_validation_novalid %>%
+  left_join(percentiles_novalid, by = "EUNISa_1") %>%
   mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
-  dplyr::filter(
-    (A59 >= perc_10_A59 & A59 <= perc_90_A59) &
-      (A15 >= perc_10_A15 & A15 <= perc_90_A15)
-    )
-data_validation_GPS_refin3 <- 
-  data_validation_GPS %>%
-  left_join(percentiles, by = "EUNISa_1") %>%
+  dplyr::filter((A59 >= perc_10_A59 & A59 <= perc_90_A59) &
+                  (A12 >= perc_10_A12 & A12 <= perc_90_A12))
+
+# Refin 10-90th, 3 variables
+data_validation_novalid_refin3 <- data_validation_novalid %>%
+  left_join(percentiles_novalid, by = "EUNISa_1") %>%
   mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
-  dplyr::filter(
-    (A59 >= perc_10_A59 & A59 <= perc_90_A59) &
-      (A15 >= perc_10_A15 & A15 <= perc_90_A15) &
-      (A12 >= perc_10_A12 & A12 <= perc_90_A12)
-    )
-data_validation_GPS_refin4 <- 
-  data_validation_GPS %>%
-  left_join(percentiles, by = "EUNISa_1") %>%
+  dplyr::filter((A59 >= perc_10_A59 & A59 <= perc_90_A59) &
+                  (A15 >= perc_10_A12 & A12 <= perc_90_A12) &
+                  (A12 >= perc_10_A15 & A15 <= perc_90_A15))
+
+# Refin 10-90th, 4 variables
+data_validation_novalid_refin4 <- data_validation_novalid %>%
+  left_join(percentiles_novalid, by = "EUNISa_1") %>%
   mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
-  dplyr::filter(
-    (A59 >= perc_10_A59 & A59 <= perc_90_A59) &
-      (A15 >= perc_10_A15 & A15 <= perc_90_A15) &
-      (A12 >= perc_10_A12 & A12 <= perc_90_A12) &
-      (A60 >= perc_10_A60 & A60 <= perc_90_A60)
-    )
+  dplyr::filter((A59 >= perc_10_A59 & A59 <= perc_90_A59) &
+                  (A15 >= perc_10_A12 & A12 <= perc_90_A12) &
+                  (A12 >= perc_10_A15 & A15 <= perc_90_A15) &
+                  (A60 >= perc_10_A60 & A60 <= perc_90_A60))
+
+# Rough validation
+
+# Refin 10-90th, 1 variable
+data_validation_roughvalid_refin1 <- data_validation_roughvalid %>%
+  left_join(percentiles_roughvalid, by = "EUNISa_1") %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  dplyr::filter((A59 >= perc_10_A59 & A59 <= perc_90_A59))
+
+# Refin 10-90th, 2 variables
+data_validation_roughvalid_refin2 <- data_validation_roughvalid %>%
+  left_join(percentiles_roughvalid, by = "EUNISa_1") %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  dplyr::filter((A59 >= perc_10_A59 & A59 <= perc_90_A59) &
+                  (A12 >= perc_10_A12 & A12 <= perc_90_A12))
+
+# Refin 10-90th, 3 variables
+data_validation_roughvalid_refin3 <- data_validation_roughvalid %>%
+  left_join(percentiles_roughvalid, by = "EUNISa_1") %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  dplyr::filter((A59 >= perc_10_A59 & A59 <= perc_90_A59) &
+                  (A15 >= perc_10_A12 & A12 <= perc_90_A12) &
+                  (A12 >= perc_10_A15 & A15 <= perc_90_A15))
+
+# Refin 10-90th, 4 variables
+data_validation_roughvalid_refin4 <- data_validation_roughvalid %>%
+  left_join(percentiles_roughvalid, by = "EUNISa_1") %>%
+  mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+  dplyr::filter((A59 >= perc_10_A59 & A59 <= perc_90_A59) &
+                  (A15 >= perc_10_A12 & A12 <= perc_90_A12) &
+                  (A12 >= perc_10_A15 & A15 <= perc_90_A15) &
+                  (A60 >= perc_10_A60 & A60 <= perc_90_A60))
 ```
 
-#### N plots per category
+### N points per category
 
 ```{r}
 bind_rows(
-  data_validation_GPS_refin1 %>% count(EUNISa_1) %>%
+  data_validation_novalid_refin1 %>% count(EUNISa_1) %>%
     pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
-    mutate(data = "data_validation_GPS_refin1") %>%
+    mutate(data = "data_validation_novalid_refin1") %>%
     select(data, Q, R, S, T),
-  data_validation_GPS_refin2 %>% count(EUNISa_1) %>%
+  data_validation_novalid_refin2 %>% count(EUNISa_1) %>%
     pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
-    mutate(data = "data_validation_GPS_refin2") %>%
+    mutate(data = "data_validation_novalid_refin2") %>%
     select(data, Q, R, S, T),
-  data_validation_GPS_refin3 %>% count(EUNISa_1) %>%
+  data_validation_novalid_refin3 %>% count(EUNISa_1) %>%
     pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
-    mutate(data = "data_validation_GPS_refin3") %>%
+    mutate(data = "data_validation_novalid_refin3") %>%
     select(data, Q, R, S, T),
-  data_validation_GPS_refin4 %>% count(EUNISa_1) %>%
+  data_validation_novalid_refin3 %>% count(EUNISa_1) %>%
     pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
-    mutate(data = "data_validation_GPS_refin4") %>%
-    select(data, Q, R, S, T)
+    mutate(data = "data_validation_novalid_refin3") %>%
+    select(data, Q, R, S, T),
+  data_validation_roughvalid_refin1 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(data = "data_validation_roughvalid_refin1") %>%
+    select(data, Q, R, S, T),
+  data_validation_roughvalid_refin2 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(data = "data_validation_roughvalid_refin2") %>%
+    select(data, Q, R, S, T),
+  data_validation_roughvalid_refin3 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(data = "data_validation_roughvalid_refin3") %>%
+    select(data, Q, R, S, T),
+  data_validation_roughvalid_refin3 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(data = "data_validation_roughvalid_refin3") %>%
+    select(data, Q, R, S, T),
   )
 ```
 
@@ -944,88 +967,213 @@ set.seed(123)
 ```
 
 ```{r}
-train_indices2 <- sample(1:nrow(data_validation_GPS_refin1), 
-                         0.7 * nrow(data_validation_GPS_refin1))
-train_indices3 <- sample(1:nrow(data_validation_GPS_refin2), 
-                         0.7 * nrow(data_validation_GPS_refin3))
-train_indices4 <- sample(1:nrow(data_validation_GPS_refin3), 
-                         0.7 * nrow(data_validation_GPS_refin3))
-train_indices5 <- sample(1:nrow(data_validation_GPS_refin4), 
-                         0.7 * nrow(data_validation_GPS_refin4))
+train_indices_novalid_refin1 <- sample(1:nrow(data_validation_novalid_refin1), 
+                         0.7 * nrow(data_validation_novalid_refin1))
+train_indices_novalid_refin2 <- sample(1:nrow(data_validation_novalid_refin2), 
+                         0.7 * nrow(data_validation_novalid_refin2))
+train_indices_novalid_refin3 <- sample(1:nrow(data_validation_novalid_refin3), 
+                         0.7 * nrow(data_validation_novalid_refin3))
+train_indices_novalid_refin4 <- sample(1:nrow(data_validation_novalid_refin4), 
+                         0.7 * nrow(data_validation_novalid_refin4))
+train_indices_roughvalid_refin1 <- sample(1:nrow(data_validation_roughvalid_refin1), 
+                         0.7 * nrow(data_validation_roughvalid_refin1))
+train_indices_roughvalid_refin2 <- sample(1:nrow(data_validation_roughvalid_refin2), 
+                         0.7 * nrow(data_validation_roughvalid_refin2))
+train_indices_roughvalid_refin3 <- sample(1:nrow(data_validation_roughvalid_refin3), 
+                         0.7 * nrow(data_validation_roughvalid_refin3))
+train_indices_roughvalid_refin4 <- sample(1:nrow(data_validation_roughvalid_refin4), 
+                         0.7 * nrow(data_validation_roughvalid_refin4))
 ```
 
 ```{r}
-train_data2 <- data_validation_GPS_refin1[train_indices2, ]
-train_data3 <- data_validation_GPS_refin2[train_indices3, ]
-train_data4 <- data_validation_GPS_refin3[train_indices4, ]
-train_data5 <- data_validation_GPS_refin4[train_indices5, ]
+train_data_novalid_refin1 <- data_validation_novalid_refin1[train_indices_novalid_refin1, ]
+train_data_novalid_refin2 <- data_validation_novalid_refin2[train_indices_novalid_refin2, ]
+train_data_novalid_refin3 <- data_validation_novalid_refin3[train_indices_novalid_refin3, ]
+train_data_novalid_refin4 <- data_validation_novalid_refin4[train_indices_novalid_refin4, ]
+train_data_roughvalid_refin1 <- data_validation_roughvalid_refin1[train_indices_roughvalid_refin1, ]
+train_data_roughvalid_refin2 <- data_validation_roughvalid_refin2[train_indices_roughvalid_refin2, ]
+train_data_roughvalid_refin3 <- data_validation_roughvalid_refin3[train_indices_roughvalid_refin3, ]
+train_data_roughvalid_refin4 <- data_validation_roughvalid_refin4[train_indices_roughvalid_refin4, ]
 ```
 
 ```{r}
-test_data2 <- data_validation_GPS_refin1[-train_indices2, ]
-test_data3 <- data_validation_GPS_refin2[-train_indices3, ]
-test_data4 <- data_validation_GPS_refin3[-train_indices4, ]
-test_data5 <- data_validation_GPS_refin4[-train_indices5, ]
+test_data_novalid_refin1 <- data_validation_novalid_refin1[-train_indices_novalid_refin1, ]
+test_data_novalid_refin2 <- data_validation_novalid_refin2[-train_indices_novalid_refin2, ]
+test_data_novalid_refin3 <- data_validation_novalid_refin3[-train_indices_novalid_refin3, ]
+test_data_novalid_refin4 <- data_validation_novalid_refin4[-train_indices_novalid_refin4, ]
+
+test_data_roughvalid_refin1 <- data_validation_roughvalid_refin1[-train_indices_roughvalid_refin1, ]
+test_data_roughvalid_refin2 <- data_validation_roughvalid_refin2[-train_indices_roughvalid_refin2, ]
+test_data_roughvalid_refin3 <- data_validation_roughvalid_refin3[-train_indices_roughvalid_refin3, ]
+test_data_roughvalid_refin4 <- data_validation_roughvalid_refin4[-train_indices_roughvalid_refin4, ]
 ```
 
 ### Fit models
 
 ```{r eval=FALSE, include=FALSE}
-rf2 <- run_rf(vars_RF_SatEmb, train_data2, "EUNISa_1")
-rf3 <- run_rf(vars_RF_SatEmb, train_data3, "EUNISa_1")
-rf4 <- run_rf(vars_RF_SatEmb, train_data4, "EUNISa_1")
-rf5 <- run_rf(vars_RF_SatEmb, train_data5, "EUNISa_1")
+# 5: No validation, refin1, SatEmb bands
+rf5 <- run_rf(vars_RF_SatEmb, train_data_novalid_refin1, "EUNISa_1")
+# 6: No validation, refin1, SatEmb bands + CH
+rf6 <- run_rf(vars_RF_SatEmb_CH, train_data_novalid_refin1, "EUNISa_1")
+# 7: No validation, refin2, SatEmb bands
+rf7 <- run_rf(vars_RF_SatEmb, train_data_novalid_refin2, "EUNISa_1")
+# 8: No validation, refin2, SatEmb bands + CH
+rf8 <- run_rf(vars_RF_SatEmb_CH, train_data_novalid_refin2, "EUNISa_1")
+# 9 : No validation, refin3, SatEmb bands
+rf9 <- run_rf(vars_RF_SatEmb, train_data_novalid_refin3, "EUNISa_1")
+# 10 : No validation, refin3, SatEmb bands + CH
+rf10 <- run_rf(vars_RF_SatEmb_CH, train_data_novalid_refin3, "EUNISa_1")
+# 11 : No validation, refin4, SatEmb bands
+rf11 <- run_rf(vars_RF_SatEmb, train_data_novalid_refin4, "EUNISa_1")
+# 12 : No validation, refin4, SatEmb bands + CH
+rf12 <- run_rf(vars_RF_SatEmb_CH, train_data_novalid_refin4, "EUNISa_1")
+# 13: Rough validation, refin1, SatEmb bands
+rf13 <- run_rf(vars_RF_SatEmb, train_data_roughvalid_refin1, "EUNISa_1")
+# 14: Rough validation, refin1, SatEmb bands + CH
+rf14 <- run_rf(vars_RF_SatEmb_CH, train_data_roughvalid_refin1, "EUNISa_1")
+# 15: Rough validation, refin2, SatEmb bands
+rf15 <- run_rf(vars_RF_SatEmb, train_data_roughvalid_refin2, "EUNISa_1")
+# 16: Rough validation, refin2, SatEmb bands + CH
+rf16 <- run_rf(vars_RF_SatEmb_CH, train_data_roughvalid_refin2, "EUNISa_1")
+# 17 : Rough validation, refin3, SatEmb bands
+rf17 <- run_rf(vars_RF_SatEmb, train_data_roughvalid_refin3, "EUNISa_1")
+# 18 : Rough validation, refin3, SatEmb bands + CH
+rf18 <- run_rf(vars_RF_SatEmb_CH, train_data_roughvalid_refin3, "EUNISa_1")
+# 19 : Rough validation, refin4, SatEmb bands
+rf19 <- run_rf(vars_RF_SatEmb, train_data_roughvalid_refin4, "EUNISa_1")
+# 20 : Rough validation, refin4, SatEmb bands + CH
+rf20 <- run_rf(vars_RF_SatEmb_CH, train_data_roughvalid_refin4, "EUNISa_1")
 ```
 
 ```{r}
-print(rf2$time)
-print(rf3$time)
-print(rf4$time)
 print(rf5$time)
+print(rf6$time)
+print(rf7$time)
+print(rf8$time)
+print(rf9$time)
+print(rf10$time)
+print(rf11$time)
+print(rf12$time)
+print(rf13$time)
+print(rf14$time)
+print(rf15$time)
+print(rf16$time)
+print(rf17$time)
+print(rf18$time)
+print(rf19$time)
+print(rf20$time)
 ```
 
 ```{r eval=FALSE, include=FALSE}
-save(rf2, 
-     file = "objects/RF/Satellite_Embeddings/rf2_model_l1_novalid-refin1090_1v_GPS_SatEmb.Rdata")
-save(rf3, 
-     file = "objects/RF/Satellite_Embeddings/rf3_model_l1_novalid-refin1090_2v_GPS_SatEmb.Rdata")
-save(rf4, 
-     file = "objects/RF/Satellite_Embeddings/rf4_model_l1_novalid-refin1090_3v_GPS_SatEmb.Rdata")
-save(rf5, 
-     file = "objects/RF/Satellite_Embeddings/rf5_model_l1_novalid-refin1090_4v_GPS_SatEmb.Rdata")
+save(rf5, file = "objects/RF/Satellite_Embeddings/rf5_model_l1_novalid_refin1_SatEmb.Rdata")
+save(rf6, file = "objects/RF/Satellite_Embeddings/rf6_model_l1_novalid_refin1_Sat_Emb_CH.Rdata")
+save(rf7, file = "objects/RF/Satellite_Embeddings/rf7_model_l1_novalid_refin2_Sat_Emb.Rdata")
+save(rf8, file = "objects/RF/Satellite_Embeddings/rf8_model_l1_novalid_refin2_sat_Emb_CH.Rdata")
+save(rf9, file = "objects/RF/Satellite_Embeddings/rf9_model_l1_novalid_refin3_Sat_Emb.Rdata")
+save(rf10, file = "objects/RF/Satellite_Embeddings/rf10_model_l1_novalid_refin3_sat_Emb_CH.Rdata")
+save(rf11, file = "objects/RF/Satellite_Embeddings/rf11_model_l1_novalid_refin4_Sat_Emb.Rdata")
+save(rf12, file = "objects/RF/Satellite_Embeddings/rf12_model_l1_novalid_refin4_sat_Emb_CH.Rdata")
+save(rf13, file = "objects/RF/Satellite_Embeddings/rf13_model_l1_roughvalid_refin1_SatEmb.Rdata")
+save(rf14, file = "objects/RF/Satellite_Embeddings/rf14_model_l1_roughvalid_refin1_Sat_Emb_CH.Rdata")
+save(rf15, file = "objects/RF/Satellite_Embeddings/rf15_model_l1_roughvalid_refin2_Sat_Emb.Rdata")
+save(rf16, file = "objects/RF/Satellite_Embeddings/rf16_model_l1_roughvalid_refin2_sat_Emb_CH.Rdata")
+save(rf17, file = "objects/RF/Satellite_Embeddings/rf17_model_l1_roughvalid_refin3_Sat_Emb.Rdata")
+save(rf18, file = "objects/RF/Satellite_Embeddings/rf18_model_l1_roughvalid_refin3_sat_Emb_CH.Rdata")
+save(rf19, file = "objects/RF/Satellite_Embeddings/rf19_model_l1_roughvalid_refin4_Sat_Emb.Rdata")
+save(rf20, file = "objects/RF/Satellite_Embeddings/rf20_model_l1_roughvalid_refin4_sat_Emb_CH.Rdata")
 ```
 
 ### Predictions
 
 ```{r eval=FALSE, include=FALSE}
-predictions_rf2 <- predict(rf2$model, newdata = test_data2,OOB = TRUE,
-                           type = "response")
-predictions_rf3 <- predict(rf3$model, newdata = test_data3,OOB = TRUE,
-                           type = "response")
-predictions_rf4 <- predict(rf4$model, newdata = test_data4,OOB = TRUE,
-                           type = "response")
-predictions_rf5 <- predict(rf5$model, newdata = test_data5,OOB = TRUE,
-                           type = "response")
+predictions_rf5 <- predict(rf5$model, newdata = test_data_novalid_refin1,
+                           OOB = TRUE, type = "response")
+predictions_rf6 <- predict(rf6$model, newdata = test_data_novalid_refin1,
+                           OOB = TRUE, type = "response")
+predictions_rf7 <- predict(rf7$model, newdata = test_data_novalid_refin2,
+                           OOB = TRUE, type = "response")
+predictions_rf8 <- predict(rf8$model, newdata = test_data_novalid_refin2,
+                           OOB = TRUE, type = "response")
+predictions_rf9 <- predict(rf9$model, newdata = test_data_novalid_refin3,
+                           OOB = TRUE, type = "response")
+predictions_rf10 <- predict(rf10$model, newdata = test_data_novalid_refin3,
+                            OOB = TRUE, type = "response")
+predictions_rf11 <- predict(rf11$model, newdata = test_data_novalid_refin4,
+                            OOB = TRUE, type = "response")
+predictions_rf12 <- predict(rf12$model, newdata = test_data_novalid_refin4,
+                            OOB = TRUE, type = "response")
+predictions_rf13 <- predict(rf13$model, newdata = test_data_roughvalid_refin1,
+                           OOB = TRUE, type = "response")
+predictions_rf14 <- predict(rf14$model, newdata = test_data_roughvalid_refin1,
+                           OOB = TRUE, type = "response")
+predictions_rf15 <- predict(rf15$model, newdata = test_data_roughvalid_refin2,
+                           OOB = TRUE, type = "response")
+predictions_rf16 <- predict(rf16$model, newdata = test_data_roughvalid_refin2,
+                           OOB = TRUE, type = "response")
+predictions_rf17 <- predict(rf17$model, newdata = test_data_roughvalid_refin3,
+                           OOB = TRUE, type = "response")
+predictions_rf18 <- predict(rf18$model, newdata = test_data_roughvalid_refin3,
+                            OOB = TRUE, type = "response")
+predictions_rf19 <- predict(rf19$model, newdata = test_data_roughvalid_refin4,
+                            OOB = TRUE, type = "response")
+predictions_rf20 <- predict(rf20$model, newdata = test_data_roughvalid_refin4,
+                            OOB = TRUE, type = "response")
 ```
 
 ```{r eval=FALSE, include=FALSE}
-save(predictions_rf2, 
-     file = "objects/RF/Satellite_Embeddings/rf2_pred_l1_novalid-refin1090_1v_GPS_SatEmb.Rdata.Rdata")
-save(predictions_rf3, 
-     file = "objects/RF/Satellite_Embeddings/rf3_pred_l1_novalid-refin1090_2v_GPS_SatEmb.Rdata.Rdata")
-save(predictions_rf4, 
-     file = "objects/RF/Satellite_Embeddings/rf4_pred_l1_novalid-refin1090_3v_GPS_SatEmb.Rdata.Rdata")
-save(predictions_rf5, 
-     file = "objects/RF/Satellite_Embeddings/rf5_pred_l1_novalid-refin1090_4v_GPS_SatEmb.Rdata.Rdata")
+save(predictions_rf5, file = "objects/RF/Satellite_Embeddings/rf5_pred_l1_novalid_refin1_SatEmb.Rdata")
+save(predictions_rf6, file = "objects/RF/Satellite_Embeddings/rf6_pred_l1_novalid_refin1_Sat_Emb_CH.Rdata")
+save(predictions_rf7, file = "objects/RF/Satellite_Embeddings/rf7_pred_l1_novalid_refin2_Sat_Emb.Rdata")
+save(predictions_rf8, file = "objects/RF/Satellite_Embeddings/rf8_pred_l1_novalid_refin2_sat_Emb_CH.Rdata")
+save(predictions_rf9, file = "objects/RF/Satellite_Embeddings/rf9_pred_l1_novalid_refin3_Sat_Emb.Rdata")
+save(predictions_rf10, file = "objects/RF/Satellite_Embeddings/rf10_pred_l1_novalid_refin3_sat_Emb_CH.Rdata")
+save(predictions_rf11, file = "objects/RF/Satellite_Embeddings/rf11_pred_l1_novalid_refin4_Sat_Emb.Rdata")
+save(predictions_rf12, file = "objects/RF/Satellite_Embeddings/rf12_pred_l1_novalid_refin4_sat_Emb_CH.Rdata")
+save(predictions_rf13, file = "objects/RF/Satellite_Embeddings/rf13_pred_l1_roughvalid_refin1_SatEmb.Rdata")
+save(predictions_rf14, file = "objects/RF/Satellite_Embeddings/rf14_pred_l1_roughvalid_refin1_Sat_Emb_CH.Rdata")
+save(predictions_rf15, file = "objects/RF/Satellite_Embeddings/rf15_pred_l1_roughvalid_refin2_Sat_Emb.Rdata")
+save(predictions_rf16, file = "objects/RF/Satellite_Embeddings/rf16_pred_l1_roughvalid_refin2_sat_Emb_CH.Rdata")
+save(predictions_rf17, file = "objects/RF/Satellite_Embeddings/rf17_pred_l1_roughvalid_refin3_Sat_Emb.Rdata")
+save(predictions_rf18, file = "objects/RF/Satellite_Embeddings/rf18_pred_l1_roughvalid_refin3_sat_Emb_CH.Rdata")
+save(predictions_rf19, file = "objects/RF/Satellite_Embeddings/rf19_pred_l1_roughvalid_refin4_Sat_Emb.Rdata")
+save(predictions_rf20, file = "objects/RF/Satellite_Embeddings/rf20_pred_l1_roughvalid_refin4_sat_Emb_CH.Rdata")
 ```
 
 ### Confusion matrices
 
 ```{r}
-confusionMatrix(predictions_rf2, test_data2$EUNISa_1)
-confusionMatrix(predictions_rf3, test_data3$EUNISa_1)
-confusionMatrix(predictions_rf4, test_data4$EUNISa_1)
-confusionMatrix(predictions_rf5, test_data5$EUNISa_1)
+# 5: No validation, refin1, SatEmb bands
+confusionMatrix(predictions_rf5, test_data_novalid_refin1$EUNISa_1)
+# 6: No validation, refin1, SatEmb bands + CH
+confusionMatrix(predictions_rf6, test_data_novalid_refin1$EUNISa_1)
+# 7: No validation, refin2, SatEmb bands
+confusionMatrix(predictions_rf7, test_data_novalid_refin2$EUNISa_1)
+# 8: No validation, refin2, SatEmb bands + CH
+confusionMatrix(predictions_rf8, test_data_novalid_refin2$EUNISa_1)
+# 9 : No validation, refin3, SatEmb bands
+confusionMatrix(predictions_rf9, test_data_novalid_refin3$EUNISa_1)
+# 10 : No validation, refin3, SatEmb bands + CH
+confusionMatrix(predictions_rf10, test_data_novalid_refin3$EUNISa_1)
+# 11 : No validation, refin4, SatEmb bands
+confusionMatrix(predictions_rf11, test_data_novalid_refin4$EUNISa_1)
+# 12 : No validation, refin4, SatEmb bands + CH
+confusionMatrix(predictions_rf12, test_data_novalid_refin4$EUNISa_1)
+# 13: Rough validation, refin1, SatEmb bands
+confusionMatrix(predictions_rf13, test_data_roughvalid_refin1$EUNISa_1)
+# 14: Rough validation, refin1, SatEmb bands + CH
+confusionMatrix(predictions_rf14, test_data_roughvalid_refin1$EUNISa_1)
+# 15: Rough validation, refin2, SatEmb bands
+confusionMatrix(predictions_rf15, test_data_roughvalid_refin2$EUNISa_1)
+# 16: Rough validation, refin2, SatEmb bands + CH
+confusionMatrix(predictions_rf16, test_data_roughvalid_refin2$EUNISa_1)
+# 17 : Rough validation, refin3, SatEmb bands
+confusionMatrix(predictions_rf17, test_data_roughvalid_refin3$EUNISa_1)
+# 18 : Rough validation, refin3, SatEmb bands + CH
+confusionMatrix(predictions_rf18, test_data_roughvalid_refin3$EUNISa_1)
+# 19 : Rough validation, refin4, SatEmb bands
+confusionMatrix(predictions_rf19, test_data_roughvalid_refin4$EUNISa_1)
+# 20 : Rough validation, refin4, SatEmb bands + CH
+confusionMatrix(predictions_rf20, test_data_roughvalid_refin4$EUNISa_1)
 ```
 
 ### Variable importance
@@ -1033,42 +1181,88 @@ confusionMatrix(predictions_rf5, test_data5$EUNISa_1)
 #### Unconditional
 
 ```{r eval=FALSE, include=FALSE}
-varimp_rf2 <- compute_varimp(rf2$model, nperm = 100)
-varimp_rf3 <- compute_varimp(rf3$model, nperm = 100)
-varimp_rf4 <- compute_varimp(rf4$model, nperm = 100)
 varimp_rf5 <- compute_varimp(rf5$model, nperm = 100)
+varimp_rf6 <- compute_varimp(rf6$model, nperm = 100)
+varimp_rf7 <- compute_varimp(rf7$model, nperm = 100)
+varimp_rf8 <- compute_varimp(rf8$model, nperm = 100)
+varimp_rf9 <- compute_varimp(rf9$model, nperm = 100)
+varimp_rf10 <- compute_varimp(rf10$model, nperm = 100)
+varimp_rf11 <- compute_varimp(rf11$model, nperm = 100)
+varimp_rf12 <- compute_varimp(rf12$model, nperm = 100)
+varimp_rf13 <- compute_varimp(rf13$model, nperm = 100)
+varimp_rf14 <- compute_varimp(rf14$model, nperm = 100)
+varimp_rf15 <- compute_varimp(rf15$model, nperm = 100)
+varimp_rf16 <- compute_varimp(rf16$model, nperm = 100)
+varimp_rf17 <- compute_varimp(rf17$model, nperm = 100)
+varimp_rf18 <- compute_varimp(rf18$model, nperm = 100)
+varimp_rf19 <- compute_varimp(rf19$model, nperm = 100)
+varimp_rf20 <- compute_varimp(rf20$model, nperm = 100)
 ```
 
 ```{r eval=FALSE, include=FALSE}
-print(varimp_rf2$time)
-print(varimp_rf3$time)
-print(varimp_rf4$time)
 print(varimp_rf5$time)
+print(varimp_rf6$time)
+print(varimp_rf7$time)
+print(varimp_rf8$time)
+print(varimp_rf9$time)
+print(varimp_rf10$time)
+print(varimp_rf11$time)
+print(varimp_rf12$time)
+print(varimp_rf13$time)
+print(varimp_rf14$time)
+print(varimp_rf15$time)
+print(varimp_rf16$time)
+print(varimp_rf17$time)
+print(varimp_rf18$time)
+print(varimp_rf19$time)
+print(varimp_rf20$time)
 ```
 
 ```{r eval=FALSE, include=FALSE}
-save(varimp_rf2,
-     file = "objects/RF/Satellite_Embeddings/rf2_varimp_l1_novalid-refin1090_1v_GPS_SatEmb.Rdata.Rdata")
-save(varimp_rf3,
-     file = "objects/RF/Satellite_Embeddings/rf3_varimp_l1_novalid-refin1090_2v_GPS_SatEmb.Rdata.Rdata")
-save(varimp_rf4,
-     file = "objects/RF/Satellite_Embeddings/rf4_varimp_l1_novalid-refin1090_3v_GPS_SatEmb.Rdata.Rdata")
-save(varimp_rf5,
-     file = "objects/RF/Satellite_Embeddings/rf5_varimp_l1_novalid-refin1090_4v_GPS_SatEmb.Rdata.Rdata")
+save(varimp_rf5, file = "objects/RF/Satellite_Embeddings/rf5_varimp_l1_novalid_refin1_SatEmb.Rdata")
+save(varimp_rf6, file = "objects/RF/Satellite_Embeddings/rf6_varimp_l1_novalid_refin1_Sat_Emb_CH.Rdata")
+save(varimp_rf7, file = "objects/RF/Satellite_Embeddings/rf7_varimp_l1_novalid_refin2_Sat_Emb.Rdata")
+save(varimp_rf8, file = "objects/RF/Satellite_Embeddings/rf8_varimp_l1_novalid_refin2_sat_Emb_CH.Rdata")
+save(varimp_rf9, file = "objects/RF/Satellite_Embeddings/rf9_varimp_l1_novalid_refin3_Sat_Emb.Rdata")
+save(varimp_rf10, file = "objects/RF/Satellite_Embeddings/rf10_varimp_l1_novalid_refin3_sat_Emb_CH.Rdata")
+save(varimp_rf11, file = "objects/RF/Satellite_Embeddings/rf11_varimp_l1_novalid_refin4_Sat_Emb.Rdata")
+save(varimp_rf12, file = "objects/RF/Satellite_Embeddings/rf12_varimp_l1_novalid_refin4_sat_Emb_CH.Rdata")
+save(varimp_rf13, file = "objects/RF/Satellite_Embeddings/rf13_varimp_l1_roughvalid_refin1_SatEmb.Rdata")
+save(varimp_rf14, file = "objects/RF/Satellite_Embeddings/rf14_varimp_l1_roughvalid_refin1_Sat_Emb_CH.Rdata")
+save(varimp_rf15, file = "objects/RF/Satellite_Embeddings/rf15_varimp_l1_roughvalid_refin2_Sat_Emb.Rdata")
+save(varimp_rf16, file = "objects/RF/Satellite_Embeddings/rf16_varimp_l1_roughvalid_refin2_sat_Emb_CH.Rdata")
+save(varimp_rf17, file = "objects/RF/Satellite_Embeddings/rf17_varimp_l1_roughvalid_refin3_Sat_Emb.Rdata")
+save(varimp_rf18, file = "objects/RF/Satellite_Embeddings/rf18_varimp_l1_roughvalid_refin3_sat_Emb_CH.Rdata")
+save(varimp_rf19, file = "objects/RF/Satellite_Embeddings/rf19_varimp_l1_roughvalid_refin4_Sat_Emb.Rdata")
+save(varimp_rf20, file = "objects/RF/Satellite_Embeddings/rf20_varimp_l1_roughvalid_refin4_sat_Emb_CH.Rdata")
 ```
 
 ##### Plots
 
 ```{r}
-plot(varimp_rf2$varimp, margin = c(10, 6, 2, 2))
-plot(varimp_rf3$varimp, margin = c(10, 6, 2, 2))
-plot(varimp_rf4$varimp, margin = c(10, 6, 2, 2))
 plot(varimp_rf5$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf6$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf7$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf8$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf9$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf10$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf11$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf12$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf13$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf14$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf15$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf16$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf17$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf18$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf19$varimp, margin = c(10, 6, 2, 2))
+plot(varimp_rf20$varimp, margin = c(10, 6, 2, 2))
 ```
 
-# INSERT ABOVE: Fit RF models (level 1) with CH
+#### TBD: Conditional
 
+### ROC curves (TBD)
 
+#### Plots
 
 # Session info
 
