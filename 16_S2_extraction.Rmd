@@ -59,7 +59,7 @@ load(file = "objects/monthly_avg_indices_S2.Rdata")
 
 ```{r}
 ReSurvey_data <- read_csv(
-  here("data", "clean", "ReSurvey_QRST_data_V2025.2_20251003.csv")) %>%
+  here("data", "clean", "ReSurvey_QRST_data_V2025.2_20251007.csv")) %>%
   select(PlotObservationID, EUNISa_1, EUNISa_1_descr,
          EUNISa_2, EUNISa_2_descr) %>%
   mutate(PlotObservationID = factor(PlotObservationID),
@@ -79,12 +79,23 @@ folder_path <- "C:/Data/MOTIVATE/MOTIVATE_RS_data/S2/Bands/all"
 # List CSV files
 csv_files <- list.files(folder_path, full.names = TRUE, recursive = TRUE)
 
-# Define column types: force RSrvypl to character, others auto-detected
-custom_col_types <- cols(
-  RSrvypl = col_character(),
-  RSrvyst = col_character(),
-  default = col_guess()
-)
+# Read one file to get column names
+sample_file <- csv_files[1]
+sample_data <- read_csv(sample_file, n_max = 0)
+
+# Identify columns starting with "EUNIS"
+eunis_cols <- names(sample_data)[startsWith(names(sample_data), "EUNIS")]
+
+# Create a spec list
+spec_list <- setNames(rep(list(col_character()), length(eunis_cols)), eunis_cols)
+
+# Add fixed columns
+spec_list$RSrvypl <- col_character()
+spec_list$RSrvyst <- col_character()
+spec_list$RSrvyob <- col_character()
+
+# Create final column spec
+custom_col_types <- do.call(cols, spec_list)
 
 # Read and process each file
 data_list <- lapply(csv_files, function(file) {
@@ -92,22 +103,56 @@ data_list <- lapply(csv_files, function(file) {
   
   # Read the file
   df <- read_csv(file, col_types = custom_col_types) %>%
-    # Remove columns that give column type problems when combining data
-    select(-starts_with("EUNIS"), -starts_with("ReSurvey")) %>%
     mutate(biogeo = info$biogeo, unit = info$unit)
   
   return(df)
   })
 
 # Combine all data
-data_RS_S2_bands <- bind_rows(data_list) %>%
-  rename(PlotObservationID = PltObID)
+data_RS_S2_bands <- bind_rows(data_list)
 
 # View the resulting tibble
 print(data_RS_S2_bands)
 
 # Counts per biogeo and unit
 print(data_RS_S2_bands %>% count(biogeo, unit), n = 100)
+```
+
+# Remove unneded cols and rename
+
+```{r}
+data_RS_S2_bands <- data_RS_S2_bands %>%
+  select(-starts_with("X"), -UNIT) %>%
+  rename(PlotObservationID = PltObID)
+```
+
+# Read file with band data for points outside polygons
+
+Some points from the ReSurvey database fall outside the bioregion polygons. These points were manually assigned to the closest biogeo and unit in ArcGIS (those far out were assigned biogeo = OUT and unit = OUT). Data for these points has been extracted with a different GEE script.
+
+```{r}
+data_RS_S2_bands_out <- read_csv(
+  "C:/Data/MOTIVATE/MOTIVATE_RS_data/S2_out/AllPoints_S2_Annual.csv",
+  col_types = custom_col_types) %>%
+  select(-AREA, -Join_Count, -TARGET_FID, -code, -name) %>%
+  rename(biogeo = BIOGEO, unit = UNIT, `FEVA(Y/` = `FEVA_Y_`, `Mn(y/n)` = `Mn_y_n_`,
+         PlotObservationID = PltObID)
+```
+
+Check that column names are the same:
+
+```{r}
+# Columns in data_RS_S2_bands but not in data_RS_S2_bands_out
+setdiff(names(data_RS_S2_bands), names(data_RS_S2_bands_out))
+
+# Columns in data_RS_S2_bands_out but not in data_RS_S2_bands
+setdiff(names(data_RS_S2_bands_out), names(data_RS_S2_bands))
+```
+
+# Join all data
+
+```{r}
+data_RS_S2_bands <- bind_rows(data_RS_S2_bands, data_RS_S2_bands_out)
 ```
 
 # Some checks
@@ -190,7 +235,7 @@ data_RS_S2_bands_indices <- data_RS_S2_bands_updated %>%
          NDMI = (NIR - SWIR) / (NIR + SWIR),
          NDWI = (green - NIR) / (green + NIR)) %>%
   # Setting values of indices outside expected ranges (errors) to NA
-  mutate(EVI = if_else(EVI > 1 | EVI < -1, NA, EVI)) # 12166 values of EVI as NA
+  mutate(EVI = if_else(EVI > 1 | EVI < -1, NA, EVI)) # Some values of EVI as NA
 ```
 
 Save:
@@ -216,7 +261,7 @@ data_RS_S2_bands_indices %>%
 Apply the function with batch processing
 
 ```{r eval=FALSE, message=FALSE, include=FALSE}
-plan(multisession, workers = availableCores() - 1)
+plan(multisession, workers = 24)
 
 ids <- unique(data_RS_S2_bands_indices$PlotObservationID)
 batches <- split(ids, ceiling(seq_along(ids) / 50))  # batches of 50
@@ -240,7 +285,7 @@ GAM_data <- map_dfr(seq_along(batches), function(i) {
   start_batch <- Sys.time()
 
   result <- data_RS_S2_bands_indices %>%
-    filter(PlotObservationID %in% batch_ids) %>%
+    dplyr::filter(PlotObservationID %in% batch_ids) %>%
     group_split(PlotObservationID) %>%
     set_names(map_chr(., ~ as.character(unique(.x$PlotObservationID)))) %>%
     future_map_dfr(~ compute_metrics_models(df = .,
@@ -393,7 +438,7 @@ GAM_data %>%
   theme_minimal()
 ```
 
-## Plot fit and moments for each PlotObservationID
+## TBD if needed: Plot fit and moments for each PlotObservationID
 
 ### Quality = 1
 
@@ -409,7 +454,7 @@ GAM_data_ids_q1 <- GAM_data %>%
               select(PlotObservationID, biogeo, unit) %>%
               distinct()) %>%
   # Join to get EUNIS info
-   left_join(db_Europa_allobs %>%
+   left_join(ReSurvey_data %>%
                select(PlotObservationID, EUNISa_1, EUNISa_1_descr,
                       EUNISa_2, EUNISa_2_descr)) %>%
   # Join to get original values of indices
@@ -499,7 +544,7 @@ GAM_data_ids_q0 <- GAM_data %>%
               select(PlotObservationID, biogeo, unit) %>%
               distinct()) %>%
   # Join to get EUNIS info
-   left_join(db_Europa_allobs %>%
+   left_join(ReSurvey_data %>%
                select(PlotObservationID, EUNISa_1, EUNISa_1_descr,
                       EUNISa_2, EUNISa_2_descr)) %>%
   # Join to get original values of indices
@@ -578,25 +623,63 @@ walk2(ts_plots_q0, seq_along(ts_plots_q0), ~ ggsave(
 
 # Smooth the time series of NDMI and NDWI
 
-Apply the function:
+## Calculation
 
-```{r eval=FALSE, include=FALSE}
-plan(multisession, workers = parallel::detectCores() - 1)
+Apply the function with batch processing.
 
-# Apply the function to each PlotObservationID
-execution_time <- system.time({
-  with_progress({
-    smoothed_data <- data_RS_S2_bands_indices %>%
-      group_split(PlotObservationID) %>%
-      set_names(map_chr(., ~ as.character(unique(.x$PlotObservationID)))) %>%
-      future_map_dfr(~ compute_unweighted_fit(df = .,
-                                       index_cols = c("NDMI", "NDWI")),
-                     .progress = TRUE)
-  })
+```{r eval=FALSE, message=FALSE, include=FALSE}
+plan(multisession, workers = 24)
+
+ids <- unique(data_RS_S2_bands_indices$PlotObservationID)
+batches <- split(ids, ceiling(seq_along(ids) / 50))  # batches of 50
+
+start_total <- Sys.time()
+
+smoothed_data <- map_dfr(seq_along(batches), function(i) {
+  batch_ids <- batches[[i]]
+  total_batches <- length(batches)
+  batch_file <- file.path("objects/smoothing_batches_S2", paste0("batch_", i, ".rds"))
+
+  if (file.exists(batch_file)) {
+    message("✅ Batch  ", i, " of ", total_batches, 
+            " already processed. Loading from file.")
+    return(readRDS(batch_file))
+  }
+
+  message("🔄 Processing batch  ", i, " of ", total_batches, " with ",
+          length(batch_ids), " IDs...")
+
+  start_batch <- Sys.time()
+
+  result <- data_RS_S2_bands_indices %>%
+    filter(PlotObservationID %in% batch_ids) %>%
+    group_split(PlotObservationID) %>%
+    set_names(map_chr(., ~ as.character(unique(.x$PlotObservationID)))) %>%
+    future_map_dfr(~ compute_unweighted_fit(df = .,
+                                            index_cols = c("NDMI", "NDWI")),
+                   .progress = TRUE)
+
+  end_batch <- Sys.time()
+  duration <- round(difftime(end_batch, start_batch, units = "mins"), 2)
+  message("⏱️ Batch time ", i, ": ", duration, " minutes")
+
+  message("💾 Saving batch ", i, " to file...")
+  saveRDS(result, batch_file)
+  message("✅ Batch ", i, " saved.") 
+
+  result
 })
 
-print(execution_time)
+end_total <- Sys.time()
+total_time <- round(difftime(end_total, start_total, units = "mins"), 2)
+message("⏱️ Total time: ", total_time, " minutes")
 ```
+
+```{r}
+plan(sequential)
+```
+
+## Save
 
 Look:
 
@@ -610,7 +693,7 @@ Save as an object:
 save(smoothed_data, file = "objects/smoothed_data_S2.Rdata")
 ```
 
-## Plot fit and moments for each PlotObservationID
+## TBD if needed:  Plot fit and moments for each PlotObservationID
 
 ```{r}
 smoothed_data_ids <- smoothed_data %>%
@@ -619,7 +702,7 @@ smoothed_data_ids <- smoothed_data %>%
               select(PlotObservationID, biogeo, unit) %>%
               distinct()) %>%
   # Join to get EUNIS info
-   left_join(db_Europa_allobs %>%
+   left_join(ReSurvey_data %>%
                select(PlotObservationID, EUNISa_1, EUNISa_1_descr,
                       EUNISa_2, EUNISa_2_descr)) %>%
   mutate(PlotObservationID = as.character(PlotObservationID))
@@ -1336,9 +1419,6 @@ nrow(final_RS_data %>%
 # Difference in value between pos and sos should be positive
 nrow(final_RS_data %>%
        dplyr::filter(EVI_diff_pos_sos_slope_value <= 0))
-final_RS_data %>%
-  dplyr::filter(EVI_diff_pos_sos_slope_value <= 0) %>%
-  count(EVI_num_peaks)
 # Difference in value between pos and eos should be positive
 nrow(final_RS_data %>%
        dplyr::filter(EVI_diff_pos_eos_slope_value <= 0))
@@ -1356,47 +1436,30 @@ final_RS_data <- final_RS_data %>%
     )
 ```
 
-# HERE, CAREFUL! Add canopy height data
-
-Does this match with the new data? Any points without canopy height data?
-Just in case, downloading again from GEE with new script.
-
-Then we also avoid the problem with not having PlotObservationID, but obs_unique.
-
-NEED to modify chunks below...
+# Add canopy height data
 
 Read the data:
 
 ```{r}
 data_RS_CH <- read_csv(
-  "C:/Data/MOTIVATE/MOTIVATE_RS_data/Canopy_Height_1m/Europe_points_CanopyHeight_1m.csv")
-db_Europa <- read_csv(
-  here("..", "DB_first_check", "data", "clean","db_Europa_20250107.csv")
-  )
-```
-
-```{r}
-data_RS_CH_ID <- db_Europa %>%
-  select(PlotObservationID, obs_unique_id) %>%
-  right_join(data_RS_CH %>%
-              # Rename to be able to join on this column
-              rename(obs_unique_id = obs_unique)) %>%
-  select(PlotObservationID, canopy_height)
+  "C:/Data/MOTIVATE/MOTIVATE_RS_data/Canopy_Height_1m/CanopyHeight_1m.csv")
 ```
 
 Join:
 
 ```{r}
 final_RS_data <- final_RS_data %>%
-  left_join(data_RS_CH_ID %>%
-              mutate(PlotObservationID = factor(PlotObservationID)))
+  left_join(data_RS_CH %>% 
+              dplyr::select(PltObID, canopy_height) %>%
+              mutate(PltObID = factor(PltObID)) %>%
+              rename(PlotObservationID = PltObID))
 ```
 
 # Save to clean data
 
 ```{r}
 write_tsv(final_RS_data,
-          here("data", "clean","final_RS_data_bands_S2_all_20250804.csv"))
+          here("data", "clean","final_RS_data_bands_S2_all_20251021.csv"))
 ```
 
 # Session info

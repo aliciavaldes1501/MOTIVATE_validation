@@ -46,17 +46,6 @@ suppressPackageStartupMessages({
 })
 ```
 
-# Load Resurvey db
-
-```{r}
-ReSurvey_data <- read_csv(
-  here("data", "clean", "ReSurvey_QRST_data_V2025.2_20251003.csv")) %>%
-  select(PlotObservationID, EUNISa_1, EUNISa_1_descr,
-         EUNISa_2, EUNISa_2_descr) %>%
-  mutate(PlotObservationID = factor(PlotObservationID),
-         EUNISa_1 = factor(EUNISa_1), EUNISa_2 = factor(EUNISa_2))
-```
-
 # Read files with band data
 
 I got these files using the GEE code prepared by Bea.
@@ -70,12 +59,23 @@ folder_path <- "C:/Data/MOTIVATE/MOTIVATE_RS_data/Satellite_Embeddings"
 # List CSV files
 csv_files <- list.files(folder_path, full.names = TRUE, recursive = TRUE)
 
-# Define column types: force RSrvypl to character, others auto-detected
-custom_col_types <- cols(
-  RSrvypl = col_character(),
-  RSrvyst = col_character(),
-  default = col_guess()
-)
+# Read one file to get column names
+sample_file <- csv_files[1]
+sample_data <- read_csv(sample_file, n_max = 0)
+
+# Identify columns starting with "EUNIS"
+eunis_cols <- names(sample_data)[startsWith(names(sample_data), "EUNIS")]
+
+# Create a spec list
+spec_list <- setNames(rep(list(col_character()), length(eunis_cols)), eunis_cols)
+
+# Add fixed columns
+spec_list$RSrvypl <- col_character()
+spec_list$RSrvyst <- col_character()
+spec_list$RSrvyob <- col_character()
+
+# Create final column spec
+custom_col_types <- do.call(cols, spec_list)
 
 # Read and process each file
 data_list <- lapply(csv_files, function(file) {
@@ -83,81 +83,138 @@ data_list <- lapply(csv_files, function(file) {
   
   # Read the file
   df <- read_csv(file, col_types = custom_col_types) %>%
-    # Remove columns that give column type problems when combining data
-    select(-starts_with("EUNIS"), -starts_with("ReSurvey")) %>%
     mutate(biogeo = info$biogeo, unit = info$unit)
   
   return(df)
   })
 
 # Combine all data
-data_RS_S2_bands <- bind_rows(data_list) %>%
+data_RS_SatEmb_bands <- bind_rows(data_list) %>%
   rename(PlotObservationID = PltObID)
 
 # View the resulting tibble
-print(data_RS_S2_bands)
+print(data_RS_SatEmb_bands)
 
 # Counts per biogeo and unit
-print(data_RS_S2_bands %>% count(biogeo, unit), n = 100)
+print(data_RS_SatEmb_bands %>% count(biogeo, unit), n = 100)
 ```
 
 # Remove unneded cols
 
 ```{r}
 data_RS_SatEmb_bands <- data_RS_SatEmb_bands %>%
-  select(-X1, -X2, -X3)
+  select(-starts_with("X"), -UNIT)
 ```
 
-# Add EUNIS codes
+# Read file with band data for points outside polygons
+
+Some points from the ReSurvey database fall outside the bioregion polygons. These points were manually assigned to the closest biogeo and unit in ArcGIS (those far out were assigned biogeo = OUT and unit = OUT). Data for these points has been extracted with a different GEE script.
 
 ```{r}
-final_RS_data <- data_RS_SatEmb_bands %>% 
-  mutate(PlotObservationID = as.factor(PlotObservationID)) %>%
-  left_join(ReSurvey_data)
+data_RS_SatEmb_bands_out <- read_csv(
+  "C:/Data/MOTIVATE/MOTIVATE_RS_data/Satellite_Embeddings_out/AllPoints_SatelliteEmbedding_Annual.csv",
+  col_types = custom_col_types) %>%
+  select(-AREA, -Join_Count, -TARGET_FID, -code, -name) %>%
+  rename(biogeo = BIOGEO, unit = UNIT, `FEVA(Y/` = `FEVA_Y_`, `Mn(y/n)` = `Mn_y_n_`,
+         PlotObservationID = PltObID)
 ```
 
-# HERE, CAREFUL! Add canopy height data
+Check that column names are the same:
 
-Does this match with the new data? Any points without canopy height data?
-Just in case, downloading again from GEE with new script.
+```{r}
+# Columns in data_RS_SatEmb_bands but not in data_RS_SatEmb_bands_out
+setdiff(names(data_RS_SatEmb_bands), names(data_RS_SatEmb_bands_out))
 
-Then we also avoid the problem with not having PlotObservationID, but obs_unique.
+# Columns in data_RS_SatEmb_bands_out but not in data_RS_SatEmb_bands
+setdiff(names(data_RS_SatEmb_bands_out), names(data_RS_SatEmb_bands))
+```
 
-NEED to modify chunks below...
+# Join all data
+
+```{r}
+data_RS_SatEmb_bands <- bind_rows(data_RS_SatEmb_bands,
+                                  data_RS_SatEmb_bands_out)
+```
+
+# Solve problem with duplicate rows
+
+```{r}
+data_RS_SatEmb_bands <- data_RS_SatEmb_bands %>%
+  select(-`system:index`, -image_id, -time_utc, -timestamp, -.geo)
+```
+
+```{r}
+# Find duplicated ids
+dupl_ids <- data_RS_SatEmb_bands %>%
+  group_by(PlotObservationID) %>%
+  dplyr::filter(n() > 1) %>%
+  ungroup()
+```
+
+```{r}
+dupl_ids
+```
+
+Group the data by PlotObservationID, and for duplicate ids, average the values of the bands (and keep the first value for other cols).
+
+```{r}
+data_RS_SatEmb_bands <- data_RS_SatEmb_bands %>%
+  group_by(PlotObservationID) %>%
+  summarise(across(starts_with("A"), mean, na.rm = TRUE),
+            across(!starts_with("A"), first), .groups = "drop")
+```
+
+# Add canopy height data
 
 Read the data:
 
 ```{r}
 data_RS_CH <- read_csv(
-  "C:/Data/MOTIVATE/MOTIVATE_RS_data/Canopy_Height_1m/Europe_points_CanopyHeight_1m.csv")
-db_Europa <- read_csv(
-  here("..", "DB_first_check", "data", "clean","db_Europa_20250107.csv")
-  )
-```
-
-```{r}
-data_RS_CH_ID <- db_Europa %>%
-  select(PlotObservationID, obs_unique_id) %>%
-  right_join(data_RS_CH %>%
-              # Rename to be able to join on this column
-              rename(obs_unique_id = obs_unique)) %>%
-  select(PlotObservationID, canopy_height)
+  "C:/Data/MOTIVATE/MOTIVATE_RS_data/Canopy_Height_1m/CanopyHeight_1m.csv")
 ```
 
 Join:
 
 ```{r}
-final_RS_data <- final_RS_data %>%
+final_RS_data <- data_RS_SatEmb_bands %>%
   mutate(PlotObservationID = factor(PlotObservationID)) %>%
-  left_join(data_RS_CH_ID %>%
+  left_join(data_RS_CH %>% 
+              dplyr::select(PltObID, canopy_height) %>%
+              rename(PlotObservationID = PltObID) %>%
               mutate(PlotObservationID = factor(PlotObservationID)))
 ```
+
+# See mismatches
+
+```{r}
+read_delim(
+  # Read data from ArcGIS Pro spatial join points - N2K bioregions
+  here("data", "clean", "ReSurvey_QRST_within_outside_polygons.csv"), 
+  delim = ";") %>%
+  dplyr::filter(year >= 2017) %>%
+  count(BIOGEO, UNIT) %>%
+  select(UNIT, n) %>%
+  rename(unit = UNIT, n_GIS = n) %>%
+  left_join(
+    data_RS_SatEmb_bands %>% count(biogeo, unit) %>%
+      mutate(unit = ifelse(is.na(unit), biogeo, paste0(biogeo, unit))) %>%
+      select(unit, n) %>%
+      rename(n_R = n)
+  ) %>%
+  mutate(diff = n_GIS - n_R) %>%
+  print(n = 100)
+```
+
+n_GIS > n_R: should be because there is no Satellite Embeding data for some reason.
+n_GIS < n_R: not sure why, different way of assessing if points are within polygons in ArcGIS Pro and GEE? Maybe it has to do with using filterBounds in GEE? I can maybe look into this later, but probably it will not matter much.
+
+# MAYBE TBD LATER: investigate mismatches
 
 # Save to clean data
 
 ```{r}
 write_tsv(final_RS_data,
-          here("data", "clean","final_RS_data_SatEmb_20250922.csv"))
+          here("data", "clean","final_RS_data_SatEmb_20251010.csv"))
 ```
 
 # Session info

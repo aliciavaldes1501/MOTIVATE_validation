@@ -21,6 +21,14 @@ https://onedrive.live.com/?redeem=aHR0cHM6Ly8xZHJ2Lm1zL2YvYy8zOWE2ZDZiNzFmMzM1ZT
 library(tidyverse)
 library(here)
 library(readxl)
+library(sf)
+```
+
+# Load functions
+
+```{r}
+knitr::purl("functions.Rmd", output = "functions.R")
+source("functions.R")
 ```
 
 # Read data
@@ -89,7 +97,7 @@ data_V2025.2 <- data_V2025.2 %>%
                              "^Permanent \\(man\\)$", "permanent (man)")
     ) %>%
   # Add columns date and year
-  mutate(date = dmy(`Date of recording`), year = year(date))
+  mutate(date = dmy(`Date of recording`), year = as.integer(year(date)))
 ```
 
 ### Clean info on Expert system column and separate it
@@ -167,6 +175,139 @@ data_V2025.2 <- data_V2025.2 %>%
     )
   )
 ```
+
+# Add EUNIS from info on HabitatID from DK 
+
+Based on information got from Jesper.
+
+### Read the data sent by Jesper from DK
+
+```{r}
+db_DK_J<-read_tsv(
+  "C:/Data/MOTIVATE/DK_Naturdata_Res_habitat_hab_codes_Jesper/DK_Naturdata_Res_habitat_hab_codes.txt")
+```
+
+## Add info on HabitatID
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  # Keeping all obs in data_V2025.2 but not all in db_DK_J
+  left_join(db_DK_J %>% select(PlotObservationID, HabitatID))
+```
+
+## Change some Annex I habitat codes that were wrong
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(HabitatID = as.character(HabitatID)) %>%
+  mutate(HabitatID = ifelse(HabitatID == "9998", "91D0",
+                            ifelse(HabitatID == "9999", "91E0", HabitatID)))
+```
+
+## Add info on correspondences HabitatID (DK, Jesper) - EUNIS
+
+Read correspondences file:
+
+```{r}
+correspondences<-read_excel(here("..", "DB_first_check", "data", "edited",
+                                 "correspondence_HabitatID_DK.xlsx"))
+```
+
+Add info to data_V2025.2:
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  # Keeping all obs in data_V2025.2 but not all in db_DK_J
+  left_join(correspondences %>% select(HabitatID, EUNIS))
+```
+
+Correct NA values in EUNIS
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(EUNIS = ifelse(EUNIS == "NA", NA, EUNIS))
+```
+
+Add info on EUNIS (DK) to EUNISa:
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(EUNISa =
+           # If EUNIS (DK) is available, add as EUNISa
+           ifelse(!is.na(EUNIS), EUNIS, 
+                  # Otherwise keep EUNISa
+                  EUNISa),
+         EUNIS_assignation = ifelse(!is.na(EUNIS), "Info from DK",
+                                    ifelse(is.na(EUNISa), "Not possible",
+                                           "Expert system"))) %>%
+  # Remove unneeded columns
+  select(-EUNIS, -HabitatID)
+```
+
+## Update columns for EUNIS levels
+
+Update the columns for the different EUNIS levels:
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(
+    # EUNISa levels
+    EUNISa_1 = substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 2, 1)),
+    EUNISa_2 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 3, 2), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 3, 2)),
+      NA_character_
+    ),
+    EUNISa_3 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 4, 3), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 4, 3)),
+      NA_character_
+      ),
+    EUNISa_4 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 5, 4), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 5, 4)),
+      NA_character_
+    )
+  ) 
+```
+
+## Update number of different EUNIS codes
+
+Recalculate how many different EUNIS codes have been assigned:
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(
+    # Count the number of non-NA values across the EUNIS columns
+    n_EUNIS = rowSums(!is.na(select(., EUNISa:EUNISc)))
+  )
+```
+
+New plot for EUNISa_1 (the first assigned EUNIS in cases of multiple assignations, level 1):
+
+```{r}
+ggplot(data_V2025.2, aes(EUNISa_1)) +
+         geom_bar(aes(y = (..count..) / sum(..count..) * 100)) +
+  labs(y = "Percentage of ReSurvey observations",
+       x = "EUNIS level 1") + coord_flip()
+ggplot(data_V2025.2 %>% filter(!is.na(EUNISa_1)),
+       aes(EUNISa_1)) +
+         geom_bar(aes(y = (..count..) / sum(..count..) * 100)) +
+  labs(y = "Percentage of ReSurvey observations",
+       x = "EUNIS level 1") + coord_flip()
+```
+
+# Notes EUNIS codes - to change?
+
+This classification of Q + numbers is now coexisting in the database with Qa & Qb (metadata). How to proceed?
+
+```{r}
+data_V2025.2 %>% filter(EUNISa_1 == "Q") %>% distinct(EUNISa_2)
+```
+
+What are Sa and Sb in S?
+
+# Add descriptions of EUNIS levels
 
 ### Add descriptions
 
@@ -294,7 +435,7 @@ data_V2025.2 <- data_V2025.2 %>%
                     EUNISa_2 == "R3" ~ "Seasonally wet and wet grasslands",
                     EUNISa_2 == "R4" ~ "Alpine and subalpine grasslands",
                     EUNISa_2 == "U7" ~ "Unvegetated or sparsely vegetated gravel bars",
-                    # Sa & Sb, not sure what these are, left without descr
+                    # Sa & Sb, not sure what these are, left without description
                     TRUE ~ NA_character_)
                   ),
          EUNISa_3_descr = 
@@ -317,163 +458,12 @@ data_V2025.2 <- data_V2025.2 %>%
          )
 ```
 
-# Add EUNIS from info on HabitatID from DK 
-
-Based on information got from Jesper.
-
-### Read the data sent by Jesper from DK
-
-```{r}
-db_DK_J<-read_tsv(
-  "C:/Data/MOTIVATE/DK_Naturdata_Res_habitat_hab_codes_Jesper/DK_Naturdata_Res_habitat_hab_codes.txt")
-```
-
-## Add info on HabitatID
-
-```{r}
-data_V2025.2 <- data_V2025.2 %>%
-  # Keeping all obs in data_V2025.2 but not all in db_DK_J
-  left_join(db_DK_J %>% select(PlotObservationID, HabitatID))
-```
-
-## Change some Annex I habitat codes that were wrong
-
-```{r}
-data_V2025.2 <- data_V2025.2 %>%
-  mutate(HabitatID = as.character(HabitatID)) %>%
-  mutate(HabitatID = ifelse(HabitatID == "9998", "91D0",
-                            ifelse(HabitatID == "9999", "91E0", HabitatID)))
-```
-
-## Add info on correspondences HabitatID (DK, Jesper) - EUNIS
-
-Read correspondences file:
-
-```{r}
-correspondences<-read_excel(here("..", "DB_first_check", "data", "edited",
-                                 "correspondence_HabitatID_DK.xlsx"))
-```
-
-Add info to data_V2025.2:
-
-```{r}
-data_V2025.2 <- data_V2025.2 %>%
-  # Keeping all obs in data_V2025.2 but not all in db_DK_J
-  left_join(correspondences %>% select(HabitatID, EUNIS))
-```
-
-Correct NA values in EUNIS
-
-```{r}
-data_V2025.2 <- data_V2025.2 %>%
-  mutate(EUNIS = ifelse(EUNIS == "NA", NA, EUNIS))
-```
-
-Add info on EUNIS (DK) to EUNISa:
-
-```{r}
-data_V2025.2 <- data_V2025.2 %>%
-  mutate(EUNISa =
-           # If EUNIS (DK) is available, add as EUNISa
-           ifelse(!is.na(EUNIS), EUNIS, 
-                  # Otherwise keep EUNISa
-                  EUNISa),
-         EUNIS_assignation = ifelse(!is.na(EUNIS), "Info from DK",
-                                    ifelse(is.na(EUNISa), "Not possible",
-                                           "Expert system"))) %>%
-  # Remove unneeded columns
-  select(-EUNIS, -HabitatID)
-```
-
-## Update columns for EUNIS levels and descriptions
-
-Update the columns for the different EUNIS levels:
-
-```{r}
-data_V2025.2 <- data_V2025.2 %>%
-  mutate(
-    # EUNISa levels
-    EUNISa_1 = substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 2, 1)),
-    EUNISa_2 = ifelse(
-      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 3, 2), 
-      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 3, 2)),
-      NA_character_
-    ),
-    EUNISa_3 = ifelse(
-      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 4, 3), 
-      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 4, 3)),
-      NA_character_
-      ),
-    EUNISa_4 = ifelse(
-      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 5, 4), 
-      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 5, 4)),
-      NA_character_
-    )
-  ) 
-```
-
-Update columns with descriptions for the level 1 codes:
-
-```{r}
-data_V2025.2 <- data_V2025.2 %>%
-  mutate(
-    EUNISa_1_descr = case_when(
-      EUNISa_1 == "V" ~ "Vegetated man-made habitats",
-      EUNISa_1 == "U" ~ "Inland habitats with no or little soil",
-      EUNISa_1 == "T" ~ "Forests and other wooded land",
-      EUNISa_1 == "S" ~ "Heathlands, scrub and tundra",
-      EUNISa_1 == "R" ~ "Grasslands",
-      EUNISa_1 == "Q" ~ "Wetlands",
-      EUNISa_1 == "P" ~ "Inland waters",
-      EUNISa_1 == "N" ~ "Coastal habitats",
-      EUNISa_1 == "MA" ~ "Marine habitats",
-      TRUE ~ NA_character_
-    )
-  )
-```
-
-## Update number of different EUNIS codes
-
-Recalculate how many different EUNIS codes have been assigned:
-
-```{r}
-data_V2025.2 <- data_V2025.2 %>%
-  mutate(
-    # Count the number of non-NA values across the EUNIS columns
-    n_EUNIS = rowSums(!is.na(select(., EUNISa:EUNISc)))
-  )
-```
-
-New plot for EUNISa_1 (the first assigned EUNIS in cases of multiple assignations, level 1):
-
-```{r}
-ggplot(data_V2025.2, aes(EUNISa_1_descr)) +
-         geom_bar(aes(y = (..count..) / sum(..count..) * 100)) +
-  labs(y = "Percentage of ReSurvey observations",
-       x = "EUNIS level 1") + coord_flip()
-ggplot(data_V2025.2 %>% filter(!is.na(EUNISa_1_descr)),
-       aes(EUNISa_1_descr)) +
-         geom_bar(aes(y = (..count..) / sum(..count..) * 100)) +
-  labs(y = "Percentage of ReSurvey observations",
-       x = "EUNIS level 1") + coord_flip()
-```
-
-# Notes EUNIS codes - to change?
-
-This classification of Q + numbers is now coexisting in the database with Qa & Qb (metadata). How to proceed?
-
-```{r}
-data_V2025.2 %>% filter(EUNISa_1 == "Q") %>% distinct(EUNISa_2)
-```
-
-What are Sa and Sb in S?
-
-# Save to clean datafiles
+# Save to clean datafiles and shapefiles
 
 ## All ReSurvey data
 
 ```{r}
-write_csv(data_V2025.2,here("data", "clean","ReSurvey_data_V2025.2_20251003.csv"))
+write_csv(data_V2025.2,here("data", "clean","ReSurvey_data_V2025.2_20251007.csv"))
 ```
 
 ## Only Q, R, S & T
@@ -481,7 +471,18 @@ write_csv(data_V2025.2,here("data", "clean","ReSurvey_data_V2025.2_20251003.csv"
 ```{r}
 write_csv(data_V2025.2 %>% 
             dplyr::filter(EUNISa_1 %in% c("Q", "R", "S", "T")),
-          here("data", "clean","ReSurvey_QRST_data_V2025.2_20251003.csv"))
+          here("data", "clean","ReSurvey_QRST_data_V2025.2_20251007.csv"))
+```
+
+### Convert to shapefile (better for GEE)
+
+Using a csv might give problems in GEE.
+
+```{r}
+st_write(st_as_sf(data_V2025.2 %>% 
+                    dplyr::filter(EUNISa_1 %in% c("Q", "R", "S", "T")),
+                  coords = c("Lon_updated", "Lat_updated"), crs = 4326),
+         here("data", "shp", "ReSurvey_QRST_data_V2025.2_20251007.shp"))
 ```
 
 ## Only Q, R, S & T & from 2016 onwards
@@ -490,7 +491,19 @@ write_csv(data_V2025.2 %>%
 write_csv(data_V2025.2 %>% 
             dplyr::filter(EUNISa_1 %in% c("Q", "R", "S", "T")) %>%
             dplyr::filter(year >= 2016),
-          here("data", "clean","ReSurvey_QRST_from2016_data_V2025.2_20251003.csv"))
+          here("data", "clean","ReSurvey_QRST_from2016_data_V2025.2_20251007.csv"))
+```
+
+### Convert to shapefile (better for GEE)
+
+Using a csv might give problems in GEE.
+
+```{r}
+st_write(st_as_sf(data_V2025.2 %>% 
+                    dplyr::filter(EUNISa_1 %in% c("Q", "R", "S", "T")) %>%
+                    dplyr::filter(year >= 2016),
+                  coords = c("Lon_updated", "Lat_updated"), crs = 4326),
+         here("data", "shp", "ReSurvey_QRST_from2016_data_V2025.2_20251007.shp"))
 ```
 
 # Session info

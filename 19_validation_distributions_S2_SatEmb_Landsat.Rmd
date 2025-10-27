@@ -1,0 +1,724 @@
+---
+title: "Script to validate points in ReSurvey database using RS data (S2 + SatEmb + Landsat)"
+subtitle: "Looking at distributions of predictor variables"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This R script is used to validate the points in the ReSurvey database using either RS indicators from S2 or Landsat (indices + phenology + canopy height), or bands from the Google Satellite Embedding dataset: https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_SATELLITE_EMBEDDING_V1_ANNUAL#description
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(scales)
+```
+
+# Load functions
+
+```{r}
+knitr::purl("functions.Rmd", output = "functions.R")
+source("functions.R")
+```
+
+# Load geom_flat_violin plot
+
+```{r}
+source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/fb53bd97121f7f9ce947837ef1a4c65a73bffb3f/geom_flat_violin.R")
+```
+
+# Read data
+
+```{r}
+data_validation_S2 <- read_tsv(here(
+  "data", "clean","final_RS_data_bands_S2_all_20251014.csv"))
+data_validation_SatEmb <- read_tsv(here(
+  "data", "clean","final_RS_data_SatEmb_20251010.csv")) %>%
+  rename(EUNISa_1_descr = EUNIS_1_d)
+data_validation_Landsat <- read_tsv(here(
+  "data", "clean","final_RS_data_bands_Landsat_all_20251017.csv")) # CHANGE
+```
+
+No parsing issues!
+
+# Distributions all bioregions
+
+## S2
+
+### Indices
+
+Ranges of min and max:
+
+```{r}
+range(data_validation_S2$NDVI_max, na.rm = T) # NDVI_max > 1 (slightly)
+range(data_validation_S2$NDMI_max, na.rm = T) # NDMI_max > 1 (slightly)
+range(data_validation_S2$NDWI_max, na.rm = T)
+range(data_validation_S2$SAVI_max, na.rm = T)
+range(data_validation_S2$EVI_max, na.rm = T) # EVI_max > 1 (slightly)
+range(data_validation_S2$NDVI_min, na.rm = T)
+range(data_validation_S2$NDMI_min, na.rm = T)
+range(data_validation_S2$NDWI_min, na.rm = T) 
+range(data_validation_S2$SAVI_min, na.rm = T)
+range(data_validation_S2$EVI_min, na.rm = T) # EVI_min < -1!
+```
+
+```{r}
+nrow(data_validation_S2 %>% dplyr::filter(NDVI_max > 1))
+nrow(data_validation_S2 %>% dplyr::filter(NDMI_max > 1))
+nrow(data_validation_S2 %>% dplyr::filter(EVI_max > 1))
+nrow(data_validation_S2 %>% dplyr::filter(NDWI_min < -1))
+nrow(data_validation_S2 %>% dplyr::filter(EVI_min < -1))
+```
+
+Histograms to check that max and min values are ok:
+
+```{r}
+plot_histogram(data_validation_S2, "NDVI_max", "NDVI max")
+plot_histogram(data_validation_S2, "NDMI_max", "NDMI max")
+plot_histogram(data_validation_S2, "NDWI_max", "NDWI max")
+plot_histogram(data_validation_S2, "SAVI_max", "SAVI max")
+plot_histogram(data_validation_S2, "EVI_max", "EVI max")
+plot_histogram(data_validation_S2, "NDVI_min", "NDVI min")
+plot_histogram(data_validation_S2, "NDMI_min", "NDMI min")
+plot_histogram(data_validation_S2, "NDWI_min", "NDWI min")
+plot_histogram(data_validation_S2, "SAVI_min", "SAVI min")
+plot_histogram(data_validation_S2, "EVI_min", "EVI min")
+```
+
+```{r}
+nrow(data_validation_S2 %>%
+       dplyr::filter(EVI_max > 1 | EVI_max < -1))
+data_validation_S2 %>%
+  dplyr::filter(EVI_max > 1 | EVI_max < -1) %>%
+  count(biogeo, unit)
+```
+
+Most EVI values are ok!
+
+Distribution plots:
+
+```{r message=FALSE, warning=FALSE}
+distr_plot(data_validation_S2 %>% dplyr::filter(EVI_min > -0.5),
+           c("NDVI_max", "EVI_max", "SAVI_max", "NDMI_max", "NDWI_max",
+             "NDVI_min", "EVI_min", "SAVI_min", "NDMI_min", "NDWI_min"),
+           c("NDVI_max", "EVI_max", "SAVI_max", "NDMI_max", "NDWI_max",
+             "NDVI_min", "EVI_min", "SAVI_min", "NDMI_min", "NDWI_min"))
+```
+
+### CH
+
+```{r}
+distr_plot(data_validation_S2, "canopy_height", "Canopy height (m)")
+```
+ 
+#### Show habitats with CH categories
+
+```{r}
+ggplot(data_validation_S2 %>%
+         mutate(CH_cat =
+                  factor(
+                    case_when(canopy_height == 0 ~ "0 m",
+                              canopy_height > 0 & canopy_height <= 1 ~ "0-1 m",
+                              canopy_height > 1 & canopy_height <=2 ~ "1-2 m",
+                              canopy_height > 2 & canopy_height <=5 ~ "2-5 m",
+                              canopy_height > 5 & canopy_height <=8 ~ "5-8 m",
+                              canopy_height > 8 ~ "> 8 m",
+                              is.na(canopy_height) ~ NA_character_),
+                    levels = c(
+                      "0 m", "0-1 m", "1-2 m", "2-5 m", "5-8 m", "> 8 m"))),
+       aes(x = EUNISa_1_descr, fill = CH_cat)) +
+  geom_bar() + theme_bw() + coord_flip() +
+  scale_y_continuous(labels = label_number()) +
+  scale_fill_viridis_d(direction = -1) +
+  labs(x = "EUNIS level 1", fill = "Canopy height") +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  theme(legend.position = c(0.8, 0.75),
+        legend.direction = "vertical")
+```
+
+#### Stats per habitat type
+
+```{r}
+data_validation_S2 %>%
+  group_by(EUNISa_1_descr) %>%
+  summarise(across(canopy_height, list(
+    mean = mean,
+    median = median,
+    sd = sd,
+    min = min,
+    max = max
+    ), na.rm = TRUE))
+```
+
+### Phenology
+
+Only using NDVI- and SAVI-based values so far.
+
+Maximum NDVI should be equal to value at peak?
+
+```{r}
+nrow(data_validation_S2 %>% dplyr::filter(NDVI_pos_value  != NDVI_max))
+```
+
+Not sure why this happens, but in most cases the difference is small (< -0.1). Anyway, we should use only one of these two in the RF models.
+
+```{r}
+plot_histogram(data_validation_S2, "NDVI_sos_slope_doy", "NDVI_sos_slope_doy")
+plot_histogram(data_validation_S2, "NDVI_pos_doy", "NDVI_pos_doy")
+plot_histogram(data_validation_S2, "NDVI_eos_slope_doy", "NDVI_eos_slope_doy")
+plot_histogram(data_validation_S2, "EVI_sos_slope_doy", "EVI_sos_slope_doy")
+plot_histogram(data_validation_S2, "EVI_pos_doy", "EVI_pos_doy")
+plot_histogram(data_validation_S2, "EVI_eos_slope_doy", "EVI_eos_slope_doy")
+plot_histogram(data_validation_S2, "SAVI_sos_slope_doy", "SAVI_sos_slope_doy")
+plot_histogram(data_validation_S2, "SAVI_pos_doy", "SAVI_pos_doy")
+plot_histogram(data_validation_S2, "SAVI_eos_slope_doy", "SAVI_eos_slope_doy")
+plot_histogram(data_validation_S2, "NDVI_sos_threshold_doy", "NDVI_sos_threshold_doy")
+plot_histogram(data_validation_S2, "NDVI_pos_doy", "NDVI_pos_doy")
+plot_histogram(data_validation_S2, "NDVI_eos_threshold_doy", "NDVI_eos_threshold_doy")
+plot_histogram(data_validation_S2, "EVI_sos_threshold_doy", "EVI_sos_threshold_doy")
+plot_histogram(data_validation_S2, "EVI_pos_doy", "EVI_pos_doy")
+plot_histogram(data_validation_S2, "EVI_eos_threshold_doy", "EVI_eos_threshold_doy")
+plot_histogram(data_validation_S2, "SAVI_sos_threshold_doy", "SAVI_sos_threshold_doy")
+plot_histogram(data_validation_S2, "SAVI_pos_doy", "SAVI_pos_doy")
+plot_histogram(data_validation_S2, "SAVI_eos_threshold_doy", "SAVI_eos_threshold_doy")
+```
+
+```{r}
+plot_histogram(data_validation_S2, "NDVI_sos_slope_value", "NDVI_sos_slope_value")
+plot_histogram(data_validation_S2, "NDVI_pos_value", "NDVI_pos_value")
+plot_histogram(data_validation_S2, "NDVI_eos_slope_value", "NDVI_eos_slope_value")
+plot_histogram(data_validation_S2, "EVI_sos_slope_value", "EVI_sos_slope_value")
+plot_histogram(data_validation_S2, "EVI_pos_value", "EVI_pos_value")
+plot_histogram(data_validation_S2, "EVI_eos_slope_value", "EVI_eos_slope_value")
+plot_histogram(data_validation_S2, "NDVI_sos_threshold_value", "NDVI_sos_threshold_value")
+plot_histogram(data_validation_S2, "NDVI_pos_value", "NDVI_pos_value")
+plot_histogram(data_validation_S2, "NDVI_eos_threshold_value", "NDVI_eos_threshold_value")
+plot_histogram(data_validation_S2, "EVI_sos_threshold_value", "EVI_sos_threshold_value")
+plot_histogram(data_validation_S2, "EVI_pos_value", "EVI_pos_value")
+plot_histogram(data_validation_S2, "EVI_eos_threshold_value", "EVI_eos_threshold_value")
+```
+
+```{r}
+plot_histogram(data_validation_S2, "NDVI_slope_gsd", "NDVI_slope_gsd")
+plot_histogram(data_validation_S2, "EVI_slope_gsd", "EVI_slope_gsd")
+plot_histogram(data_validation_S2, "SAVI_slope_gsd", "SAVI_slope_gsd")
+plot_histogram(data_validation_S2, "NDVI_diff_pos_sos_slope_value",
+               "NDVI_diff_pos_sos_slope_value")
+plot_histogram(data_validation_S2, "EVI_diff_pos_sos_slope_value",
+               "EVI_diff_pos_sos_slope_value")
+plot_histogram(data_validation_S2, "SAVI_diff_pos_sos_slope_value",
+               "SAVI_diff_pos_sos_slope_value")
+plot_histogram(data_validation_S2, "NDVI_diff_pos_eos_slope_value",
+               "NDVI_diff_pos_eos_slope_value")
+plot_histogram(data_validation_S2, "EVI_diff_pos_eos_slope_value",
+               "EVI_diff_pos_eos_slope_value")
+plot_histogram(data_validation_S2, "SAVI_diff_pos_eos_slope_value",
+               "SAVI_diff_pos_eos_slope_value")
+plot_histogram(data_validation_S2, "NDVI_diff_pos_sos_slope_doy",
+               "NDVI_diff_pos_sos_slope_doy")
+plot_histogram(data_validation_S2, "EVI_diff_pos_sos_slope_doy",
+               "EVI_diff_pos_sos_slope_doy")
+plot_histogram(data_validation_S2, "SAVI_diff_pos_sos_slope_doy",
+               "SAVI_diff_pos_sos_slope_doy")
+plot_histogram(data_validation_S2, "NDVI_diff_pos_eos_slope_doy",
+               "NDVI_diff_pos_eos_slope_doy")
+plot_histogram(data_validation_S2, "EVI_diff_pos_eos_slope_doy", 
+               "EVI_diff_pos_eos_slope_doy")
+plot_histogram(data_validation_S2, "SAVI_diff_pos_eos_slope_doy", 
+               "SAVI_diff_pos_eos_slope_doy")
+plot_histogram(data_validation_S2, "NDVI_threshold_gsd", "NDVI_threshold_gsd")
+plot_histogram(data_validation_S2, "EVI_threshold_gsd", "EVI_threshold_gsd")
+plot_histogram(data_validation_S2, "SAVI_threshold_gsd", "SAVI_threshold_gsd")
+plot_histogram(data_validation_S2, "NDVI_diff_pos_sos_threshold_value",
+               "NDVI_diff_pos_sos_threshold_value")
+plot_histogram(data_validation_S2, "EVI_diff_pos_sos_threshold_value",
+               "EVI_diff_pos_sos_threshold_value")
+plot_histogram(data_validation_S2, "SAVI_diff_pos_sos_threshold_value",
+               "SAVI_diff_pos_sos_threshold_value")
+plot_histogram(data_validation_S2, "NDVI_diff_pos_eos_threshold_value",
+               "NDVI_diff_pos_eos_threshold_value")
+plot_histogram(data_validation_S2, "EVI_diff_pos_eos_threshold_value",
+               "EVI_diff_pos_eos_threshold_value")
+plot_histogram(data_validation_S2, "SAVI_diff_pos_eos_threshold_value",
+               "SAVI_diff_pos_eos_threshold_value")
+plot_histogram(data_validation_S2, "NDVI_diff_pos_sos_threshold_doy",
+               "NDVI_diff_pos_sos_threshold_doy")
+plot_histogram(data_validation_S2, "EVI_diff_pos_sos_threshold_doy",
+               "EVI_diff_pos_sos_threshold_doy")
+plot_histogram(data_validation_S2, "SAVI_diff_pos_sos_threshold_doy",
+               "SAVI_diff_pos_sos_threshold_doy")
+plot_histogram(data_validation_S2, "NDVI_diff_pos_eos_threshold_doy",
+               "NDVI_diff_pos_eos_threshold_doy")
+plot_histogram(data_validation_S2, "EVI_diff_pos_eos_threshold_doy", 
+               "EVI_diff_pos_eos_threshold_doy")
+plot_histogram(data_validation_S2, "SAVI_diff_pos_eos_threshold_doy", 
+               "SAVI_diff_pos_eos_threshold_doy")
+```
+
+```{r}
+plot_histogram(data_validation_S2, "NDVI_auc_slope", "NDVI_auc_slope")
+plot_histogram(data_validation_S2, "EVI_auc_slope", "EVI_auc_slope")
+plot_histogram(data_validation_S2, "SAVI_auc_slope", "SAVI_auc_slope")
+plot_histogram(data_validation_S2, "NDVI_auc_threshold", "NDVI_auc_threshold")
+plot_histogram(data_validation_S2, "EVI_auc_threshold", "EVI_auc_threshold")
+plot_histogram(data_validation_S2, "SAVI_auc_threshold", "SAVI_auc_threshold")
+```
+
+```{r}
+distr_plot(data_validation_S2,
+           c("NDVI_sos_slope_value","NDVI_pos_value", "NDVI_eos_slope_value",
+             "EVI_sos_slope_value","EVI_pos_value", "EVI_eos_slope_value",
+             "SAVI_sos_slope_value", "SAVI_pos_value", "SAVI_eos_slope_value",
+             "NDVI_sos_slope_doy","NDVI_pos_doy", "NDVI_eos_slope_doy",
+             "EVI_sos_slope_doy","EVI_pos_doy", "EVI_eos_slope_doy",
+             "SAVI_sos_slope_doy", "SAVI_pos_doy", "SAVI_eos_slope_doy",
+             "NDVI_sos_threshold_value","NDVI_pos_value", "NDVI_eos_threshold_value",
+             "EVI_sos_threshold_value","EVI_pos_value", "EVI_eos_threshold_value",
+             "SAVI_sos_threshold_value", "SAVI_pos_value", "SAVI_eos_threshold_value",
+             "NDVI_sos_threshold_doy","NDVI_pos_doy", "NDVI_eos_threshold_doy",
+             "EVI_sos_threshold_doy","EVI_pos_doy", "EVI_eos_threshold_doy",
+             "SAVI_sos_threshold_doy", "SAVI_pos_doy", "SAVI_eos_threshold_doy"),
+           c("NDVI_sos_slope_value","NDVI_pos_value", "NDVI_eos_slope_value",
+             "EVI_sos_slope_value","EVI_pos_value", "EVI_eos_slope_value",
+             "SAVI_sos_slope_value", "SAVI_pos_value", "SAVI_eos_slope_value",
+             "NDVI_sos_slope_doy","NDVI_pos_doy", "NDVI_eos_slope_doy",
+             "EVI_sos_slope_doy","EVI_pos_doy", "EVI_eos_slope_doy",
+             "SAVI_sos_slope_doy", "SAVI_pos_doy", "SAVI_eos_slope_doy",
+             "NDVI_sos_threshold_value","NDVI_pos_value", "NDVI_eos_threshold_value",
+             "EVI_sos_threshold_value","EVI_pos_value", "EVI_eos_threshold_value",
+             "SAVI_sos_threshold_value", "SAVI_pos_value", "SAVI_eos_threshold_value",
+             "NDVI_sos_threshold_doy","NDVI_pos_doy", "NDVI_eos_threshold_doy",
+             "EVI_sos_threshold_doy","EVI_pos_doy", "EVI_eos_threshold_doy",
+             "SAVI_sos_threshold_doy", "SAVI_pos_doy", "SAVI_eos_threshold_doy")
+           )
+```
+
+```{r}
+distr_plot(data_validation_S2,
+           c("NDVI_slope_gsd","EVI_slope_gsd", "SAVI_slope_gsd",
+             "NDVI_diff_pos_sos_slope_value", "EVI_diff_pos_sos_slope_value",
+             "SAVI_diff_pos_sos_slope_value",
+             "NDVI_diff_pos_eos_slope_value", "EVI_diff_pos_eos_slope_value",
+             "SAVI_diff_pos_eos_slope_value",
+             "NDVI_diff_pos_sos_slope_doy", "EVI_diff_pos_sos_slope_doy",
+             "SAVI_diff_pos_sos_slope_doy",
+             "NDVI_diff_pos_eos_slope_doy", "EVI_diff_pos_eos_slope_doy",
+             "SAVI_diff_pos_eos_slope_doy",
+             "NDVI_threshold_gsd","EVI_threshold_gsd", "SAVI_threshold_gsd",
+             "NDVI_diff_pos_sos_threshold_value", "EVI_diff_pos_sos_threshold_value",
+             "SAVI_diff_pos_sos_threshold_value",
+             "NDVI_diff_pos_eos_threshold_value", "EVI_diff_pos_eos_threshold_value",
+             "SAVI_diff_pos_eos_threshold_value",
+             "NDVI_diff_pos_sos_threshold_doy", "EVI_diff_pos_sos_threshold_doy",
+             "SAVI_diff_pos_sos_threshold_doy",
+             "NDVI_diff_pos_eos_threshold_doy", "EVI_diff_pos_eos_threshold_doy",
+             "SAVI_diff_pos_eos_threshold_doy"),
+           c("NDVI_slope_gsd","EVI_slope_gsd", "SAVI_slope_gsd",
+             "NDVI_diff_pos_sos_slope_value", "EVI_diff_pos_sos_slope_value",
+             "SAVI_diff_pos_sos_slope_value",
+             "NDVI_diff_pos_eos_slope_value", "EVI_diff_pos_eos_slope_value",
+             "SAVI_diff_pos_eos_slope_value",
+             "NDVI_diff_pos_sos_slope_doy", "EVI_diff_pos_sos_slope_doy",
+             "SAVI_diff_pos_sos_slope_doy",
+             "NDVI_diff_pos_eos_slope_doy", "EVI_diff_pos_eos_slope_doy",
+             "SAVI_diff_pos_eos_slope_doy",
+             "NDVI_threshold_gsd","EVI_threshold_gsd", "SAVI_threshold_gsd",
+             "NDVI_diff_pos_sos_threshold_value", "EVI_diff_pos_sos_threshold_value",
+             "SAVI_diff_pos_sos_threshold_value",
+             "NDVI_diff_pos_eos_threshold_value", "EVI_diff_pos_eos_threshold_value",
+             "SAVI_diff_pos_eos_threshold_value",
+             "NDVI_diff_pos_sos_threshold_doy", "EVI_diff_pos_sos_threshold_doy",
+             "SAVI_diff_pos_sos_threshold_doy",
+             "NDVI_diff_pos_eos_threshold_doy", "EVI_diff_pos_eos_threshold_doy",
+             "SAVI_diff_pos_eos_threshold_doy")
+           )
+```
+
+```{r}
+distr_plot(data_validation_S2,
+           c("NDVI_auc_slope", "EVI_auc_slope", "SAVI_auc_slope",
+             "NDVI_auc_threshold", "EVI_auc_threshold", "SAVI_auc_threshold",
+             "NDVI_auc_mar_oct", "EVI_auc_mar_oct", "SAVI_auc_mar_oct"),
+             c("NDVI_auc_slope", "EVI_auc_slope", "SAVI_auc_slope",
+               "NDVI_auc_threshold", "EVI_auc_threshold", "SAVI_auc_threshold",
+               "NDVI_auc_mar_oct", "EVI_auc_mar_oct", "SAVI_auc_mar_oct"))
+```
+
+## Landsat
+
+### Indices
+
+### MODIFY COMMENTS: Ranges of min and max:
+
+```{r}
+range(data_validation_Landsat$NDVI_max, na.rm = T)
+range(data_validation_Landsat$NDMI_max, na.rm = T)
+range(data_validation_Landsat$NDWI_max, na.rm = T)
+range(data_validation_Landsat$SAVI_max, na.rm = T) # SAVI_max > 1
+range(data_validation_Landsat$EVI_max, na.rm = T) # EVI_max > 1
+range(data_validation_Landsat$NDVI_min, na.rm = T) # NDVI_min < -1
+range(data_validation_Landsat$NDMI_min, na.rm = T)
+range(data_validation_Landsat$NDWI_min, na.rm = T)
+range(data_validation_Landsat$SAVI_min, na.rm = T) # SAVI_min < -1
+range(data_validation_Landsat$EVI_min, na.rm = T)
+```
+
+```{r}
+nrow(data_validation_Landsat %>% dplyr::filter(SAVI_max > 1))
+nrow(data_validation_Landsat %>% dplyr::filter(EVI_max > 1))
+nrow(data_validation_Landsat %>% dplyr::filter(NDVI_min < -1))
+nrow(data_validation_Landsat %>% dplyr::filter(SAVI_min < -1))
+```
+
+Histograms to check that max and min values are ok:
+
+```{r}
+plot_histogram(data_validation_Landsat, "NDVI_max", "NDVI max")
+plot_histogram(data_validation_Landsat, "NDMI_max", "NDMI max")
+plot_histogram(data_validation_Landsat, "NDWI_max", "NDWI max")
+plot_histogram(data_validation_Landsat, "SAVI_max", "SAVI max")
+plot_histogram(data_validation_Landsat, "EVI_max", "EVI max")
+plot_histogram(data_validation_Landsat, "NDVI_min", "NDVI min")
+plot_histogram(data_validation_Landsat, "NDMI_min", "NDMI min")
+plot_histogram(data_validation_Landsat, "NDWI_min", "NDWI min")
+plot_histogram(data_validation_Landsat, "SAVI_min", "SAVI min")
+plot_histogram(data_validation_Landsat, "EVI_min", "EVI min")
+```
+
+```{r}
+nrow(data_validation_Landsat %>%
+       dplyr::filter(EVI_max > 1 | EVI_max < -1))
+data_validation_Landsat %>%
+  dplyr::filter(EVI_max > 1 | EVI_max < -1) %>%
+  count(biogeo, unit)
+```
+
+Most EVI values are ok!
+
+Distribution plots:
+
+```{r message=FALSE, warning=FALSE}
+distr_plot(data_validation_Landsat %>% dplyr::filter(EVI_min > -0.5),
+           c("NDVI_max", "EVI_max", "SAVI_max", "NDMI_max", "NDWI_max",
+             "NDVI_min", "EVI_min", "SAVI_min", "NDMI_min", "NDWI_min"),
+           c("NDVI_max", "EVI_max", "SAVI_max", "NDMI_max", "NDWI_max",
+             "NDVI_min", "EVI_min", "SAVI_min", "NDMI_min", "NDWI_min"))
+```
+
+### CH
+
+```{r}
+distr_plot(data_validation_Landsat, "canopy_height", "Canopy height (m)")
+```
+ 
+#### Show habitats with CH categories
+
+```{r}
+ggplot(data_validation_Landsat %>%
+         mutate(CH_cat =
+                  factor(
+                    case_when(canopy_height == 0 ~ "0 m",
+                              canopy_height > 0 & canopy_height <= 1 ~ "0-1 m",
+                              canopy_height > 1 & canopy_height <=2 ~ "1-2 m",
+                              canopy_height > 2 & canopy_height <=5 ~ "2-5 m",
+                              canopy_height > 5 & canopy_height <=8 ~ "5-8 m",
+                              canopy_height > 8 ~ "> 8 m",
+                              is.na(canopy_height) ~ NA_character_),
+                    levels = c(
+                      "0 m", "0-1 m", "1-2 m", "2-5 m", "5-8 m", "> 8 m"))),
+       aes(x = EUNISa_1_descr, fill = CH_cat)) +
+  geom_bar() + theme_bw() + coord_flip() +
+  scale_y_continuous(labels = label_number()) +
+  scale_fill_viridis_d(direction = -1) +
+  labs(x = "EUNIS level 1", fill = "Canopy height") +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+  theme(legend.position = c(0.8, 0.75),
+        legend.direction = "vertical")
+```
+
+#### Stats per habitat type
+
+```{r}
+data_validation_Landsat %>%
+  group_by(EUNISa_1_descr) %>%
+  summarise(across(canopy_height, list(
+    mean = mean,
+    median = median,
+    sd = sd,
+    min = min,
+    max = max
+    ), na.rm = TRUE))
+```
+
+### Phenology
+
+Only using NDVI- and SAVI-based values so far.
+
+Maximum NDVI should be equal to value at peak?
+
+```{r}
+nrow(data_validation_Landsat %>% dplyr::filter(NDVI_pos_value  != NDVI_max))
+```
+
+Not sure why this happens, but in most cases the difference is small (< -0.1). Anyway, we should use only one of these two in the RF models.
+
+```{r}
+plot_histogram(data_validation_Landsat, "NDVI_sos_slope_doy", "NDVI_sos_slope_doy")
+plot_histogram(data_validation_Landsat, "NDVI_pos_doy", "NDVI_pos_doy")
+plot_histogram(data_validation_Landsat, "NDVI_eos_slope_doy", "NDVI_eos_slope_doy")
+plot_histogram(data_validation_Landsat, "EVI_sos_slope_doy", "EVI_sos_slope_doy")
+plot_histogram(data_validation_Landsat, "EVI_pos_doy", "EVI_pos_doy")
+plot_histogram(data_validation_Landsat, "EVI_eos_slope_doy", "EVI_eos_slope_doy")
+plot_histogram(data_validation_Landsat, "SAVI_sos_slope_doy", "SAVI_sos_slope_doy")
+plot_histogram(data_validation_Landsat, "SAVI_pos_doy", "SAVI_pos_doy")
+plot_histogram(data_validation_Landsat, "SAVI_eos_slope_doy", "SAVI_eos_slope_doy")
+plot_histogram(data_validation_Landsat, "NDVI_sos_threshold_doy", "NDVI_sos_threshold_doy")
+plot_histogram(data_validation_Landsat, "NDVI_pos_doy", "NDVI_pos_doy")
+plot_histogram(data_validation_Landsat, "NDVI_eos_threshold_doy", "NDVI_eos_threshold_doy")
+plot_histogram(data_validation_Landsat, "EVI_sos_threshold_doy", "EVI_sos_threshold_doy")
+plot_histogram(data_validation_Landsat, "EVI_pos_doy", "EVI_pos_doy")
+plot_histogram(data_validation_Landsat, "EVI_eos_threshold_doy", "EVI_eos_threshold_doy")
+plot_histogram(data_validation_Landsat, "SAVI_sos_threshold_doy", "SAVI_sos_threshold_doy")
+plot_histogram(data_validation_Landsat, "SAVI_pos_doy", "SAVI_pos_doy")
+plot_histogram(data_validation_Landsat, "SAVI_eos_threshold_doy", "SAVI_eos_threshold_doy")
+```
+
+```{r}
+plot_histogram(data_validation_Landsat, "NDVI_sos_slope_value", "NDVI_sos_slope_value")
+plot_histogram(data_validation_Landsat, "NDVI_pos_value", "NDVI_pos_value")
+plot_histogram(data_validation_Landsat, "NDVI_eos_slope_value", "NDVI_eos_slope_value")
+plot_histogram(data_validation_Landsat, "EVI_sos_slope_value", "EVI_sos_slope_value")
+plot_histogram(data_validation_Landsat, "EVI_pos_value", "EVI_pos_value")
+plot_histogram(data_validation_Landsat, "EVI_eos_slope_value", "EVI_eos_slope_value")
+plot_histogram(data_validation_Landsat, "NDVI_sos_threshold_value", "NDVI_sos_threshold_value")
+plot_histogram(data_validation_Landsat, "NDVI_pos_value", "NDVI_pos_value")
+plot_histogram(data_validation_Landsat, "NDVI_eos_threshold_value", "NDVI_eos_threshold_value")
+plot_histogram(data_validation_Landsat, "EVI_sos_threshold_value", "EVI_sos_threshold_value")
+plot_histogram(data_validation_Landsat, "EVI_pos_value", "EVI_pos_value")
+plot_histogram(data_validation_Landsat, "EVI_eos_threshold_value", "EVI_eos_threshold_value")
+```
+
+```{r}
+plot_histogram(data_validation_Landsat, "NDVI_slope_gsd", "NDVI_slope_gsd")
+plot_histogram(data_validation_Landsat, "EVI_slope_gsd", "EVI_slope_gsd")
+plot_histogram(data_validation_Landsat, "SAVI_slope_gsd", "SAVI_slope_gsd")
+plot_histogram(data_validation_Landsat, "NDVI_diff_pos_sos_slope_value",
+               "NDVI_diff_pos_sos_slope_value")
+plot_histogram(data_validation_Landsat, "EVI_diff_pos_sos_slope_value",
+               "EVI_diff_pos_sos_slope_value")
+plot_histogram(data_validation_Landsat, "SAVI_diff_pos_sos_slope_value",
+               "SAVI_diff_pos_sos_slope_value")
+plot_histogram(data_validation_Landsat, "NDVI_diff_pos_eos_slope_value",
+               "NDVI_diff_pos_eos_slope_value")
+plot_histogram(data_validation_Landsat, "EVI_diff_pos_eos_slope_value",
+               "EVI_diff_pos_eos_slope_value")
+plot_histogram(data_validation_Landsat, "SAVI_diff_pos_eos_slope_value",
+               "SAVI_diff_pos_eos_slope_value")
+plot_histogram(data_validation_Landsat, "NDVI_diff_pos_sos_slope_doy",
+               "NDVI_diff_pos_sos_slope_doy")
+plot_histogram(data_validation_Landsat, "EVI_diff_pos_sos_slope_doy",
+               "EVI_diff_pos_sos_slope_doy")
+plot_histogram(data_validation_Landsat, "SAVI_diff_pos_sos_slope_doy",
+               "SAVI_diff_pos_sos_slope_doy")
+plot_histogram(data_validation_Landsat, "NDVI_diff_pos_eos_slope_doy",
+               "NDVI_diff_pos_eos_slope_doy")
+plot_histogram(data_validation_Landsat, "EVI_diff_pos_eos_slope_doy", 
+               "EVI_diff_pos_eos_slope_doy")
+plot_histogram(data_validation_Landsat, "SAVI_diff_pos_eos_slope_doy", 
+               "SAVI_diff_pos_eos_slope_doy")
+plot_histogram(data_validation_Landsat, "NDVI_threshold_gsd", "NDVI_threshold_gsd")
+plot_histogram(data_validation_Landsat, "EVI_threshold_gsd", "EVI_threshold_gsd")
+plot_histogram(data_validation_Landsat, "SAVI_threshold_gsd", "SAVI_threshold_gsd")
+plot_histogram(data_validation_Landsat, "NDVI_diff_pos_sos_threshold_value",
+               "NDVI_diff_pos_sos_threshold_value")
+plot_histogram(data_validation_Landsat, "EVI_diff_pos_sos_threshold_value",
+               "EVI_diff_pos_sos_threshold_value")
+plot_histogram(data_validation_Landsat, "SAVI_diff_pos_sos_threshold_value",
+               "SAVI_diff_pos_sos_threshold_value")
+plot_histogram(data_validation_Landsat, "NDVI_diff_pos_eos_threshold_value",
+               "NDVI_diff_pos_eos_threshold_value")
+plot_histogram(data_validation_Landsat, "EVI_diff_pos_eos_threshold_value",
+               "EVI_diff_pos_eos_threshold_value")
+plot_histogram(data_validation_Landsat, "SAVI_diff_pos_eos_threshold_value",
+               "SAVI_diff_pos_eos_threshold_value")
+plot_histogram(data_validation_Landsat, "NDVI_diff_pos_sos_threshold_doy",
+               "NDVI_diff_pos_sos_threshold_doy")
+plot_histogram(data_validation_Landsat, "EVI_diff_pos_sos_threshold_doy",
+               "EVI_diff_pos_sos_threshold_doy")
+plot_histogram(data_validation_Landsat, "SAVI_diff_pos_sos_threshold_doy",
+               "SAVI_diff_pos_sos_threshold_doy")
+plot_histogram(data_validation_Landsat, "NDVI_diff_pos_eos_threshold_doy",
+               "NDVI_diff_pos_eos_threshold_doy")
+plot_histogram(data_validation_Landsat, "EVI_diff_pos_eos_threshold_doy", 
+               "EVI_diff_pos_eos_threshold_doy")
+plot_histogram(data_validation_Landsat, "SAVI_diff_pos_eos_threshold_doy", 
+               "SAVI_diff_pos_eos_threshold_doy")
+```
+
+```{r}
+plot_histogram(data_validation_Landsat, "NDVI_auc_slope", "NDVI_auc_slope")
+plot_histogram(data_validation_Landsat, "EVI_auc_slope", "EVI_auc_slope")
+plot_histogram(data_validation_Landsat, "SAVI_auc_slope", "SAVI_auc_slope")
+plot_histogram(data_validation_Landsat, "NDVI_auc_threshold", "NDVI_auc_threshold")
+plot_histogram(data_validation_Landsat, "EVI_auc_threshold", "EVI_auc_threshold")
+plot_histogram(data_validation_Landsat, "SAVI_auc_threshold", "SAVI_auc_threshold")
+```
+
+```{r}
+distr_plot(data_validation_Landsat,
+           c("NDVI_sos_slope_value","NDVI_pos_value", "NDVI_eos_slope_value",
+             "EVI_sos_slope_value","EVI_pos_value", "EVI_eos_slope_value",
+             "SAVI_sos_slope_value", "SAVI_pos_value", "SAVI_eos_slope_value",
+             "NDVI_sos_slope_doy","NDVI_pos_doy", "NDVI_eos_slope_doy",
+             "EVI_sos_slope_doy","EVI_pos_doy", "EVI_eos_slope_doy",
+             "SAVI_sos_slope_doy", "SAVI_pos_doy", "SAVI_eos_slope_doy",
+             "NDVI_sos_threshold_value","NDVI_pos_value", "NDVI_eos_threshold_value",
+             "EVI_sos_threshold_value","EVI_pos_value", "EVI_eos_threshold_value",
+             "SAVI_sos_threshold_value", "SAVI_pos_value", "SAVI_eos_threshold_value",
+             "NDVI_sos_threshold_doy","NDVI_pos_doy", "NDVI_eos_threshold_doy",
+             "EVI_sos_threshold_doy","EVI_pos_doy", "EVI_eos_threshold_doy",
+             "SAVI_sos_threshold_doy", "SAVI_pos_doy", "SAVI_eos_threshold_doy"),
+           c("NDVI_sos_slope_value","NDVI_pos_value", "NDVI_eos_slope_value",
+             "EVI_sos_slope_value","EVI_pos_value", "EVI_eos_slope_value",
+             "SAVI_sos_slope_value", "SAVI_pos_value", "SAVI_eos_slope_value",
+             "NDVI_sos_slope_doy","NDVI_pos_doy", "NDVI_eos_slope_doy",
+             "EVI_sos_slope_doy","EVI_pos_doy", "EVI_eos_slope_doy",
+             "SAVI_sos_slope_doy", "SAVI_pos_doy", "SAVI_eos_slope_doy",
+             "NDVI_sos_threshold_value","NDVI_pos_value", "NDVI_eos_threshold_value",
+             "EVI_sos_threshold_value","EVI_pos_value", "EVI_eos_threshold_value",
+             "SAVI_sos_threshold_value", "SAVI_pos_value", "SAVI_eos_threshold_value",
+             "NDVI_sos_threshold_doy","NDVI_pos_doy", "NDVI_eos_threshold_doy",
+             "EVI_sos_threshold_doy","EVI_pos_doy", "EVI_eos_threshold_doy",
+             "SAVI_sos_threshold_doy", "SAVI_pos_doy", "SAVI_eos_threshold_doy")
+           )
+```
+
+```{r}
+distr_plot(data_validation_Landsat,
+           c("NDVI_slope_gsd","EVI_slope_gsd", "SAVI_slope_gsd",
+             "NDVI_diff_pos_sos_slope_value", "EVI_diff_pos_sos_slope_value",
+             "SAVI_diff_pos_sos_slope_value",
+             "NDVI_diff_pos_eos_slope_value", "EVI_diff_pos_eos_slope_value",
+             "SAVI_diff_pos_eos_slope_value",
+             "NDVI_diff_pos_sos_slope_doy", "EVI_diff_pos_sos_slope_doy",
+             "SAVI_diff_pos_sos_slope_doy",
+             "NDVI_diff_pos_eos_slope_doy", "EVI_diff_pos_eos_slope_doy",
+             "SAVI_diff_pos_eos_slope_doy",
+             "NDVI_threshold_gsd","EVI_threshold_gsd", "SAVI_threshold_gsd",
+             "NDVI_diff_pos_sos_threshold_value", "EVI_diff_pos_sos_threshold_value",
+             "SAVI_diff_pos_sos_threshold_value",
+             "NDVI_diff_pos_eos_threshold_value", "EVI_diff_pos_eos_threshold_value",
+             "SAVI_diff_pos_eos_threshold_value",
+             "NDVI_diff_pos_sos_threshold_doy", "EVI_diff_pos_sos_threshold_doy",
+             "SAVI_diff_pos_sos_threshold_doy",
+             "NDVI_diff_pos_eos_threshold_doy", "EVI_diff_pos_eos_threshold_doy",
+             "SAVI_diff_pos_eos_threshold_doy"),
+           c("NDVI_slope_gsd","EVI_slope_gsd", "SAVI_slope_gsd",
+             "NDVI_diff_pos_sos_slope_value", "EVI_diff_pos_sos_slope_value",
+             "SAVI_diff_pos_sos_slope_value",
+             "NDVI_diff_pos_eos_slope_value", "EVI_diff_pos_eos_slope_value",
+             "SAVI_diff_pos_eos_slope_value",
+             "NDVI_diff_pos_sos_slope_doy", "EVI_diff_pos_sos_slope_doy",
+             "SAVI_diff_pos_sos_slope_doy",
+             "NDVI_diff_pos_eos_slope_doy", "EVI_diff_pos_eos_slope_doy",
+             "SAVI_diff_pos_eos_slope_doy",
+             "NDVI_threshold_gsd","EVI_threshold_gsd", "SAVI_threshold_gsd",
+             "NDVI_diff_pos_sos_threshold_value", "EVI_diff_pos_sos_threshold_value",
+             "SAVI_diff_pos_sos_threshold_value",
+             "NDVI_diff_pos_eos_threshold_value", "EVI_diff_pos_eos_threshold_value",
+             "SAVI_diff_pos_eos_threshold_value",
+             "NDVI_diff_pos_sos_threshold_doy", "EVI_diff_pos_sos_threshold_doy",
+             "SAVI_diff_pos_sos_threshold_doy",
+             "NDVI_diff_pos_eos_threshold_doy", "EVI_diff_pos_eos_threshold_doy",
+             "SAVI_diff_pos_eos_threshold_doy")
+           )
+```
+
+```{r}
+distr_plot(data_validation_Landsat,
+           c("NDVI_auc_slope", "EVI_auc_slope", "SAVI_auc_slope",
+             "NDVI_auc_threshold", "EVI_auc_threshold", "SAVI_auc_threshold",
+             "NDVI_auc_mar_oct", "EVI_auc_mar_oct", "SAVI_auc_mar_oct"),
+             c("NDVI_auc_slope", "EVI_auc_slope", "SAVI_auc_slope",
+               "NDVI_auc_threshold", "EVI_auc_threshold", "SAVI_auc_threshold",
+               "NDVI_auc_mar_oct", "EVI_auc_mar_oct", "SAVI_auc_mar_oct"))
+```
+
+## SatEmb
+
+Histograms for some bands:
+
+```{r}
+plot_histogram(data_validation_SatEmb, "A00", "A00")
+plot_histogram(data_validation_SatEmb, "A01", "A01")
+plot_histogram(data_validation_SatEmb, "A23", "A23")
+plot_histogram(data_validation_SatEmb, "A32", "A32")
+plot_histogram(data_validation_SatEmb, "A50", "A50")
+plot_histogram(data_validation_SatEmb, "A61", "A61")
+plot_histogram(data_validation_SatEmb, "A63", "A63")
+```
+
+Distribution plots for some bands:
+
+```{r message=FALSE, warning=FALSE}
+distr_plot(data_validation_SatEmb,
+           c("A00", "A01", "A10", "A22", "A33",
+             "A40", "A53", "A61", "A62", "A63"),
+           c("A00", "A01", "A10", "A22", "A33",
+             "A40", "A53", "A61", "A62", "A63"))
+```
+
+# TBD: Distributions per bioregion
+
+## S2
+
+### Indices
+
+Distribution plots:
+
+### CH
+
+```{r}
+distr_plot_biogeo(data_validation_S2, "canopy_height", "Canopy height (m)")
+```
+
+### Phenology
+
+## Landsat
+
+### Indices
+
+### CH
+
+```{r}
+distr_plot_biogeo(data_validation_Landsat, "canopy_height", "Canopy height (m)")
+```
+
+### Phenology
+
+## SatEmb
+
+Distribution plots for some bands:
+
+```{r message=FALSE, warning=FALSE}
+distr_plot_biogeo(data_validation_SatEmb,
+           c("A00", "A01", "A10", "A22", "A33",
+             "A40", "A53", "A61", "A62", "A63"),
+           c("A00", "A01", "A10", "A22", "A33",
+             "A40", "A53", "A61", "A62", "A63"))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
