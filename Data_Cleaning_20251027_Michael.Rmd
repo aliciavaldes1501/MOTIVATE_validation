@@ -1,0 +1,2459 @@
+---
+title: "MOTIVATE_State_BioDiv"
+author: "Michael Glaser"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# SETUP
+
+```{r}
+
+### general
+library(plyr)
+library(tidyverse)
+library(readxl)
+library(forcats)
+library(stringr)
+library(data.table)
+library(reshape2)
+library(purrr)
+library(grid)
+library(gridExtra)
+library(cowplot)
+
+### spatial
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(rnaturalearthhires)
+library(terra)
+library(tidyterra)
+library(exactextractr)
+library(countrycode)
+
+### occupancy mods
+library(spOccupancy)
+
+### taxonomy
+library(WorldFlora)
+
+
+### - ### helper functions ### - ###
+  
+  ### generalized rounding function
+    mround <- function(x, base) {
+      ifelse(is.na(x), NA, base * floor(x / base))
+    }
+
+  ### get_legend function  
+  get_legend2 <- function(plot, legend = NULL) {
+  if (is.ggplot(plot)) {
+    gt <- ggplotGrob(plot)
+  } else {
+    if (is.grob(plot)) {
+      gt <- plot
+    } else {
+      stop("Plot object is neither a ggplot nor a grob.")
+    }
+  }
+  pattern <- "guide-box"
+  if (!is.null(legend)) {
+    pattern <- paste0(pattern, "-", legend)
+  }
+  indices <- grep(pattern, gt$layout$name)
+  not_empty <- !vapply(
+    gt$grobs[indices], 
+    inherits, what = "zeroGrob", 
+    FUN.VALUE = logical(1)
+  )
+  indices <- indices[not_empty]
+  if (length(indices) > 0) {
+    return(gt$grobs[[indices[1]]])
+  }
+  return(NULL)
+}  
+    
+### - ### PATHS and folders ### - ###
+    
+     ### working directory
+      setwd("D:/33_MOTIVATE/05_WP2/01_RWD_DataCleaning")
+    
+     ### date for versioning
+      sys.date <- gsub("-", "", Sys.Date())
+      
+     ### path to data
+     path.data <- ("../00_DATA/")
+     
+     ### output path
+      path.out <- paste0("./00_OUTPUT/output_", sys.date)
+      dir.create(path.out)
+
+###-### settings
+options(scipen=9999)
+
+```
+
+## plot settings
+
+```{r}
+
+### plot sizes
+wide <- 15.8
+half <- 7.9
+
+high <- 20
+
+wide.pp <- 20
+height.pp <- 15
+
+### plot theme
+my.theme <- theme_classic()+
+  theme(plot.title=element_text(face="bold", size=12),
+        axis.title=element_text(face="bold", size=10),
+        axis.text=element_text(size=8),
+        legend.title=element_text(face="bold", size=10),
+        legend.position="bottom")
+
+### color palettes
+
+col.hab <- c(
+  "forests"                       = "#33a02c",  
+  "grasslands"                    = "#8c510a",  
+  "heathlands, scrub and tundra"  = "#dfc27d",  
+  "inland sparsely vegetated"     = "#b2abd2",  
+  "marine"                        = "#0571b0",
+  "coastal"                       = "#80cdc1",  
+  "wetlands"                      = "#74add1",  
+  "anthropogenic"                 = "#ff7f00",  
+  "class not possible"            = "#d9d9d9",  
+  "class failed"                  = "#969696",  
+  "multiple class"                = "#525252"   
+)
+
+
+```
+
+## projection settings
+
+```{r}
+proj.crs <- 3035
+```
+
+# STUDY AREA
+
+## remove islands
+
+```{r}
+
+### SPAIN
+  esp <- ne_states(country="Spain")
+  esp.excl <- c("Baleares", "Las Palmas", "Santa Cruz de Tenerife", "Ceuta", "Melilla")
+  esp <- esp[!esp$name %in% esp.excl,]
+  
+  esp <- esp %>% summarise(name=first(admin),
+                          geometry=st_union(geometry))
+
+### CRETE & GREEK ISLANDS
+  gr <- ne_states(country="Greece")
+  gr.excl <- c("Kriti", "Notio Aigaio", "Voreio Aigaio", "Ionioi Nisoi" )
+  gr <- gr[!gr$name %in% gr.excl,]
+
+  gr.isl <- st_cast(gr, "POLYGON")
+  gr.isl$num <- 1:nrow(gr.isl)
+  
+  
+  gr.isl <- gr.isl[!(gr.isl$name=="Anatoliki Makedonia kai Thraki" & !gr.isl$num==4),]
+  gr.isl <- gr.isl[!(gr.isl$name=="Thessalia" & !gr.isl$num==8),]
+  gr.isl <- gr.isl[!(gr.isl$name=="Stereá Elláda" & !gr.isl$num %in% c(13, 15)),]
+  gr.isl <- gr.isl[!(gr.isl$name=="Attiki" & !gr.isl$num %in% c(16)),]
+  gr.isl <- gr.isl[!(gr.isl$name=="Peloponnisos" & !gr.isl$num %in% c(27)),]
+  
+  gr.isl$num <- NULL
+
+  gr <- gr.isl %>% summarise(name=first(admin),
+                          geometry=st_union(geometry))
+
+### ITALY
+  it <- ne_states(country="Italy")
+  it.excl.region <- c("Sicily", "Sardegna")
+  it <- it[!it$region %in% it.excl.region,]
+  
+  it.isl <- it[it$name %in% c("Grosseto", "Livorno", "Latina", "Napoli"),]
+  
+  it.isl <- st_cast(it.isl, "POLYGON")
+  it.isl$num <- LETTERS[1:nrow(it.isl)]
+  
+  it.isl <- it.isl[it.isl$num %in% c("A", "C", "E", "G"),]
+  
+  it.isl$num <- NULL
+  
+  it[it$name=="Grosseto",] <- it.isl[it.isl$name=="Grosseto",]
+  it[it$name=="Livorno",] <- it.isl[it.isl$name=="Livorno",]
+  it[it$name=="Latina",] <- it.isl[it.isl$name=="Latina",]
+  it[it$name=="Napoli",] <- it.isl[it.isl$name=="Napoli",]
+  
+  it <- it %>% summarise(name=first(admin),
+                          geometry=st_union(geometry))
+  
+  
+
+### FRANCE 
+  fr <- ne_states(country="France")
+  fr.excl <- c("Guyane française",  "Guadeloupe", "Martinique" ,  "Mayotte", "Haute-Corse",  "Corse-du-Sud", "La Réunion" )
+  fr <- fr[!fr$name %in% fr.excl,]
+  
+  fr <- fr %>% summarise(name=first(admin),
+                          geometry=st_union(geometry))
+
+### PORTUGAL
+  por <- ne_states(country="Portugal")
+  por.excl <- c("Madeira", "Azores")
+  por <- por[!por$name %in% por.excl,]
+  
+  por <- por %>% summarise(name=first(admin),
+                          geometry=st_union(geometry))
+
+### NORWAY
+  nor <- ne_states(country="Norway")
+  nor.excl <- c("Svalbard", "Bouvet Island" )
+  nor <- nor[!nor$name %in% nor.excl,]
+  
+  
+  
+  
+  nor.bbox <- st_bbox(nor)
+  nor.bbox["xmin"] <- 0
+  nor.bbox["ymin"] <- 57
+  
+  nor.bbox.sf <- st_as_sfc(nor.bbox)
+  nor <- st_crop(nor, nor.bbox.sf)
+  
+  
+  nor <- nor %>% summarise(name=first(admin),
+                         geometry=st_union(geometry))
+  
+### UK
+  uk <- ne_states(country="United Kingdom")
+  uk.excl <- c("Isle of Wight", "Shetland Islands", "Isles of Scilly", "Orkney", "Eilean Siar")
+  uk <- uk[!uk$name %in% uk.excl,]
+  uk <- uk %>% summarise(name=first(admin),
+                          geometry=st_union(geometry))
+
+### NL
+  nl <- ne_states(country="Netherlands")
+  nl.excl <- c("St. Eustatius", "Saba")
+  nl <- nl[!nl$name %in% nl.excl,]
+
+  nl.isl <- nl[nl$name %in% c("Friesland", "Noord-Holland", "Groningen"),]
+  
+  
+  nl.isl <- st_cast(nl.isl, "POLYGON")
+  
+  nl.isl$num <- LETTERS[1:nrow(nl.isl)]
+
+
+  nl.isl <- nl.isl[nl.isl$num %in% c("A", "C", "E"),]
+  
+  nl.isl$num <- NULL
+  
+  nl[nl$name=="Friesland",] <- nl.isl[nl.isl$name=="Friesland",]
+  nl[nl$name=="Noord-Holland",] <- nl.isl[nl.isl$name=="Noord-Holland",]
+  nl[nl$name=="Groningen",] <- nl.isl[nl.isl$name=="Groningen",]
+  
+  nl <- nl %>% summarise(name=first(admin),
+                         geometry=st_union(geometry))
+  
+### EST
+  
+  est <- ne_states(country="Estonia")
+  
+
+  
+  est.excl <- c("Hiiu", "Saare")
+  est <- est[!est$name %in% est.excl,]   
+  
+  est.isl <- est[est$name %in% c("Lääne", "Pärnu", "Harju"),]
+  
+
+  est.isl <- st_cast(est.isl, "POLYGON")
+  est.isl$num <- LETTERS[1:nrow(est.isl)]
+
+
+  est.isl <- est.isl[est.isl$num %in% c("A", "C", "E"),]
+  
+  est.isl$num <- NULL
+  
+  est[est$name=="Lääne",] <- est.isl[est.isl$name=="Lääne",]
+  est[est$name=="Pärnu",] <- est.isl[est.isl$name=="Pärnu",]
+  est[est$name=="Harju",] <- est.isl[est.isl$name=="Harju",]
+  
+  est <- est %>% summarise(name=first(admin),
+                         geometry=st_union(geometry))
+  
+### Finland
+  fin <- ne_states(country="Finland")
+
+  fin.isl <- fin[fin$name %in% c("Northern Ostrobothnia", "Ostrobothnia", "Finland Proper"),]
+  
+  fin.isl <- st_cast(fin.isl, "POLYGON")
+  fin.isl$num <- 1:nrow(fin.isl)
+  
+  fin.isl <- fin.isl[!(fin.isl$name=="Ostrobothnia" & !fin.isl$num==31),]
+  fin.isl <- fin.isl[!(fin.isl$name=="Northern Ostrobothnia" & !fin.isl$num==1),]
+  fin.isl <- fin.isl[!(fin.isl$name=="Finland Proper" & !fin.isl$num==3),]
+  
+  fin.isl$num <- NULL
+  
+  fin[fin$name=="Ostrobothnia",] <- fin.isl[fin.isl$name=="Ostrobothnia",]
+  fin[fin$name=="Northern Ostrobothnia",] <- fin.isl[fin.isl$name=="Northern Ostrobothnia",]
+  fin[fin$name=="Finland Proper",] <- fin.isl[fin.isl$name=="Finland Proper",]
+  
+  fin <- fin %>% summarise(name=first(admin),
+                         geometry=st_union(geometry))
+  
+### Sweden
+  
+  sw <- ne_states(country="Sweden")
+  
+  sw <- sw[!sw$name %in% "Gotland",]
+  
+  sw.isl <- sw[sw$name=="Kalmar",]
+
+  sw.isl <- st_cast(sw.isl, "POLYGON")
+  sw.isl$num <- LETTERS[1:nrow(sw.isl)]
+  
+  sw.isl <- sw.isl[sw.isl$num %in% c("A"),]
+  sw.isl$num <- NULL
+  
+  sw[sw$name=="Kalmar",] <- sw.isl[sw.isl$name=="Kalmar",]
+  
+  sw <- sw %>% summarise(name=first(admin),
+                         geometry=st_union(geometry))
+  
+### Denmark
+  
+  den <- ne_states(country="Denmark")
+
+  den <- st_cast(den, "POLYGON")
+  den$num <- LETTERS[1:nrow(den)]
+  den <- den[!den$num %in% c("I", "L", "P"),]
+  
+  den <- den %>% summarise(name=first(admin),
+                         geometry=st_union(geometry))
+    
+### ISLAND LIST
+#island.list <- list(esp, gr, it, fr, uk, por, nl, est, den, sw, fin, nor) ### FULL LIST
+
+island.list <- list(gr, it, fr, uk, nl, est, den) ### removing data-poor regions
+  
+star.fill <- do.call(rbind, island.list)
+
+
+```
+
+## retrieve study area
+
+```{r}
+
+### load all European countries
+  star <- ne_countries(continent="Europe", scale="large")
+  star <- star[!star$name %in% c("Russia", "France", "Greece", "Spain", "Italy", "United Kingdom", "Guernsey", "Jersey", "Faeroe Is.", "Iceland", "Isle of Man", "Åland", "Malta", "Portugal", "Norway", "Netherlands", "Finland", "Estonia", "Sweden", "Denmark"),]
+  
+### remove extraneous columns
+  star <- star[,c("name", "geometry")]
+
+### bind with filler
+  star <- rbind(star, star.fill)
+  
+### cut to lat/long filters
+  star.bbox <- st_bbox(star)
+  star.bbox["ymax"] <- 60
+  star.bbox["xmax"] <- 25
+  
+  star <- st_crop(star, star.bbox)
+
+### transofrm to project crs
+  star.tf <- st_transform(star, proj.crs)
+
+### add area column  
+  star.tf$area.km2 <- as.numeric(st_area(star.tf)) /1e6  
+  
+### unify for plotting (buffer to clean up left over geometries)
+  star.union <- st_as_sf(st_union(star.tf))
+  star.union <- st_as_sf(st_buffer(star.union, dist=1))
+  
+
+### unclutter environment    
+rm(list=c("island.list", "rus", "uk", "fr", "star.fill", "gr", "it", "it.isl", "est", "est.isl", "fin", "fin.isl", "esp", "por", "nor", "nor.bbox", "nor.bbox.sf", "nl", "nl.isl", "gr.isl", "den", "sw.isl", "sw"))
+rm(list=ls(pattern=".excl"))
+
+
+
+```
+
+# BIOGEOGRAPHIC REGION
+
+```{r}
+
+biogeo <- terra::vect(paste0(path.data,"02_BIOGEO/BiogeoRegions2016.shp"))
+
+biogeo.tf <- st_as_sf(st_transform(st_as_sf(biogeo), proj.crs))
+
+biogeo.tf <- st_crop(biogeo.tf, st_bbox(star.tf))
+
+biogeo.tf$area.km2 <- as.numeric(st_area(biogeo.tf)) /1e6
+
+biogeo.tf$name.pretty <- gsub(" Bio-geographical Region", "", biogeo.tf$name)
+
+```
+
+# HEADER
+
+```{r}
+
+### read header
+head <- as.data.table(fread(paste0(path.data,"01_EVA/200_Motivate20250415_notJUICE_header_with_precise_coordinates.csv"), 
+         header=T,
+         sep = "\t"))
+
+### adjust column names
+colnames(head) <- gsub(" ", ".", colnames(head))
+
+     ### extract year, day, month
+          head$date <- head$Date.of.recording ### storage for original column
+          head[, c("day", "month", "year") := tstrsplit(Date.of.recording, "\\.")] ### data.table version is faster
+          head$year <- as.numeric(head$year) ### convert to numeric
+  
+     ### create timesteps going backwards from the latest year of records
+          yr.int.length <- 15
+          
+          max.year <- max(head$year, na.rm=T)
+          min.year <- min(head$year, na.rm=T)
+          
+          yr.breaks <- rev(seq(max.year + 1, min.year - 1, by = -yr.int.length))
+          yr.labels <- yr.breaks[-length(yr.breaks)]
+          
+          head[, yr.interval := as.numeric(as.character(cut(year,
+                     breaks = yr.breaks,
+                     labels = yr.labels,
+                     right = F,
+                     include.lowest = T)))]
+          
+          table(head$yr.interval, useNA="ifany")
+          
+  ### manually correct country column
+    head$country <- revalue(head$Country, replace=c("Slovak Republic"="Slovakia",
+                                                    "DE"="Germany",
+                                                    "Ukraina"="Ukraine",
+                                                    "ES"="Spain",
+                                                    "Moldavia"="Moldova",
+                                                    "Andorra, Principality of"="Andorra"))
+  
+  ### create an area column
+    head$area <- head$'Relevé.area.(m²)' 
+     
+    ##head$area[head$area>625] <- NA ### what are unrealistic area sizes?
+    
+  ### convert project types to lower
+    head$RS_PROJTYP <- tolower(head$RS_PROJTYP)
+
+```
+
+### manually correct erroneous entries
+
+received from Ilona Knollova 26-11-2025 pertains to the manipulation column in ReSurvey and the project type column
+
+DE_00039 is likely typo from original e-mail
+Czechia_nvd is a "Dataset" not a "RS_CODE"
+"RU_0003c" is not in RS_CODE
+
+```{r}
+
+all.codes <- unique(head$RS_CODE)
+
+
+### vector of all corrections just to double-check
+all.cors <- c("AT_0004b",
+              "CZ_0019_024", "CZ_0019_034", "CZ_0019_054",
+              "DE_0039", "DE_0037_29", "DE_0037_88",
+              "FRCH_0001",
+              "HU_0002",
+              "IT_0001a", "IT_0001b", "IT_0001c", "IT_0001d", "IT_0001e",
+              "PL_0009",
+              "RU_0003c"
+              )
+
+###-### changes to Manipulate (Y/N)
+
+  ### typo (M instead of N)
+  head$`Manipulate.(y/n)`[head$Dataset=="Czechia_nvd"] <- "N"
+  
+  ### not manipulated (according to IK)
+  manip.no <- c("AT_0004b", 
+                "CZ_0016_054",
+                "DE_0039", "DE_0037_29",
+                "FRCH_0001",
+                "IT_0001_a", "IT_0001_b", "IT_0001c", "IT_0001d", "IT_0001e")
+
+  head$`Manipulate.(y/n)`[head$RS_CODE %in% manip.no] <- "N"
+
+###-### changes to RS_PROJTYP
+
+  ### change study type to Site comparison
+  study.site <- c("HU_0002")
+
+  head$RS_PROJTYP[head$RS_CODE %in% study.site] <- "site comparison"
+
+
+```
+
+# EUNIS
+
+## habitat from data
+
+```{r}
+
+### make a new column to retain original assessments
+     head$eunis <- gsub("!", "", head$Expert.system) ### "!" only signified different classification path, not habitat
+     head$eunis[head$eunis==""] <- "X" ### classification not possible bc prerequisites missing (usually cover missing)
+     head$eunis[head$eunis=="~"] <- "Y" ### Esy fails (ambiguous assignemtn, not enough indicator species, not enough cover of i.s. etc.)
+
+### separate rows
+     head.esy <- head[, .(eunis = unlist(strsplit(eunis, ","))), by = PlotObservationID]  # Separate rows by EUNIS
+
+     ### some edits
+     head.esy$eunis <- gsub("MA", "M", head.esy$eunis) ### remove the unnecessary MA
+     head.esy$eunis <- gsub("Qa", "Q", head.esy$eunis) ### remove non-capital letters that hamper classification
+     head.esy$eunis <- gsub("Qb", "Q", head.esy$eunis) ### unofficial category, merge to Q
+     head.esy$eunis <- gsub("^S[a-zA-Z]", "S", head.esy$eunis) ### unofficial category, merge to S
+     head.esy$eunis <- gsub("^M[a-zA-Z]", "M", head.esy$eunis) ### marine vegetation not target for MOTIVATE
+     head.esy$eunis <- gsub("^P([abcdefgh])$", "P3\\1", head.esy$eunis) ### 
+
+### extract eunis level
+     
+     ### level = number of characters
+     head.esy$level <- nchar(head.esy$eunis)
+     
+     ### level 1
+     head.esy$lvl1 <- substr(head.esy$eunis, 1,1) ### level 1 is the first character
+
+     ### level 2
+     head.esy$lvl2 <- NA ### empty storage column
+     head.esy$lvl2[head.esy$level>1] <- substr(head.esy$eunis[head.esy$level>1], 1,2)
+     
+     ### level 3
+     head.esy$lvl3 <- NA
+     head.esy$lvl3[head.esy$level>2] <- substr(head.esy$eunis[head.esy$level>2], 1,3)
+     
+     ### add missing levels for unclassified etc.
+     head.esy$lvl2[head.esy$lvl1=="X"] <- "XX"
+     head.esy$lvl2[head.esy$lvl1=="Y"] <- "YY"
+     
+     head.esy$lvl3[head.esy$lvl1=="X"] <- "XXX"
+     head.esy$lvl3[head.esy$lvl1=="Y"] <- "YYY"
+     
+     ### create a combined column (RUNTIME IS 15-30 mins, get coffee!!!!)
+     head.esy <- head.esy[, .(
+     eunis.countlvl1 = uniqueN(lvl1),  # Count unique lvl1
+     eunis.lvl1 = paste(sort(unique(lvl1)), collapse = ", "), # Concatenate unique names
+     eunis.countlvl2 = uniqueN(lvl2),  # Count unique lvl1
+     eunis.lvl2 = paste(sort(unique(lvl2)), collapse = ", "),
+     eunis.countlvl3 = uniqueN(lvl3),  # Count unique lvl1
+     eunis.lvl3 = paste(sort(unique(lvl3)), collapse = ", ")
+     ), by = PlotObservationID]
+     
+     ### add symbols for missing assignments
+     head.esy$eunis.lvl1[head.esy$eunis.countlvl1>1] <- "Z"      ### multiple lvl1
+     head.esy$eunis.lvl2[head.esy$eunis.countlvl2>1] <- "ZZ"     ### multiple lvl2
+     head.esy$eunis.lvl3[head.esy$eunis.countlvl3>1] <- "ZZZ"    ### multiple lvl3
+     
+     head.esy$eunis.lvl2[head.esy$eunis.lvl2==""] <- "YY"        ### Esy failed lvl 2
+     head.esy$eunis.lvl3[head.esy$eunis.lvl3==""] <- "YYY"       ### Esy failed lvl 3
+     
+     ### add method column
+      head.esy$method <- "esy"
+
+```
+
+## Alicias Crosswalk
+
+DK_Naturdata_Res
+
+```{r}
+     ### CROSSWALK BY ALICIA
+     
+          ### read Alicias data and check
+          dk.eunis <- fread(paste0(path.data,"04_EUNIS/db_Michael.csv"))
+          all(dk.eunis$PlotObservationID %in% head$PlotObservationID)
+          
+          dk.eunis$method <- "acw"
+          
+          
+          
+          ### align with my encoding     
+          dk.eunis$eunis.edit <- gsub("MA", "M", dk.eunis$EUNIS)
+          dk.eunis$eunis.edit <- gsub("^P([abcdefghi])$", "P", dk.eunis$eunis.edit)
+          
+          unique(dk.eunis$eunis.edit)
+          
+          ### define levels
+          dk.eunis$level <- nchar(dk.eunis$eunis.edit)
+          
+          ### extract level 1
+          dk.eunis$lvl1 <- substr(dk.eunis$eunis.edit, 1,1)
+          
+          ### extract level 2
+          dk.eunis$lvl2 <- NA
+          dk.eunis$lvl2[dk.eunis$level>1] <- substr(dk.eunis$eunis.edit[dk.eunis$level>1], 1,2)
+          dk.eunis$lvl2[is.na(dk.eunis$lvl2)] <- "XX"
+          
+          ### extract level 3
+          dk.eunis$lvl3 <- NA
+          dk.eunis$lvl3[dk.eunis$level>2] <-  substr(dk.eunis$eunis.edit[dk.eunis$level>2], 1,3)
+          dk.eunis$lvl3[is.na(dk.eunis$lvl3)] <- "XXX"
+               
+```
+
+## Pl@ntBert abundance
+
+```{r}
+
+plantbert <- fread(paste0(path.data,"04_EUNIS/plantbert_habitat_predictions.csv"))
+colnames(plantbert) <- gsub(" ", ".", colnames(plantbert))
+
+plantbert$top.lvl2 <- substr(plantbert$`Most.likely.EUNIS.level-2.habitat`, 1,2)
+plantbert$top.lvl2 <- gsub("MA", "M2", plantbert$top.lvl2)
+
+plantbert$top.lvl2.perc <- as.numeric(sub(".*\\(([^%]+)%\\).*", "\\1", plantbert$`Most.likely.EUNIS.level-2.habitat`))
+
+plantbert$method <- "pb_abund"
+
+### cutoff table
+  cutoff <- c(75, 80,  85, 90, 95, 97, 99)
+  
+  plantbert.cutoff <- plantbert %>% 
+    dplyr::summarise(cutoff=cutoff,
+                     n.remaining=sapply(cutoff, function (c) sum(top.lvl2.perc>=c)))
+
+### raw plot
+  plot.pb.hist <- ggplot(plantbert)+my.theme+
+    geom_histogram(aes(x=top.lvl2.perc))+
+    scale_x_continuous(breaks=seq(0,100,10))+
+    scale_y_continuous(expand=expansion(mult=c(0,0.15)))+
+    labs(x="certainty (%)", y="plots")
+
+### cutoff
+  plot.pb.cutoff <- ggplot(plantbert.cutoff)+my.theme+
+    geom_bar(aes(x=cutoff, y=n.remaining), stat="identity", width=0.75)+
+    scale_x_continuous(breaks=cutoff)+
+    scale_y_continuous(expand=expansion(mult=c(0,0.15)))+
+    geom_label(aes(x=cutoff, y=n.remaining*1.1, label=paste0(round(n.remaining/1000),"k")),
+               size=3)+
+    labs(x="cutoff value (%)", y="remaining plots")
+
+### combined plot
+  grid.pb <- plot_grid(plot.pb.hist, plot.pb.cutoff, nrow=2)
+  
+ggsave(filename=paste0(path.out,"/plantbert_abund.png"),
+       plot=grid.pb,
+       width=wide, unit="cm",
+       dpi=900,
+       bg="white")
+
+### choose cutoff and filter accordingly
+pb.cut.abund <- 75
+
+plantbert <- plantbert %>% 
+  filter(top.lvl2.perc>=pb.cut.abund) %>% 
+  mutate(method="pb_abund")
+
+nrow(plantbert)
+
+```
+
+## Pl@ntBert pres-abs
+
+```{r}
+plantbert.pa <- fread(paste0(path.data,"04_EUNIS/plantbert_habitat_predictions_random.csv"))
+colnames(plantbert.pa) <- gsub(" ", ".", colnames(plantbert.pa))
+
+plantbert.pa$top.lvl2 <- substr(plantbert.pa$`Most.likely.EUNIS.level-2.habitat`, 1,2)
+plantbert.pa$top.lvl2 <- gsub("MA", "M2", plantbert.pa$top.lvl2)
+
+plantbert.pa$top.lvl2.perc <- as.numeric(sub(".*\\(([^%]+)%\\).*", "\\1", plantbert.pa$`Most.likely.EUNIS.level-2.habitat`))
+
+### cutoff table
+  cutoff <- c(75, 80,  85, 90, 95, 97, 99)
+  
+  plantbert.pa.cutoff <- plantbert.pa %>% 
+    dplyr::summarise(cutoff=cutoff,
+                     n.remaining=sapply(cutoff, function (c) sum(top.lvl2.perc>=c)))
+
+### raw plot
+  plot.pb.pa.hist <- ggplot(plantbert.pa)+my.theme+
+    geom_histogram(aes(x=top.lvl2.perc))+
+    scale_x_continuous(breaks=seq(0,100,10))+
+    scale_y_continuous(expand=expansion(mult=c(0,0.15)))+
+    labs(x="certainty (%)", y="plots")
+
+### cutoff
+  plot.pb.pa.cutoff <- ggplot(plantbert.pa.cutoff)+my.theme+
+    geom_bar(aes(x=cutoff, y=n.remaining), stat="identity", width=0.75)+
+    scale_x_continuous(breaks=cutoff)+
+    scale_y_continuous(expand=expansion(mult=c(0,0.15)))+
+    geom_label(aes(x=cutoff, y=n.remaining*1.1, label=paste0(round(n.remaining/1000),"k")),
+               size=3)+
+    labs(x="cutoff value (%)", y="remaining plots")
+
+### combined plot
+  grid.pb <- plot_grid(plot.pb.hist, plot.pb.cutoff, nrow=2)
+  
+ggsave(filename=paste0(path.out,"/plantbert_presabs.png"),
+       plot=grid.pb,
+       width=wide, unit="cm",
+       dpi=900,
+       bg="white")
+
+### choose cutoff and filter accordingly
+pb.cut.presabs <- pb.cut.abund*0.92/0.78
+
+plantbert.pa <- plantbert.pa %>% 
+  filter(top.lvl2.perc>=pb.cut.presabs) %>% 
+  mutate(method="pb_presabs")
+
+nrow(plantbert.pa)
+
+```
+
+## merge into head.esy
+
+```{r}
+
+### update AWC
+markers <- c(eunis.lvl1 = "X", eunis.lvl2 = "XX", eunis.lvl3 = "XXX")
+
+head.esy <- head.esy %>%
+  left_join(
+    dk.eunis %>%
+      select(PlotObservationID, lvl1, lvl2, lvl3, method) %>%
+      rename(
+        eunis.lvl1.new = lvl1,
+        eunis.lvl2.new = lvl2,
+        eunis.lvl3.new = lvl3,
+        method.new     = method
+      ),
+    by = "PlotObservationID"
+  ) %>%
+  mutate(
+    rep1 = eunis.lvl1 %in% c("X", "Y", "Z")       & !is.na(eunis.lvl1.new),
+    rep2 = eunis.lvl2 %in% c("XX", "YY", "ZZ")    & !is.na(eunis.lvl2.new),
+    rep3 = eunis.lvl3 %in% c("XXX", "YYY", "ZZZ") & !is.na(eunis.lvl3.new),
+
+    eunis.lvl1 = ifelse(rep1, eunis.lvl1.new, eunis.lvl1),
+    eunis.lvl2 = ifelse(rep2, eunis.lvl2.new, eunis.lvl2),
+    eunis.lvl3 = ifelse(rep3, eunis.lvl3.new, eunis.lvl3),
+
+    method = ifelse((rep1 | rep2 | rep3) & !is.na(method.new), method.new, method)
+  ) %>%
+  select(-ends_with(".new"), -rep1, -rep2, -rep3)
+
+### update Pl@ntBert abundance
+head.esy <- head.esy %>%
+  left_join(
+    plantbert %>%
+      select(PlotObservationID, top.lvl2, top.lvl2.perc, method) %>%
+      rename(
+        eunis.lvl2.new = top.lvl2,
+        method.new     = method
+      ),
+    by = "PlotObservationID"
+  ) %>%
+  mutate(
+    rep2       = eunis.lvl2 %in% c("XX", "YY", "ZZ") & !is.na(eunis.lvl2.new),
+    eunis.lvl2 = ifelse(rep2, eunis.lvl2.new, eunis.lvl2),
+    method     = ifelse(rep2 & !is.na(method.new), method.new, method)
+  ) %>%
+  select(-ends_with(".new"), -rep2)
+
+### update Pl@ntBert pres-abs
+head.esy <- head.esy %>%
+  left_join(
+    plantbert.pa %>%
+      select(PlotObservationID, top.lvl2, top.lvl2.perc, method) %>%
+      rename(
+        eunis.lvl2.new = top.lvl2,
+        method.new     = method
+      ),
+    by = "PlotObservationID"
+  ) %>%
+  mutate(
+    rep2       = eunis.lvl2 %in% c("XX", "YY", "ZZ") & !is.na(eunis.lvl2.new),
+    eunis.lvl2 = ifelse(rep2, eunis.lvl2.new, eunis.lvl2),
+    method     = ifelse(rep2 & !is.na(method.new), method.new, method)
+  ) %>%
+  select(-ends_with(".new"), -rep2)
+
+table(head.esy$method, useNA="always")
+
+```
+
+## join with legend
+
+```{r}
+
+     ### CONTINUE with head.esy as usual 
+
+     ### Create eunis.lvl1 for augmented datasets (hierarchy respected)
+     head.esy$eunis.lvl1 <- substr(head.esy$eunis.lvl2, 1, 1)
+
+     ### add names
+     eunis.legend <- read_excel(paste0(path.data,"04_EUNIS/EUNIS-Habitats-2023-06-15-update_MG.xlsx"))
+     eunis.legend$`EUNIS 2023 code` <- trimws(eunis.legend$`EUNIS 2023 code`)
+     eunis.legend$`EUNIS 2023 code` <- gsub("MA", "M", eunis.legend$`EUNIS 2023 code`)
+     
+     ### join with legend
+     head.esy <- left_join(head.esy, eunis.legend, by=c("eunis.lvl1"="EUNIS 2023 code"))
+     head.esy <- left_join(head.esy, eunis.legend, by=c("eunis.lvl2"="EUNIS 2023 code")) 
+     
+     head.esy$eunis.lvl1.name <- head.esy$`EUNIS-2023 habitat name.x`
+     head.esy$eunis.lvl2.name <- head.esy$`EUNIS-2023 habitat name.y`
+     head.esy$eunis.method <- head.esy$method
+
+
+### join with head (names can be done later)
+head <- left_join(head, head.esy[,c("PlotObservationID", 
+                                    "eunis.lvl1", 
+                                    "eunis.lvl2", 
+                                    "eunis.lvl1.name", 
+                                    "eunis.lvl2.name",
+                                    "eunis.method")], by="PlotObservationID")
+
+
+```
+
+## group eunis classes NEW
+
+```{r}
+
+head.eunis.grp <- head %>% 
+     group_by(eunis.lvl2, eunis.lvl2.name) %>% 
+     dplyr::summarise(n.group=n())
+
+fwrite(head.eunis.grp, file=paste0(path.out, "/eunis_grouped.csv"), sep=",", dec=".", row.names=F)
+
+```
+
+## group eunis classes
+
+```{r}
+
+##head.eunis.tmp <- head %>% 
+     ##group_by(eunis.lvl2, eunis.lvl2.name) %>% 
+     ##dplyr::summarise(n.group=n())
+
+##fwrite(head.eunis.tmp, file=paste0(path.out, "/eunis_grouped.csv"), sep=",", dec=".", row.names=F)
+
+eunis.grp <- read_excel(paste0(path.data,"04_EUNIS/EUNIS_level2_groups_20250812.xlsx"))
+
+vec.eunis <- eunis.grp$eunis.lvl2.grp
+names(vec.eunis) <- eunis.grp$eunis.lvl2
+
+head$eunis.lvl2 <- revalue(head$eunis.lvl2, replace=vec.eunis)
+
+eunis.grp.legend <- unique(eunis.grp[,c("eunis.lvl2.grp", "eunis.lvl2.grp.name")])
+
+head <- left_join(head, eunis.grp.legend, by=c("eunis.lvl2"="eunis.lvl2.grp"))
+
+rm(eunis.grp, vec.eunis, eunis.grp.legend)
+
+```
+
+# SPATIAL
+
+## head to sf
+
+```{r}
+
+sum(head$Longitude>180, na.rm=T)
+sum(head$Latitude>90, na.rm=T)
+
+### filter out coordinates
+head <- head[!head$Longitude>180,]
+head <- head[!head$Latitude>90,]
+
+### save coordinates
+head$lon.wgs <- head$Longitude
+head$lat.wgs <- head$Latitude
+
+### transform to sf
+head.sf <- st_as_sf(head, coords=c("Longitude", "Latitude"), crs=4326)
+
+### transform to project crs
+head.sf <- st_transform(head.sf, crs=proj.crs)
+
+head.coords <- st_coordinates(head.sf)
+
+### save transformed longitude as a separate column
+head.sf$lon.tf <- head.coords[,1]
+head.sf$lat.tf <- head.coords[,2]
+
+### extract correct country to match with names and for per area density
+head.sf <- st_join(head.sf, star.tf["name"])
+
+### extract biogeo region
+head.sf <- st_join(head.sf, biogeo.tf["short_name"])
+head.sf$biogeo.region <- head.sf$short_name
+head.sf$short_name <- NULL
+
+### subset to study area
+head.sf$star <- st_intersects(head.sf, star.union, sparse=F)
+
+rm(head.coords)
+rm(head)
+
+```
+
+# FILTER
+
+```{r}
+
+### remove old filter when rerunning, otherwise counts are off
+head.sf$filter.meta <- NULL
+
+###-### COORDINATES
+
+  ### filtering
+  head.sf$filter.lon <- 0
+  head.sf$filter.lon[is.na(head.sf$Longitude)] <- 1
+  head.sf$filter.lon[head.sf$lon.wgs>180] <- 1
+  head.sf$filter.lon[head.sf$lon.wgs<(-10)] <- 1
+  
+  #head$filter.lat <- 0
+  #head$filter.lat[is.na(head$Latitude)] <- 1
+  
+###-### study area
+  head.sf$filter.star <- 0
+  head.sf$filter.star[!head.sf$star] <- 1
+  
+###-### YEARS
+  
+  head.sf$filter.year <- 0
+  head.sf$filter.year[is.na(head.sf$year)] <- 1
+  
+  #head$filter.month <- 0
+  #head$filter.month[is.na(head$month)] <- 1
+
+  #head$filter.day <- 0
+  #head$filter.day[is.na(head$day)] <- 1  
+  
+  
+###-### DUPLICATES
+  head.sf$filter.dup <- 0
+  head.sf$filter.dup[head.sf$Dataset=="Denmark Naturdata"] <- 1
+  head.sf$filter.dup[!head.sf$RS_DUPL==""] <- 1
+  
+###-### MANIPULATION
+  
+  ### filter out manipulated plots
+  head.sf$filter.manip <- 0
+  head.sf$filter.manip[head.sf$RS_PROJTYP %in% c("permanent (man)", "Permanent (man)") ] <- 1
+
+  #head.sf$filter.foreva <- 0
+  #head.sf$filter.foreva[head.sf$`For.EVA.(Y/N)`=="N" & !head.sf$`ReSurvey.plot.(Y/N)`=="Y"] <- 1
+  
+###-### RESURVEY
+  #head.sf$filter.resobs1 <- 0
+  #head.sf$filter.resobs1[head.sf$RS_TIME >1] <- 1
+
+###-### EUNIS
+  
+  ### non-target habitats
+  head.sf$filter.eunis <- 0
+  head.sf$filter.eunis[head.sf$eunis.lvl1 %in% c("P")] <- 1 ### remove aquatic habitats
+  head.sf$filter.eunis[head.sf$eunis.lvl2 %in% c("XX", "YY", "ZZ")] <- 1 ### remove unclear habiats
+
+###-### LOCATION UNCERTAINTY
+  head.sf$filter.location <- 0
+  head.sf$filter.location[head.sf$`Location.uncertainty.(m)`>=50000] <- 1
+  
+###-### YEAR
+  
+  ### redo for filter breaks (i.e., 20 yr intervals now)
+  cutoff.year <- 1950
+  head.sf$filter.studyperiod <- 0
+  head.sf$filter.studyperiod[head.sf$year<cutoff.year] <- 1
+  
+###-### AREA
+  #head.sf$filter.area <- 0
+  #head.sf$filter.area[is.na(head.sf$area)] <- 1
+
+###-### ALL FILTERS
+  head.sf <- head.sf %>%
+    mutate(filter.meta = if_any(starts_with("filter."), ~ . == 1)+0)
+
+```
+
+## filtering table
+
+```{r}
+
+head.filter <- head.sf %>%
+  st_drop_geometry() %>% 
+  select(starts_with("filter.")) %>% 
+  colSums() %>% 
+  as.data.frame()%>%
+  rownames_to_column(var = "filter.name") %>%
+  mutate(filter_name = gsub("filter\\.", "", filter.name)) %>%
+  rename(plots = ".")
+
+head.filter$filter.details <- revalue(head.filter$filter.name, replace=c("filter.lon"="coordinates missing",
+                                                                         "filter.resobs1"="ReSurvey observation >1",
+                                                                         "filter.star" = "outside study area",
+                                                                         "filter.hab"="surface waters",
+                                                                         "filter.year"="year missing",
+                                                                         "filter.studyperiod"="outside study period",
+                                                                         "filter.manip"="manipulated",
+                                                                         "filter.foreva"="manipulated (EVA)",
+                                                                         "filter.location"="location uncertain\n>50km",
+                                                                         "filter.meta"="all filters applied",
+                                                                         "filter.eunis"="non-target habitat",
+                                                                         "filter.area"="area missing",
+                                                                         "filter.dup" ="potential duplicate"))
+
+head.filter$filter.details <- factor(head.filter$filter.details, 
+                              levels=head.filter$filter.details[order(head.filter$plots)])
+
+head.filter$final <- "no"
+head.filter$final[head.filter$filter.details=="all filters applied"] <- "yes"
+
+### PLOT
+plot.head.filter <- ggplot(head.filter) + my.theme +
+  geom_bar(aes(y=filter.details, x=plots, fill=final), stat="identity") +
+  scale_x_continuous(expand=expansion(mult=c(0,0.1)))+
+  labs(title=paste0(nrow(head.sf)-head.filter$plots[head.filter$filter_name=="meta"], " plots remain"),
+       x="number of plots",
+       y="")+ 
+  geom_label(aes(y=filter.details, x=10000, label=plots, hjust=0, fontface="bold")) +
+  theme(legend.position="none",
+        axis.text.y=element_text(size=10, hjust=0, face="bold"))
+
+ggsave(filename=paste0(path.out,"/head_filterplot.png"),
+       plot=plot.head.filter,
+       width=10, height=15, unit="cm",
+       dpi=900,
+       bg="white")
+
+```
+
+## filter head
+
+```{r}
+
+head.sf <- head.sf[head.sf$filter.meta==0,]
+
+### create factors here
+head.sf$yr.interval.pretty <- paste0(head.sf$yr.interval, "\n-\n", head.sf$yr.interval+yr.int.length-1)
+head.sf$yr.interval.pretty.1line <- gsub("\n-\n", "-", head.sf$yr.interval.pretty)
+
+table(head.sf$eunis.method)
+
+```
+
+
+# PLOTS
+
+```{r}
+
+plot <- fread(paste0(path.data,"01_EVA/200_Motivate20250415_taxa_concepts_unified.csv"), 
+         header=T,
+         sep = "\t")
+
+colnames(plot) <- gsub(" ", ".", colnames(plot))
+
+### to be implemented AFTER this server run for better compatibility and file structure ;-)
+plot$sPlot.concept.unified <- gsub(" ", "_", plot$sPlot.concept.unified)
+
+### small editing column to create a "presence" column (important later!!!)
+plot$occ <- 1
+
+```
+
+## filtering plots
+
+```{r}
+
+### enforce referential integrity between plot and (filtered) header as well as vice versa
+plot <- plot[plot$PlotObservationID %in% head.sf$PlotObservationID,]
+head.sf <- head.sf[head.sf$PlotObservationID %in% unique(plot$PlotObservationID),]
+
+### remove non-vascular plants
+plot <- plot[plot$Taxon.group.ID==1,]
+
+### transform layers into 1
+plot <- plot %>% 
+  group_by(PlotObservationID, sPlot.concept.unified) %>% 
+  dplyr::summarise(n=sum(occ)) %>% 
+  mutate(occ=1)
+
+### transform to data table for faster handling (above operations run slower with data.table)
+plot <- as.data.table(plot)
+
+```
+
+## species richness
+
+```{r}
+
+sprich <- plot %>% group_by(PlotObservationID) %>% dplyr::summarise(nspec=length(unique(sPlot.concept.unified)))
+
+head.sf <- left_join(head.sf, sprich, by="PlotObservationID")
+
+rm(sprich)
+
+```
+
+# FIGURES I
+
+## raster study area
+
+```{r}
+### make a metric bbox
+bbox <- st_bbox(star.tf)
+
+### set resolution (in km)
+res <- 100
+
+### create raster
+my.rast <- rast(
+  xmin = bbox["xmin"],
+  xmax = bbox["xmax"],
+  ymin = bbox["ymin"],
+  ymax = bbox["ymax"],
+  resolution = c(res*1000, res*1000), # Resolution in meters
+  crs = "EPSG:3035" # Match the CRS of the sf object
+)
+
+values(my.rast) <- 0
+
+my.rast <- mask(my.rast, star.tf)
+
+
+```
+
+## find raster cell for every plot
+
+```{r}
+
+head.sf$cell <- cells(my.rast, vect(head.sf))[,2]
+
+head.sf <- head.sf[!is.na(head.sf$cell),] ### remove 46 points that are on the border of the study area
+
+```
+
+# SAMPLING
+
+## density
+
+### overall
+
+```{r}
+
+cell.cts <- data.frame(table(head.sf$cell))
+colnames(cell.cts) <- c("cell", "count")
+cell.cts$cell <- as.numeric(as.character(cell.cts$cell))
+
+dens.rast <- my.rast
+
+dens.rast[cell.cts$cell] <- cell.cts$count
+
+dens.rast <- mask(dens.rast, star.tf)
+
+dens.df <- as.data.frame(dens.rast, xy=T)
+
+colnames(dens.df) <- c("x", "y", "plots")
+
+range(dens.df$plots)
+
+br.plots <- c(0, 1, 10, 50, 100, 500, 1000, 5000, Inf)
+lab.plots <- c("0", "1-9", "10-49", "50-99", "100-499", "500-999", "1000-4999", " ≥5000")
+
+dens.df$plots.cut <- cut(dens.df$plots,
+                         breaks=br.plots,
+                         labels=lab.plots,
+                         include.lowest=T,
+                         right=F)
+
+table(dens.df$plots.cut)
+
+pal.plots <- colorRampPalette(c("#a1d99b", "#00441b"))
+col.plots <- c("#fde0dd", pal.plots(length(lab.plots)-1))
+names(col.plots) <- lab.plots
+
+plot.dens <- ggplot()+my.theme+
+  geom_raster(dens.df, mapping=aes(x=x,y=y, fill=plots.cut))+
+  scale_fill_manual(name="plots per \n50x50 km cell", values=col.plots)+
+  guides(fill=guide_legend(byrow=T))+
+  geom_sf(star.tf, mapping=aes(), fill="transparent", color="black")+
+  labs(x="",
+       y="")+
+  theme(legend.position="bottom")
+
+ggsave(filename=paste0(path.out,"/dens_total.png"),
+       plot=plot.dens,
+       width=wide, unit="cm",
+       dpi=900,
+       bg="white")
+
+```
+
+### per decade
+
+```{r}
+
+dens.blank <- dens.rast
+dens.blank[] <- 0
+
+dens.dec.list <- list()
+dens.rast.list <- list()
+
+for (i in 1:length(unique(head.sf$yr.interval.pretty))){
+
+  d <- sort(unique(head.sf$yr.interval.pretty))[i]
+  
+  ### progress bar
+  print(paste0("Procesing ", d))
+  
+  ### subset head.sf
+  head.sf.dec <- head.sf[head.sf$yr.interval.pretty==d,]
+  
+  ### extract plot counts, mask & convert to df
+  dens.dec <- rasterize(vect(head.sf.dec), dens.blank, fun="count", background=0)
+  dens.dec <- mask(dens.dec, star.tf)
+  
+  dens.rast.list[[i]] <- dens.dec
+  
+  
+  dens.dec.df <- as.data.frame(dens.dec, na.rm=T, xy=T)
+  
+
+  ### cut df for easier plotting
+  dens.dec.df$plots.cut <- cut(dens.dec.df$count,
+                               breaks=br.plots,
+                               labels=lab.plots,
+                               include.lowest=T)
+  
+  n.dec <- sum(dens.dec.df$count)
+  
+  ### add a column for the decade
+  dens.dec.df$yr.interval.pretty <- d
+  
+  ### add a binary column
+  dens.dec.df$plots.bin <- dens.dec.df$count>0
+  
+  
+  ### save to list
+  dens.dec.list[[i]] <- dens.dec.df
+  names(dens.dec.list)[i] <- d
+  
+}
+
+dens.dec.df.all <- bind_rows(dens.dec.list)
+
+plot.dens.dec.all <- ggplot(dens.dec.df.all)+my.theme+
+  geom_raster(dens.dec.df.all, mapping=aes(x=x, y=y, fill=plots.cut))+
+  scale_fill_manual(name="plots per \n50x50 km cell", values=col.plots, na.value="white")+
+  geom_sf(star.tf, mapping=aes(), fill="transparent", color="black")+
+  labs(x="",
+       y="")+
+  theme(legend.position="none",
+        legend.direction="horizontal",
+        legend.byrow = T,
+        axis.text=element_blank(),
+        axis.ticks=element_blank())+
+  facet_wrap(~yr.interval.pretty, nrow=2)
+
+ggsave(filename=paste0(path.out,"/dens_dec.png"),
+       plot=plot.dens.dec.all,
+       width=wide, unit="cm",
+       dpi=900,
+       bg="white")
+
+```
+
+### by country
+
+```{r}
+
+### create a frequency table per decade
+  country.dec <- data.frame(table(head.sf$name, head.sf$yr.interval.pretty))
+  colnames(country.dec) <- c("country", "yr.interval.pretty", "plots")
+  
+  country.dec$country <- as.character(country.dec$country)
+  #country.dec$yr.interval.pretty <- as.character(country.dec$yr.interval)
+  
+  ### create an area table and join with frequency table
+    star.area <- st_drop_geometry(star.tf[,c("name", "area.km2")])
+  
+    country.dec <- left_join(country.dec, star.area, by=c("country"="name"))
+  
+  ### calculate plots per area (multiply with 1000 for better breaks)
+    country.dec$plots.km2x1000 <- country.dec$plots/country.dec$area.km2*1000
+
+
+### make a helper table
+  ctry.helper <- country.dec %>% group_by(country) %>% dplyr::summarise(plots.tot=sum(plots))
+  ctry.helper <- left_join(ctry.helper, star.area, by=c("country"="name"))
+  
+  ctry.helper$plots.km2x1000 <- ctry.helper$plots.tot/ctry.helper$area.km2*1000
+  
+  ctry.helper$country.fac <- factor(ctry.helper$country, levels=ctry.helper$country[order(ctry.helper$plots.km2x1000)], ordered=T)
+  
+  ctry.helper$plots.km2x1000.rd <- round(ctry.helper$plots.km2x1000)
+  
+  ctry.helper$ctry.lab <- paste0(ctry.helper$country, "=", ctry.helper$plots.km2x1000.rd)
+  
+### cut for easier plotting with assigned color vector
+br.ctryct <- c(-Inf, 0, 1, 2, 5, 10, 20, 50, 100, Inf) 
+lab.ctryct <- c("0", ">0-1", ">1-2", "2-4", "5-9", "10-19", "20-49", "50-99", "100+")
+
+country.dec$plots.km2x1000.cut <- cut(country.dec$plots.km2x1000, breaks=br.ctryct, labels=lab.ctryct, include.lowest=T)
+
+col.ctry <- c("grey75", "#8e0152", "#c51b7d", "#de77ae", "#f1b6da", "#b8e186", "#7fbc41", "#4d9221",  "#276419")
+names(col.ctry) <- lab.ctryct
+
+country.dec <- left_join(country.dec, ctry.helper, by="country")
+
+country.dec$ctry.lab.fac <- factor(country.dec$ctry.lab, levels=ctry.helper$ctry.lab[order(ctry.helper$plots.km2x1000)], ordered=T)
+
+### final plot
+plot.ctry.dec <- ggplot(country.dec, aes(x=yr.interval.pretty, y=ctry.lab.fac, fill=plots.km2x1000.cut))+my.theme+
+  geom_tile(width=0.9, height=0.9)+
+  scale_fill_manual(name= "plots/decade\n(per 1000 km²)", values=col.ctry)+
+  labs(x="",
+       y="country (plots/1000km²)")+
+  theme(legend.position="right",
+        axis.text.y=element_text(hjust=0))
+
+ggsave(filename=paste0(path.out,"/country_dec.png"),
+       plot=plot.ctry.dec,
+       width=wide, unit="cm",
+       dpi=900,
+       bg="white")
+
+```
+
+### by biogeo region
+
+```{r}
+
+### create a frequency table per decade
+  biogeo.dec <- data.frame(table(head.sf$biogeo.region, head.sf$yr.interval.pretty))
+  colnames(biogeo.dec) <- c("biogeo.region", "yr.interval.pretty", "plots")
+  
+  biogeo.dec$biogeo.region <- as.character(biogeo.dec$biogeo.region)
+  #biogeo.dec$yr.interval <- as.character(biogeo.dec$yr.interval)
+
+  ### create an area table and join with frequency table
+    biogeo.area <- st_drop_geometry(biogeo.tf[,c("short_name", "area.km2")])
+  
+    biogeo.dec <- left_join(biogeo.dec, biogeo.area, by=c("biogeo.region"="short_name"))
+    
+  ### calculate plots per area (multiply with 1000 for better breaks)
+    biogeo.dec$plots.km2x1000 <- biogeo.dec$plots/biogeo.dec$area.km2*1000
+
+
+### make a helper table
+  biogeo.helper <- biogeo.dec %>% group_by(biogeo.region) %>% dplyr::summarise(plots.tot=sum(plots))
+  biogeo.helper <- left_join(biogeo.helper, biogeo.area, by=c("biogeo.region"="short_name"))
+  
+  biogeo.helper$plots.km2x1000 <- biogeo.helper$plots.tot/biogeo.helper$area.km2*1000
+  
+  colnames(biogeo.helper)
+  
+  
+  biogeo.helper$biogeo.region.fac <- factor(biogeo.helper$biogeo.region, levels=biogeo.helper$biogeo.region[order(biogeo.helper$plots.km2x1000)], ordered=T)
+  
+  biogeo.helper$plots.km2x1000.rd <- round(biogeo.helper$plots.km2x1000)
+  
+  biogeo.helper$biogeo.region.lab <- paste0(biogeo.helper$biogeo.region, "=", biogeo.helper$plots.km2x1000.rd)
+  
+### cut for easier plotting with assigned color vector
+br.ctryct <- c(-Inf, 0, 1, 2, 5, 10, 20, 50, 100, Inf) 
+lab.ctryct <- c("0", ">0-1", ">1-2", ">2-4", ">5-9", ">10-19", ">20-49", ">50-99", ">100")
+
+biogeo.dec$plots.km2x1000.cut <- cut(biogeo.dec$plots.km2x1000, breaks=br.ctryct, labels=lab.ctryct, include.lowest=T)
+
+col.ctry <- c("grey75", "#8e0152", "#c51b7d", "#de77ae", "#f1b6da", "#b8e186", "#7fbc41", "#4d9221",  "#276419")
+names(col.ctry) <- lab.ctryct
+
+biogeo.dec <- left_join(biogeo.dec, biogeo.helper, by="biogeo.region")
+
+biogeo.dec$biogeo.lab.fac <- factor(biogeo.dec$biogeo.region.lab, levels=biogeo.helper$biogeo.region.lab[order(biogeo.helper$plots.km2x1000)], ordered=T)
+
+### final plot
+plot.biogeo.region.dec <- ggplot(biogeo.dec, aes(x=yr.interval.pretty, y=biogeo.lab.fac, fill=plots.km2x1000.cut))+my.theme+
+  geom_tile(width=0.9, height=0.9)+
+  scale_fill_manual(name= "plots\n(per 1000 km²)", values=col.ctry)+
+  labs(x="",
+       y="biogeographic region (plots/1000 km²)")+
+  theme(legend.position="right",
+        axis.text.y=element_text(hjust=0))
+
+ggsave(filename=paste0(path.out,"/biogeoregion_dec.png"),
+       plot=plot.biogeo.region.dec,
+       width=wide, unit="cm",
+       dpi=900,
+       bg="white")
+
+
+```
+
+## habitat
+
+### habitats lvl1
+
+```{r}
+
+### helper table
+hab.helper <- head.sf %>% 
+  st_drop_geometry() %>% 
+  group_by(yr.interval.pretty.1line) %>% 
+  dplyr::summarise(n.tot=n())
+
+hab.helper$y=90
+
+hab.helper$label.1k <- paste0(round(hab.helper$n.tot/1000), "k")
+
+### plot table
+habitat <- head.sf %>% 
+  st_drop_geometry() %>% 
+  group_by(yr.interval.pretty.1line, eunis.lvl1.name) %>% 
+  dplyr::summarise(n=n()) %>% 
+  left_join(hab.helper, by="yr.interval.pretty.1line") %>% 
+  mutate(hab.rel= (n/n.tot)*100,
+         eunis.lvl1.name=tolower(eunis.lvl1.name),
+         eunis.lvl1.name=recode(eunis.lvl1.name, 
+                                 "forests and other wooded land"="forests",
+                                 "inland habitats with no or little soil and mostly with sparse vegetation"="inland sparsely vegetated",
+                                 "grasslands and lands dominated by forbs, mosses or lichens"="grasslands",
+                                 "vegetated man-made habitats" = "anthropogenic",
+                                 "coastal habitats" = "coastal",
+                                 "marine habitats" = "marine",
+                                .default = eunis.lvl1.name
+                                           ),
+         eunis.lvl1.name=factor(eunis.lvl1.name, levels=c(  "forests",
+                                                            "grasslands",
+                                                            "heathlands, scrub and tundra",
+                                                            "inland sparsely vegetated",
+                                                            "anthropogenic",
+                                                            "marine",
+                                                            "coastal",
+                                                            "wetlands",
+                                                            "class not possible",
+                                                            "class failed",  
+                                                            "class ambiguous"
+                                                          ), ordered=T ))
+
+
+### PLOT
+plot.habdec.lvl1 <- ggplot()+my.theme+
+  geom_bar(habitat, mapping=aes(x=yr.interval.pretty.1line, y=hab.rel, fill=eunis.lvl1.name), stat="identity", width=0.66)+
+  scale_fill_manual(name="", values=col.hab)+
+  guides(fill=guide_legend(nrow=3))+
+  scale_y_continuous(expand=expansion(mult=c(0,0)), labels=seq(0,100,10), breaks=seq(0,100,10))+
+  labs(x="",
+       y="EUNIS level 1 (%)")+
+  theme(
+  legend.key.size = unit(0.4, "cm"),
+  legend.text = element_text(size = 8),
+  legend.margin = margin(-20, 0, 0, 0),
+  legend.spacing = unit(0, "cm"),
+  plot.margin=margin(2,2,0,0),
+  axis.title.x = element_text(margin = margin(t = 0, r = 0, b = 0, l = 0)),
+  axis.text.x = element_text(margin = margin(t = 0)) )+
+  geom_label(data=hab.helper, aes(x=yr.interval.pretty.1line, y=y, label=label.1k), size=4, fontface="bold", color="white", label.size=0, fill=NA)
+
+```
+
+### habitats lvl 2
+
+```{r}
+
+eunis.legend$name <- eunis.legend$`EUNIS-2023 habitat name`
+
+habitat2 <- head.sf %>%
+     st_drop_geometry() %>% 
+     group_by(yr.interval.pretty.1line, eunis.lvl2) %>% 
+     dplyr::summarise(n=n()) %>% 
+     left_join(hab.helper, by="yr.interval.pretty.1line") %>% 
+     mutate(hab.rel= (n/n.tot)*100,
+         eunis.lvl1=substr(eunis.lvl2, 1,1)) %>% 
+     left_join(eunis.legend, by=c("eunis.lvl1"="EUNIS 2023 code")) %>% 
+     mutate(hab.rel= (n/n.tot)*100,
+            name=tolower(name),
+            name=recode(name, 
+                        "forests and other wooded land"="forests",
+                        "inland habitats with no or little soil and mostly with sparse vegetation"="inland sparsely vegetated",
+                        "grasslands and lands dominated by forbs, mosses or lichens"="grasslands",
+                        "vegetated man-made habitats" = "anthropogenic",
+                        "coastal habitats" = "coastal",
+                        "marine habitats" = "marine",
+                                .default = name
+                                           ),
+         name=factor(name, levels=c("forests",
+                                    "grasslands",
+                                    "heathlands, scrub and tundra",
+                                    "inland sparsely vegetated",
+                                    "anthropogenic",
+                                    "marine",
+                                    "coastal",
+                                    "wetlands",
+                                    "class not possible",
+                                    "class failed",  
+                                    "class ambiguous"), ordered=T ))
+    
+
+
+
+### set levels for grid
+ncol <- ceiling(sqrt(length(unique(habitat2$yr.interval.pretty.1line))))
+
+
+### plot level 2
+plot.habdec.lvl2 <- ggplot(habitat2)+my.theme+
+     geom_bar(aes(x=eunis.lvl2, y=hab.rel, fill=name), stat="identity", width=0.66)+
+     scale_fill_manual(name="", values=col.hab)+
+     scale_y_continuous(expand=expansion(mult=c(0,0)))+
+     labs(x="",
+          y="EUNIS level 2 (%)")+
+     theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5, size=6, margin=margin(0,0,0,0)),
+           legend.position="none",
+           plot.margin=margin(2,2,0,0),
+           axis.title.x = element_text(margin = margin(t = 0, r = 0, b = 0, l = 0)))+
+     facet_wrap(.~yr.interval.pretty.1line, scales="free", ncol=2)
+
+```
+
+### habitat grid
+
+```{r}
+
+plot.habdec.grid1x2 <- plot_grid(plot.habdec.lvl1, plot.habdec.lvl2,
+                                 nrow=2, align="hv", axis="lt", labels=c("A", "B"),
+                                 rel_heights=c(0.6,1))
+
+ggsave(filename=paste0(path.out,"/habitat_dec_grid1x2.png"),
+       plot=plot.habdec.grid1x2,
+       width=15.8, height=21, unit="cm",
+       dpi=900,
+       bg="white")
+
+```
+
+## raster centroids
+
+exclude cells that are in ocean exclude cells that have no data (make a filter column)
+
+```{r}
+
+centroids <- as.data.frame(xyFromCell(my.rast, 1:ncell(my.rast)), na.rm=T)
+centroids$cell <- 1:ncell(my.rast)
+
+### look at only the cells you have any data on
+centroids$cell.data <- !centroids$cell %in% head.sf$cell
+
+### remove the cells in the ocean
+centroids$ocean <- centroids$cell %in% which(is.na(values(my.rast)))
+
+```
+
+## biogeo region per cell
+
+```{r}
+
+### extract the coverage of every area per raster cell
+biogeo.list <- exact_extract(my.rast, biogeo.tf, include_cell=T, include_xy=T)
+
+### add a naming column for every region 
+for (i in seq_along(biogeo.list)) {
+  if (nrow(biogeo.list[[i]]) > 0) {
+    biogeo.list[[i]]$biogeo.region <- biogeo.tf$short_name[i]
+  }
+}
+
+### bind rows together
+biogeo.df <- rbindlist(biogeo.list, fill=T)
+
+### choose individual area contributions
+biogeo.area <- biogeo.df %>% 
+     pivot_wider(id_cols=cell, names_from=biogeo.region, values_from=coverage_fraction, values_fill = 0) %>% 
+     rowwise() %>%
+     mutate(across(-cell, ~ .x / sum(c_across(-cell)))) %>%
+     mutate(row_total = sum(c_across(-cell))) %>%
+     ungroup()
+     
+     ### rejoin with centroids
+     centroids <- left_join(centroids, biogeo.area, by="cell")
+
+### choose maximum
+biogeo.max <- biogeo.df %>% 
+     group_by(cell) %>% 
+     slice_max(coverage_fraction, with_ties=F) %>% 
+     mutate(biogeo.region.bymax=biogeo.region) %>% 
+     select(-biogeo.region, -x, -y)
+
+     ### rejoin with centroids
+     centroids <- left_join(centroids, biogeo.max, by="cell")
+
+colnames(centroids)
+
+```
+
+## sampling effort per site per timestep
+
+```{r}
+
+sample.site <- head.sf %>% 
+  st_drop_geometry() %>% 
+  group_by(cell, yr.interval.pretty) %>% 
+  dplyr::summarise(n.sample=n(), .groups="drop") %>% 
+  complete(cell, yr.interval.pretty, fill=list(n.sample=0))
+
+```
+
+# TAXA
+
+## make taxa table
+
+```{r}
+
+### cut n into scale
+  br.n <- c(-Inf,50, 100, 200, 500, 1000, 2000, 5000, 10000, Inf)
+  lab.n <- c("<50",
+            "50\n-\n99", 
+            "100\n-\n199", 
+            "200\n-\n499", 
+            "500\n-\n999", 
+            "1000\n-\n1999", 
+            "2000\n-\n4999", 
+            "5000\n-\n9999", 
+            "10000+")
+
+### create taxonomy table from filtered plots
+  taxa <- plot %>% 
+    left_join(st_drop_geometry(head.sf), by="PlotObservationID")  %>% 
+    group_by(sPlot.concept.unified) %>% 
+    dplyr::summarise(n=n(),
+                     n.rel=n/nrow(plot)*100,
+                     n.cut=cut(n, breaks=br.n, labels=lab.n, right=F),
+                     year.first=min(year),
+                     year.last=max(year),
+                     year.span=year.last-year.first,
+                     yr.interval.first=min(yr.interval), 
+                     yr.interval.last=max(yr.interval),
+                     yr.interval.span=length(unique(yr.interval)))%>% 
+    mutate(genus.only = !str_detect(sPlot.concept.unified, "_"))
+
+### helber object for total taxa  
+  n.taxa.tot <- nrow(taxa)
+  
+```
+
+## temporal distribution
+
+```{r}
+
+### modelling certainty
+  pal.mod <- colorRampPalette(c("#ffffe5", "#00441b"))
+  col.mod <- pal.mod(length(lab.n))
+  names(col.mod) <- lab.n
+
+### make a helper table
+  taxa.helper <- taxa %>%
+    group_by(n.cut) %>% 
+    dplyr::summarise(n=n(),
+                     n.rel=n/n.taxa.tot*100) %>% 
+    mutate(r.sum=rev(cumsum(rev(n))))
+  
+### PLOTS
+  
+  ### taxa for modelling
+    plot.taxa <- ggplot(taxa.helper)+my.theme+
+      geom_bar(aes(x=n.cut, fill=n.cut, y=n.rel), color="black", stat="identity", width=0.66)+
+      scale_fill_manual("",values=col.mod)+
+      scale_y_continuous(expand=expansion(mult=c(0,0)), breaks=seq(0,100,10), limits=c(0,60))+
+      scale_x_discrete(expand=expansion(add=c(0.5,0.5)))+
+      labs(x="total occurrences",
+           y="taxa (%)")+
+      theme(legend.position="bottom",
+            legend.text.position="bottom",
+            legend.text=element_text(size=4))+
+      guides(fill=guide_legend(nrow=1))+
+      geom_label(mapping=aes(x=n.cut, y=20, label=n), angle=90, vjust=0.5, size=3)+
+      geom_segment(aes(x=length(col.mod), xend=0.125, y=40, yend=40),
+                   arrow=arrow(length=unit(0.33, "cm"), type="closed"),
+                   color="black")+
+      geom_label(mapping=aes(x=n.cut, y=40, label=r.sum), color="black", size=3)+
+      geom_vline(xintercept=2.5, color="black")+
+      annotate("text", x=3.5, y=45, label="cumulative sums",
+               color="black")
+    
+  ### records for clipping
+    plot.decfirst <- ggplot(taxa)+my.theme+
+      geom_bar(aes(x=yr.interval.first, fill=n.cut),  color="black",width=7.5)+
+      scale_fill_manual(values=col.mod)+
+      scale_y_continuous(expand=expansion(mult=c(0,0)))+
+      scale_x_continuous(expand=expansion(mult=c(0.01,0.01)), breaks=unique(taxa$yr.interval.first))+
+      labs(x="first timestep",
+           y="number of taxa")+
+      theme(legend.position="none")
+    
+    plot.declast <- ggplot(taxa)+my.theme+
+      geom_bar(aes(x=yr.interval.last, fill=n.cut), color="black", width=7.5)+
+      scale_fill_manual(values=col.mod)+
+      scale_y_continuous(expand=expansion(mult=c(0,0)))+
+      scale_x_continuous(expand=expansion(mult=c(0.01,0.01)), breaks=unique(taxa$yr.interval.first))+
+      labs(x="last timestep",
+           y="number of taxa")+
+      theme(legend.position="none")
+  
+    plot.decspan <- ggplot(taxa)+my.theme+
+      geom_bar(aes(x=yr.interval.span, fill=n.cut), color="black", width=0.66)+
+      scale_fill_manual(values=col.mod)+
+      scale_x_continuous(expand=expansion(mult=c(0.01,0.01)), breaks=seq(0,length(unique(taxa$yr.interval.span)),1))+
+      scale_y_continuous(expand=expansion(mult=c(0,0.1)))+
+      labs(x="number of timesteps",
+           y="number of taxa")+
+      theme(legend.position="none")
+  
+    
+  lom.decade <- as.matrix(rbind(c(1,1,1,1),
+                                c(1,1,1,1),
+                                c(1,1,1,1),
+                                c(2,2,3,3),
+                                c(2,2,3,3),
+                                c(4,4,4,4),
+                                c(4,4,4,4)
+                                ))
+  
+  grid.taxa <- grid.arrange(plot.taxa+theme(legend.position="none"),
+                              plot.decfirst, plot.declast,
+                              plot.decspan,
+                              layout_matrix=lom.decade)  
+
+### export
+ggsave(filename=paste0(path.out,"/taxa.png"),
+       plot=grid.taxa,
+       width=wide, 
+       height=high,
+       unit="cm",
+       dpi=900,
+       bg="white")
+
+
+```
+
+## biogeo origin
+
+mail to Irena Axmanova on August 11th 2025 probably November
+currently using temporary dataset provided by SK
+status = status for all of Europe (?), might also include areas outside of study area...
+many species missing, assessments for Austria are weird...
+
+```{r}
+
+origin <- read_excel(paste0(path.data,"05_TAXA/02_biogeo/MOTIVATE_species_for_native_non-native_classification-IA.xlsx"))
+
+colnames(origin) <- tolower(gsub(" ", ".", colnames(origin), fixed=T))
+
+table(origin$origineurope[origin$taxonomy=="AU-Austria"])
+
+### group by species and unify taxa
+origin.grp <- origin %>% 
+  group_by(splot.concept.unified) %>% 
+  dplyr::summarise(status=paste(unique(origineurope),collapse=", "),
+                   n.status=length(unique(origineurope)),
+                   n.tax=length(unique(taxonomy))
+                   ) %>% 
+  mutate(status=revalue(status, replace=c("neo"="neophyte",
+                                          "arch"="archaeophyte")),
+         splot.join=gsub(" ", "_", splot.concept.unified, fixed=T))
+
+taxa <- left_join(taxa, origin.grp, by=c("sPlot.concept.unified"="splot.join"))
+
+table(origin.grp$status)
+
+
+write.table(taxa, file="./taxtbl.csv", row.names=F, sep=";", na="")
+
+```
+
+## Red List
+
+```{r}
+
+redlist <- read.csv(paste0(path.data,"05_TAXA/03_redlist/redlist_MOTIVATE_subset.csv"), sep="\t")
+
+table(redlist$Threat, redlist$Country)
+table(redlist$Redlist_cat, redlist$Country)
+
+table(redlist$redlist_source)
+
+table(redlist$V1)
+length(unique(redlist$V1))
+nrow(redlist)-sum(is.na(redlist$V1))
+
+nrow(redlist)
+length(unique(redlist$sPlot.concept.unified))
+
+unique(redlist$Redlist_cat)
+
+redlist.test <- redlist %>% 
+  filter(redlist_source %in% c("rl_NationalRL")) %>% 
+  group_by(sPlot.concept.unified, Country) %>% 
+  dplyr::summarise(threat.tot=paste(unique(Threat), collapse=", "),
+                   n.threat=length(unique(Threat)))
+
+sum(redlist.test$n.threat>1)
+
+### national red lists
+redlist$threat.fac <- factor(redlist$Threat, levels=c("not_evaluated_dd", "not_threatened","threatened","extinct"), ordered=T)
+
+redlist.nat <- redlist %>% 
+  filter(redlist_source %in% c("rl_NationalRL")) %>% 
+  select(sPlot.concept.unified, Country, threat.fac) %>% 
+  pivot_wider(names_from=Country, 
+              values_from=threat.fac, 
+              values_fill=NA, 
+              values_fn=~ if (all(is.na(.x))) NA_real_ else max(.x, na.rm = TRUE))
+
+unique(redlist$Threat)
+
+
+
+```
+
+## Traits
+
+## EIVT
+
+```{r}
+
+
+```
+
+
+## EIVE
+
+```{r}
+
+eive <- read_excel(paste0(path.data,"./05_TAXA/04_eive/vegetation_classification_and_survey-004-007-g008.xlsx"), sheet="mainTable")
+
+
+sum(taxa$sPlot.concept.unified %in% gsub(" ", "_",eive$TaxonConcept, fixed=T))/n.taxa.tot*100
+
+
+```
+
+# RUN ALL
+
+```{r}
+
+
+```
+
+# EXPORT
+
+write head, plots and centroids to the Data Input folder
+
+```{r}
+
+length(unique(head.sf$PlotObservationID))
+length(unique(plot$PlotObservationID))
+
+plot <- plot[plot$PlotObservationID %in% head.sf$PlotObservationID,]
+head.sf <- head.sf[head.sf$PlotObservationID %in% unique(plot$PlotObservationID),]
+
+### head
+head.out <- st_drop_geometry(head.sf)
+
+sum(is.na(head.out$nspec))
+
+fwrite(head.out, file=paste0("../02_FORMATSERVER/01_INPUT/head.csv"), sep=";", dec=",", row.names=F)
+
+### plot
+fwrite(plot, file=paste0("../02_FORMATSERVER/01_INPUT/plot.csv"), sep=";", dec=",", row.names=F)
+
+### export to next step
+fwrite(centroids, file="../02_FORMATSERVER/01_INPUT/centroids.csv", sep=";", dec=",", row.names=F)
+
+### taxa
+fwrite(taxa, file="../04_RWD_Model_Output/01_INPUT/taxa.csv", sep=";", dec=",", row.names=F)
+
+### write raster to input of model output
+writeRaster(my.rast, filename=paste0("../04_RWD_Model_Output/01_INPUT/myrast_", res, ".tif"), overwrite=T)
+
+```
+
+# ARCHIVE
+
+## eunis lvl1
+
+```{r}
+
+### read in EUNIS legend (edited by MG)
+     eunis<- as.data.table(read_excel("04_EUNIS/EUNIS-ESy-2022-10-16_legendfrom ESYfile.xlsx", sheet = "MG_edit"))
+
+### create a duplicate eunis column for checking
+     head$EUNIS <- head$Expert.system
+    
+### add a column for blanks and unidentified/mixed habitats
+     head$EUNIS[head$EUNIS %in% c("")] <- "X" ### replace "" with X for unclassified
+     head$EUNIS[head$EUNIS %in% c("~")] <- "Y" ### replace "~" with Y for unclassifiable
+     
+### extract EUNIS assessment
+     head.esy <- head[, .(EUNIS = unlist(tstrsplit(EUNIS, ","))), by = PlotObservationID]  # Separate rows by EUNIS
+  
+  ### level 1
+     head.esy$lvl1 <- substr(head.esy$EUNIS, 1,1)
+     
+     ### head.esy$lvl1 <- gsub("[^A-Za-z]", "", head.esy$EUNIS) ### to get more precise levels
+     ### head.esy$lvl2 <- substr(head.esy$EUNIS, 1,3) ### to extract level 2
+  
+  ### combine with EUNIS legend
+  
+     head.esy <- merge(head.esy, eunis, by.x = "lvl1", by.y = "EUNIS.code", all.x = TRUE) # Left join with eunis
+     
+     head.esy <- head.esy[, .(
+     eunis.countlvl1 = uniqueN(lvl1),  # Count unique lvl1
+     eunis.lvl1 = paste(sort(unique(lvl1)), collapse = ", ") # Concatenate unique names
+     ), by = PlotObservationID]
+
+# Add final column based on condition
+     head.esy[, eunis.final := ifelse(eunis.countlvl1 > 1, "Z", eunis.lvl1)]
+
+     head.esy <- left_join(head.esy, eunis, by=c("eunis.final"="EUNIS.code"))
+
+### rejoin with head
+     head <- left_join(head, head.esy, by="PlotObservationID")
+  
+     head$eunis.name <- head$EUNIS.name
+
+### remove unnecessary objects
+     rm(list=c("eunis", "head.esy"))
+  
+```
+
+## eunis lvl 2
+
+```{r}
+
+### read in EUNIS legend (edited by MG)
+     eunis<- as.data.table(read_excel("04_EUNIS/EUNIS-ESy-2022-10-16_legendfrom ESYfile.xlsx", sheet = "List1"))
+
+     eunis$EUNIS.code <- gsub("!", "", eunis$`EUNIS.code`, fixed=T) ### remove the !!! for clear codes
+     eunis$EUNIS.name <- gsub("[0-9]", "", eunis$EUNIS.name) ### remove the odd numbering for coniferous forests
+
+     eunis <- eunis[,c("EUNIS.code", "EUNIS.name")] ### reduce dt to necessary columns for easier handling
+     
+     eunis <- unique(eunis) ### subset to unique results
+     
+     
+     
+     
+### edit header
+     head$EUNIS <- head$Expert.system ### make new column for cleaner edits
+     
+     ### add a column for blanks and unidentified/mixed habitats
+     head$EUNIS[head$EUNIS %in% c("")] <- "XXX" ### replace "" with X for unclassified
+     head$EUNIS[head$EUNIS %in% c("~")] <- "YYY" ### replace "~" with Y for unclassifiable
+     
+### separate header rows
+     head.esy <- head[, .(EUNIS = unlist(tstrsplit(EUNIS, ","))), by = PlotObservationID]  # Separate rows by EUNIS
+     
+     head.esy$EUNIS <- gsub("!", "", head.esy$EUNIS)
+     
+     head.esy$lvl2 <- substr(head.esy$EUNIS, 1,3)
+
+     lvl2 <- sort(unique(head.esy$lvl2))
+     
+
+### join with descriptions
+     head.esy <- left_join(head.esy, eunis, by=c("lvl2"="EUNIS.code"))
+     
+     head.esy$EUNIS.name[head.esy$lvl2 %in% c("XXX")] <- "unclassified"
+     head.esy$EUNIS.name[head.esy$lvl2 %in% c("YYY")] <- "unclassifiable"
+     
+     
+     
+```
+
+### WFO match
+
+```{r}
+WFO.download()
+WFO.remember()
+
+taxa.match <- WFO.match(spec.data=taxa$sPlot.concept.unified, WFO.file="./classification.csv", no.dates=T,
+                        counter=250, Fuzzy=0)
+
+
+length(unique(taxa.match$family))
+
+tail(unique(taxa.match$spec.name.ORIG[is.na(taxa.match$family)]), 141)
+
+fam.excl <- c("Conocephalaceae", "Ptychomitriaceae", "Orthotrichaceae", "Encalyptaceae", "Ricciaceae")
+
+fam.excl %in% taxa.match$family ### check for typos
+
+taxa.match$spec.name.ORIG[taxa.match$family %in% fam.excl] ### simply incorrect assinments
+
+taxa.excl <- c("Lycopdium x dubium", "Lycopodium zeilleri")
+```
+
+### investigation of info columns
+
+```{r}
+
+table(head$`ReSurvey.plot.(Y/N)`, useNA="ifany")
+
+table(head$`For.EVA.(Y/N)`, useNA="ifany")
+
+table(head$`Manipulate.(y/n)`, useNA="ifany")
+
+424166+317-(55645+394483)
+
+length(unique(head$Type.of.manipulation))
+View(data.frame(table(head$Type.of.manipulation, useNA="ifany")))
+
+table(head$`For.EVA.(Y/N)`, head$`Manipulate.(y/n)`)
+
+20983+34233+429
+
+table(head$RS_DUPL)
+
+nrow(head)-2382870
+
+table(head$RS_DUPL)
+
+unique(head$RS_DUPL) %in% head$RS_CODE
+
+data.frame(table(head$Location.method))
+
+table(head$RS_PROJTYP, head$`ReSurvey.plot.(Y/N)`)
+
+table(head$RS_TIME)
+
+### make plot ID
+
+resurvey <- head[head$`ReSurvey.plot.(Y/N)`=="Y",]
+
+resurvey$ID.resurvey <- paste(resurvey$ReSurvey.project, resurvey$ReSurvey.site, resurvey$ReSurvey.plot, sep="_")
+
+length(unique(resurvey$ReSurvey.project))
+
+length(unique(resurvey$ReSurvey.site))
+
+tail(unique(resurvey$ReSurvey.plot))
+
+View(unique(resurvey[,c("ReSurvey.plot")]))
+
+sample(resurvey$ReSurvey.plot, 100)
+
+length(unique(resurvey$ID.resurvey))
+
+id.df <- data.frame(table(resurvey$ID.resurvey))
+
+colnames(id.df) <- c("ID", "frequency")
+
+table(id.df$frequency)
+
+resurvey$Country
+
+countcountry <- resurvey %>% group_by(ID.resurvey) %>% dplyr::summarise(count=paste0(length(unique(Country))),
+                                                                        country=paste(unique(Country), collapse=","))
+
+
+### plot-header congruency
+all(head$PlotObservationID %in% plot$PlotObservationID)
+
+all(plot$PlotObservationID %in% head$PlotObservationID)
+
+sum(!head$PlotObservationID %in% plot$PlotObservationID)
+
+head$notinplot <- !head$PlotObservationID %in% plot$PlotObservationID
+
+
+table(head$`ReSurvey.plot.(Y/N)`[head$notinplot])
+
+```
+
+```{r}
+    
+    
+ 
+###-### FRENCH OVERSEAS TERRITORIES  
+  
+  ### create bounding box excluding France to exclude French oversees territories
+    star.bbox <- st_bbox(star[!star$name =="France",], crs=proj.crs)
+    star.bbox["ymin"] <- 20
+    star.bbox["ymax"] <- 72
+  
+  ### and now crop to this bbox
+    star <- st_crop(star, star.bbox)
+    
+    star.bla <- st_intersection(star, st_as_sfc(star.bbox))
+    star.bla <- star.bla[st_coordinates(st_centroid(star.bla))[,2]<= 72,]
+
+###-### RUSSIA
+    
+  ### either the shp provided is broken or the fact that it crosses the date line is an issue, so load separately and exclude provinces
+    
+    rus <- ne_states(country="Russia")
+    
+    rus <- rus[!rus$name %in% c("Kamchatka", 
+                                "Sakha (Yakutia)",  
+                                "Maga Buryatdan", 
+                                "Buryat", 
+                                "Yevrey",  
+                                "Khabarovsk" ,
+                                "Primor'ye" ,
+                                "Chukchi Autonomous Okrug",
+                                "Sakhalin"),] ### removes provinces that span the dividing line of the globe
+    
+    rus <- st_make_valid(rus)
+    
+    rus.bbox <- st_bbox(rus)
+    rus.bbox["xmax"] <- 45
+    rus <- st_crop(rus, rus.bbox)
+    
+    rus <- rus[,c("name", "geometry")]
+    
+    rus <- st_make_valid(rus)
+    
+    rus <- st_union(rus)
+    
+    rus <- st_as_sf(rus)
+    
+    rus$name <- "Russia"
+    colnames(rus)[1] <- "geometry"  
+    st_geometry(rus) <- "geometry"
+
+### FINAL RBIND
+    
+    star <- rbind(rus, star)
+
+    ggplot()+
+      geom_sf(star.bla, mapping=aes(fill=name))
+```
+
+```{r}
+
+  
+  ###-### OLD OLD OLD OLD OLD
+  
+  
+    
+### load Russia 
+  rus <- ne_states(country="Russia")
+  
+  rus <- rus[!rus$name %in% c("Kamchatka", 
+                              "Sakha (Yakutia)",  
+                              "Maga Buryatdan", 
+                              "Buryat", 
+                              "Yevrey",  
+                              "Khabarovsk" ,
+                              "Primor'ye" ,
+                              "Chukchi Autonomous Okrug",
+                              "Sakhalin"),] ### removes provinces that span the dividing line of the globe
+  
+  ### correct validity of shapefiles
+  rus <- st_make_valid(rus)
+  
+  ### combine into one & rconvert to sf, then match columns
+  rus <- rus %>% summarise(name=first(admin),
+                        geometry=st_union(geometry))
+
+### rbind back to star
+  #star <- rbind(rus, star)
+  
+  
+  
+    
+### clip back the bounding box to your study area
+
+  star.bbox <- st_as_sfc(st_bbox(star, crs=proj.crs))
+   # star.bbox["ymin"] <- 27.5
+   # star.bbox["ymax"] <- 60
+   # star.bbox["xmin"] <- -10
+   # star.bbox["xmax"] <- 27.5
+  
+  star.wgs <- st_crop(star, star.bbox)
+  
+  star.tf <- st_transform(star, proj.crs)
+  
+  ### unify for subsetting
+  star.union <- st_union(star.tf)
+  star.union <- st_as_sf(st_buffer(star.union, dist=0.1))
+  
+### plot to check    
+  ggplot()+
+    geom_sf(star.union, mapping=aes())+my.theme+
+    geom_sf(star.tf, mapping=aes(fill=name))+
+    scale_x_continuous(expand=expansion(mult=0.05,0))+
+    scale_y_continuous(expand=expansion(mult=0,0))
+    
+    
+rm(list=c("island.list", "rus", "uk", "fr", "star.fill", "gr", "it", "esp"))
+
+### add area column
+```
+
+### by country
+
+```{r}
+
+
+### create a frequency table per decade
+  country.dec <- data.frame(table(head.sf$name, head.sf$decade))
+  colnames(country.dec) <- c("country", "decade", "plots")
+  
+  country.dec$country <- as.character(country.dec$country)
+  country.dec$decade <- as.character(country.dec$decade)
+  
+  
+  ### create an area table and join with frequency table
+    star.area <- st_drop_geometry(star.tf[,c("name", "area.km2")])
+  
+    country.dec <- left_join(country.dec, star.area, by=c("country"="name"))
+  
+  ### calculate plots per area (multiply with 1000 for better breaks)
+    country.dec$plots.km2x1000 <- country.dec$plots/country.dec$area.km2*1000
+
+
+### make a helper table
+  ctry.helper <- country.dec %>% group_by(country) %>% dplyr::summarise(plots.tot=sum(plots))
+  ctry.helper <- left_join(ctry.helper, star.area, by=c("country"="name"))
+  
+  ctry.helper$plots.km2x1000 <- ctry.helper$plots.tot/ctry.helper$area.km2*1000
+  
+  ctry.helper$country.fac <- factor(ctry.helper$country, levels=ctry.helper$country[order(ctry.helper$plots.km2x1000)], ordered=T)
+  
+  ctry.helper$plots.1k <- round(ctry.helper$plots.tot/1000)
+  ctry.helper$plots.km2x1000.rd <- round(ctry.helper$plots.km2x1000)
+  ctry.helper$ctry.lab <- paste0(ctry.helper$country, "=", ctry.helper$plots.km2x1000, "k")
+
+
+### cut for easier plotting with assigned color vector
+br.ctryct <- c(-Inf, 0, 10, 100, 1000, 10000, 100000, Inf)
+lab.ctryct <- c("0", "1-10", "11-99", "100-999", "1000-9999", "10000-99999", ">100000")
+
+country.dec$plots.km2x1000
+
+country.dec$plots.cut <- cut(country.dec$plots, breaks=br.ctryct, labels=lab.ctryct, include.lowest=F)
+
+col.ctry <- c("#c51b7d", "#de77ae", "#f1b6da", "#b8e186", "#7fbc41", "#4d9221",  "#276419")
+names(col.ctry) <- lab.ctryct
+
+country.dec <- left_join(country.dec, ctry.helper, by="country")
+
+country.dec$ctry.lab.fac <- factor(country.dec$ctry.lab, levels=ctry.helper$ctry.lab[order(ctry.helper$plots.km2x1000)], ordered=T)
+
+### final plot
+plot.ctry.dec <- ggplot(country.dec, aes(x=decade, y=ctry.lab.fac, fill=plots.cut))+my.theme+
+  geom_tile(width=0.9, height=0.9)+
+  scale_fill_manual(name= "plots/decade", values=col.ctry)+
+  labs(x="",
+       y="country (n in 1k plots)")+
+  theme(legend.position="right")
+
+ggsave(filename=paste0(path.out,"/country_dec.png"),
+       plot=plot.ctry.dec,
+       width=wide, unit="cm",
+       bg="white")
+
+```
+
+### alternative eunis
+
+```{r}
+
+### import eunis legend
+
+eunis<- as.data.table(read_excel("04_EUNIS/EUNIS-ESy-2022-10-16_legendfrom ESYfile_raw.xlsx", 
+    sheet = "List1"))
+
+eunis.lvl1 <- eunis[eunis$level==1,]
+
+### create a duplicate eunis column for checking
+  head$EUNIS <- head$Expert.System
+
+### add a column for blanks and unidentified/mixed habitats
+  head$EUNIS[head$EUNIS %in% c("")] <- "X" ### replace "" with X for unclassified
+  head$EUNIS[head$EUNIS %in% c("~")] <- "Y" ### replace "~" with Y for unclassifiable
+
+### separate into unique EUNIS types
+  head.esy <- head[, .(EUNIS = unlist(tstrsplit(EUNIS, ","))), by = PlotObservationID]  # Separate rows by EUNIS
+
+### remove !! (they denote variations of hab types)
+  head.esy$eunis.noexcl <- gsub("!", "", head.esy$EUNIS, fixed=T)
+  
+### extract letters
+  head.esy$letters <- gsub("([A-Za-z]+).*", "\\1", head.esy$eunis.noexcl)
+
+  head.esy <- left_join(head.esy, eunis.lvl1, by=c("letters"="EUNIS code"))
+  
+  View(head.esy[head.esy$letters=="RR",])
+
+rm(head.esy, eunis, eunis.lvl1)
+  
+```
+
+## lat/lon cuts
+
+```{r}
+
+plot.lon <- ggplot(head.sf)+my.theme+
+  geom_histogram(aes(x=lon.wgs))+
+  geom_vline(xintercept=25, color="darkred")+
+  scale_x_continuous(breaks=seq(-10,65, 5), expand=expansion(add=c(0,0)))+
+  scale_y_continuous(breaks=seq(0,1000000,50000), expand=expansion(mult=c(0,0.1)))+
+  labs(title="longitudinal distribution",
+       x="Longitude (WGS84)",
+       y="number of plots")
+
+plot.lat <- ggplot(head.sf)+my.theme+
+  geom_histogram(aes(y=lat.wgs))+
+  geom_hline(yintercept=57.5, color="darkred")+
+  scale_y_continuous(breaks=seq(5,85, 2.5), expand=expansion(add=c(0,0)))+
+  scale_x_continuous(breaks=seq(0,1000000,50000), expand=expansion(mult=c(0,0.1)))+
+  labs(title="latitudinal distribution",
+       x="number of plots",
+       y="Latitude (WGS84)")
+
+grid.lonlat <- grid.arrange(plot.lon, plot.lat, nrow=1)
+
+ggsave(filename=paste0(path.out,"/head_lonlatfilters.png"),
+       plot=grid.lonlat,
+       width=wide, height=10, unit="cm",
+       bg="white")
+
+
+```
+
+```{r}
+
+bla <- data.frame(id=1:10,
+                  lvl1=c(sample(letters[1:3], 9, replace=T), rep(NA,1)) ,
+                  eunis.lvl1=c(rep("x", 3), sample(letters[1:3], 6, replace=T), rep("a",1)))
+
+
+bla$eunis.lvl1[bla$eunis.lvl1=="x"] <- bla$lvl1[bla$eunis.lvl1=="x"]
+
+
+```
+
+## combo-table for Irena
+
+```{r}
+
+### join country info with species info
+megajoin <- left_join(head, plot, by="PlotObservationID")
+
+specxcountry <- megajoin %>% 
+     group_by(sPlot.concept.unified, Country) %>% 
+     dplyr::summarise(n=n())
+
+### exclude genera
+specxcountry <- specxcountry[grepl("_", specxcountry$sPlot.concept.unified),]
+
+### exclude countries clearly not in study region
+ctry.excl <- c("Canada", "Belarus", "Israel", "Tunisia", "Cyprus", "Lebanon", "Morocco", "Malta", "Azerbaidjan", "Algeria","Faroe Islands", "Iran", "Syria", "Kazakhstan", "Greenland", "Libya", "Turkey", "Iceland", "Svalbard and Jan Mayen Is", "Russia")
+
+specxcountry <- specxcountry[!specxcountry$Country %in% ctry.excl,]
+
+### exclude species with less than 100 occurrences
+specxcountry <- specxcountry[specxcountry$n>99,]
+
+### export
+fwrite(specxcountry, file=paste0(path.out, "/species_x_country.csv"), sep=",", dec=".", row.names=F)
+
+rm(megajoin, specxcountry)
+
+```
+
+### testing cutting year to data
+
+```{r}
+
+header <- st_drop_geometry(head.sf)
+
+list.yrgrp <- list()
+
+for (bin in 5:10){
+
+# Quantile binning
+n.yr.grp.br <- bin
+
+# Quantile breaks (keep numeric; no format() here)
+yr.grp.br <- quantile(header$year, probs = seq(0, 1, length.out = n.yr.grp.br + 1), na.rm = TRUE)
+yr.grp.br <- unique(yr.grp.br)  # guard against duplicate breakpoints with discrete years
+
+# Labels: [start, end)
+yr.grp.lab <- paste0(
+  format(head(yr.grp.br, -1)+1, scientific = FALSE, trim = TRUE),
+  "\n–\n ",
+  format(tail(yr.grp.br, -1), scientific = FALSE, trim = TRUE)
+)
+
+# Cut as left-closed, right-open
+header$yr.grp <- cut(
+  header$year,
+  breaks = yr.grp.br,
+  labels = yr.grp.lab,
+  include.lowest = TRUE,
+  right = FALSE
+)
+
+headsum <- header %>% group_by(yr.grp) %>% dplyr::summarise(n=n())
+
+headsum$groups <- bin
+
+list.yrgrp[[bin-3]] <- headsum
+
+}
+
+df.yrgrp <- bind_rows(list.yrgrp)
+
+library(dplyr)
+library(stringr)
+library(tidytext)   # for reorder_within()
+library(ggplot2)
+
+grp_order <- sort(unique(df.yrgrp$groups))
+
+df.yrgrp2 <- df.yrgrp %>%
+  group_by(groups) %>%
+  mutate(
+    start = as.integer(str_extract(as.character(yr.grp), "^[0-9]+")),
+    yr.grp = reorder_within(yr.grp, start, groups)   # order within each facet
+  ) %>%
+  ungroup() %>% 
+      mutate(
+    # facet label with global levels in the order you want
+    grp.lab = factor(paste0(groups, " groups"),
+                     levels = paste0(grp_order, " groups"),
+                     ordered = TRUE)
+  )
+
+ggplot(df.yrgrp2)+my.theme+
+     geom_col(aes(x = yr.grp, y = n), width=0.66)+
+     scale_y_continuous(expand=expansion(mult=c(0,0.05)))+
+     theme(axis.text.x=element_text(size=6))+
+     facet_wrap(~ grp.lab, scales = "free_x")+
+     scale_x_reordered()+
+     labs(x = NULL, y = "number of plots")
+```

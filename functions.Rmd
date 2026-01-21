@@ -520,7 +520,11 @@ run_rf <- function(vars_RF, train_data, response_var, ntree = 500)
       data = train_data,
       controls = party::cforest_control(
         mtry = round(sqrt(length(vars_RF))),
-        ntree = ntree
+        ntree = ntree,
+        # Decision trees were developed using subsampling without replacement,
+        # which is appropriate to use when predictors vary in their scale of
+        # measurement (Strobl et al., 2007).
+        replace = FALSE
       ),
       parallel = TRUE
     )
@@ -792,6 +796,44 @@ calculate_df_aux <- function(data, prob_cols) {
 
 # Function for filtering based on model probabilities
 
+## Negatives + positives, class-size dependent
+
+```{r}
+filter_probs_neg35_pos10_class_size <- function(gdf, df) {
+  frac <- nrow(gdf) / nrow(df)
+  
+  # Removes negatives
+  cap_total <- if (frac < 0.05) {
+    # max 35% of the class for small classes (i.e. T)
+    ceiling(0.35 * nrow(gdf))
+  } else {
+    # max 10% of the class for other classes
+    ceiling(0.10 * nrow(gdf))
+  }
+  
+  neg <- gdf %>% filter(neg_flag) %>% arrange(desc(gap_neg))
+  drop_neg <- head(neg, cap_total)
+  cap_left <- cap_total - nrow(drop_neg)
+
+  drop_pos <- tibble()
+  if (cap_left > 0) {
+    remaining <- nrow(gdf) - nrow(drop_neg)
+    # If there is room, removes positives with doubts (small_flag = TRUE)
+    # until 10% of the rest
+    pos_cap <- ceiling(0.10 * remaining)
+
+    drop_pos <- gdf %>%
+      filter(!neg_flag & small_flag) %>%
+      arrange(delta) %>%
+      slice_head(n = min(cap_left, pos_cap))
+  }
+
+  drop_ids <- c(drop_neg$PlotObservationID, drop_pos$PlotObservationID)
+  gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
+    select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
+}
+```
+
 ## Negatives + positives
 
 ```{r}
@@ -851,7 +893,7 @@ plot_confusion_matrix <- function(predictions, reference,
     geom_tile(color = "white") +
     geom_text(aes(label = Freq), color = "black", size = 5) +
     scale_fill_gradient(low = "white", high = "steelblue") +
-    labs(title = title, x = "Reference", y = "Prediction") +
+    labs(x = "Reference", y = "Prediction") +
     theme_minimal() +
     theme(
       legend.position = "none",

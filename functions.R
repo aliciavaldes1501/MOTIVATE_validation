@@ -1,14 +1,14 @@
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/fb53bd97121f7f9ce947837ef1a4c65a73bffb3f/geom_flat_violin.R")
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 printall <- function(tibble) {
   print(tibble, width = Inf)
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 extract_info <- function(filename) {
   first_word <- strsplit(filename, "_")[[1]][1]
   biogeo <- str_extract(first_word,
@@ -19,7 +19,7 @@ extract_info <- function(filename) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
   suppressPackageStartupMessages({
     library(mgcv)
@@ -203,7 +203,7 @@ compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 # extract_monthly_avg_indices <- function(
 #   GAM_data, 
 #   monthly_doys = list("01" = 1:31, "02" = 32:59, "03" = 60:90, "04" = 91:120, 
@@ -245,7 +245,7 @@ compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
 # }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 extract_monthly_avg_indices <- function(
   GAM_data, 
   monthly_doys = list("01" = 1:31, "02" = 32:59, "03" = 60:90, "04" = 91:120, 
@@ -291,7 +291,7 @@ extract_monthly_avg_indices <- function(
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_unweighted_fit <- function(
     # Data frame df with index values over time (DOY)
     df, 
@@ -357,7 +357,7 @@ compute_unweighted_fit <- function(
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 plot_histogram <- function(data, x_var, x_label) {
   ggplot(data %>%
            dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
@@ -368,7 +368,7 @@ plot_histogram <- function(data, x_var, x_label) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 distr_plot <- function(data, y_vars, y_labels) {
   for (i in seq_along(y_vars)) {
     y_var <- y_vars[[i]]
@@ -395,7 +395,7 @@ distr_plot <- function(data, y_vars, y_labels) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 distr_plot_biogeo <- function(data, y_vars, y_labels) {
   plots <- list()
   
@@ -426,7 +426,7 @@ distr_plot_biogeo <- function(data, y_vars, y_labels) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 split_train_test <- function(data, proportion = 0.7) {
   train_indices <- sample(1:nrow(data), size = floor(proportion * nrow(data)))
   train_data <- data[train_indices, ]
@@ -435,7 +435,7 @@ split_train_test <- function(data, proportion = 0.7) {
   }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 run_rf <- function(vars_RF, train_data, response_var, ntree = 500) 
   {
   
@@ -461,7 +461,11 @@ run_rf <- function(vars_RF, train_data, response_var, ntree = 500)
       data = train_data,
       controls = party::cforest_control(
         mtry = round(sqrt(length(vars_RF))),
-        ntree = ntree
+        ntree = ntree,
+        # Decision trees were developed using subsampling without replacement,
+        # which is appropriate to use when predictors vary in their scale of
+        # measurement (Strobl et al., 2007).
+        replace = FALSE
       ),
       parallel = TRUE
     )
@@ -475,7 +479,7 @@ run_rf <- function(vars_RF, train_data, response_var, ntree = 500)
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_varimp <- function(model, nperm = 100) {
 
   # Measure execution time
@@ -487,7 +491,7 @@ compute_varimp <- function(model, nperm = 100) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_varimp_cond <- function(model, nperm = 100) {
 
   # Measure execution time
@@ -499,7 +503,7 @@ compute_varimp_cond <- function(model, nperm = 100) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_roc_level1 <- function(model, test_data) {
   # Measure execution time
   execution_time <- system.time({
@@ -535,7 +539,7 @@ compute_roc_level1 <- function(model, test_data) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_roc_level2 <- function(model, test_data) {
   # Measure execution time
   execution_time <- system.time({
@@ -574,7 +578,7 @@ compute_roc_level2 <- function(model, test_data) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 rough_validation_S2 <- function(data) {
   data %>%
     mutate(
@@ -596,7 +600,7 @@ rough_validation_S2 <- function(data) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 rough_validation_SatEmb <- function(data) {
   data %>%
     mutate(
@@ -614,7 +618,7 @@ rough_validation_SatEmb <- function(data) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 rough_validation_Landsat <- function(data) {
   data %>%
     mutate(
@@ -630,7 +634,7 @@ rough_validation_Landsat <- function(data) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 distr_plot_percentiles <- function(data, y_vars, y_labels) {
   for (i in seq_along(y_vars)) {
     y_var <- y_vars[[i]]
@@ -686,7 +690,7 @@ distr_plot_percentiles <- function(data, y_vars, y_labels) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 calculate_df_aux <- function(data, prob_cols) {
   data %>%
     rowwise() %>%
@@ -710,7 +714,43 @@ calculate_df_aux <- function(data, prob_cols) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
+filter_probs_neg35_pos10_class_size <- function(gdf, df) {
+  frac <- nrow(gdf) / nrow(df)
+  
+  # Removes negatives
+  cap_total <- if (frac < 0.05) {
+    # max 35% of the class for small classes (i.e. T)
+    ceiling(0.35 * nrow(gdf))
+  } else {
+    # max 10% of the class for other classes
+    ceiling(0.10 * nrow(gdf))
+  }
+  
+  neg <- gdf %>% filter(neg_flag) %>% arrange(desc(gap_neg))
+  drop_neg <- head(neg, cap_total)
+  cap_left <- cap_total - nrow(drop_neg)
+
+  drop_pos <- tibble()
+  if (cap_left > 0) {
+    remaining <- nrow(gdf) - nrow(drop_neg)
+    # If there is room, removes positives with doubts (small_flag = TRUE)
+    # until 10% of the rest
+    pos_cap <- ceiling(0.10 * remaining)
+
+    drop_pos <- gdf %>%
+      filter(!neg_flag & small_flag) %>%
+      arrange(delta) %>%
+      slice_head(n = min(cap_left, pos_cap))
+  }
+
+  drop_ids <- c(drop_neg$PlotObservationID, drop_pos$PlotObservationID)
+  gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
+    select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
+}
+
+
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 filter_probs_neg35_pos10 <- function(gdf) {
   # Removes negatives until 35% of the class
   cap_total <- ceiling(0.35 * nrow(gdf))  # max 35% of the class
@@ -738,7 +778,7 @@ filter_probs_neg35_pos10 <- function(gdf) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 filter_probs_neg35 <- function(gdf) {
   # Removes negatives until 35% of the class
   cap_total <- ceiling(0.35 * nrow(gdf))  # max 35% of the class
@@ -753,7 +793,7 @@ filter_probs_neg35 <- function(gdf) {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 plot_confusion_matrix <- function(predictions, reference, 
                                   title = "Confusion Matrix") {
   cm_df <- as.data.frame(as.table(confusionMatrix(predictions, reference)))
@@ -763,7 +803,7 @@ plot_confusion_matrix <- function(predictions, reference,
     geom_tile(color = "white") +
     geom_text(aes(label = Freq), color = "black", size = 5) +
     scale_fill_gradient(low = "white", high = "steelblue") +
-    labs(title = title, x = "Reference", y = "Prediction") +
+    labs(x = "Reference", y = "Prediction") +
     theme_minimal() +
     theme(
       legend.position = "none",
@@ -774,7 +814,7 @@ plot_confusion_matrix <- function(predictions, reference,
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 compare_classes <- function(data_before, data_after, class_col = "EUNISa_1") {
   
   # Count classes before and after
@@ -804,7 +844,7 @@ compare_classes <- function(data_before, data_after, class_col = "EUNISa_1") {
 }
 
 
-## ----------------------------------------------------------------------------------------------
+## --------------------------------------------------------------------------------------------------------------------------------------------------------------
 # Session info
 sessionInfo()
 

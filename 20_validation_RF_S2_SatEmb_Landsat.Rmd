@@ -2079,4 +2079,3 @@ Then refitting the model and applying "Morralla" protocol again with same %s.
 ```{r}
 sessionInfo()
 ```
-
