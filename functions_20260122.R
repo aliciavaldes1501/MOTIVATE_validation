@@ -1,31 +1,14 @@
----
-title: "Functions"
-author: "Alicia Valdés"
-date: "`r format(Sys.time(), '%d %B %Y')`"
-output:
-  pdf_document: default
-  html_notebook: default
----
-
-This is a notebook to store functions used in other notebooks.
-
-# Load geom_flat_violin plot
-
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/fb53bd97121f7f9ce947837ef1a4c65a73bffb3f/geom_flat_violin.R")
-```
 
-# Function to print all columns of a tibble
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 printall <- function(tibble) {
   print(tibble, width = Inf)
 }
-```
 
-# Function to extract biogeo and unit from the filename of csv files from GEE
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 extract_info <- function(filename) {
   first_word <- strsplit(filename, "_")[[1]][1]
   biogeo <- str_extract(first_word,
@@ -34,17 +17,9 @@ extract_info <- function(filename) {
   if (is.na(unit) || unit == "") unit <- NA_character_
   list(biogeo = biogeo, unit = unit)
 }
-```
 
-# Function to smooth time series of NDVI, EVI and SAVI and get phenological momments
 
-Using GAMs, reweighting and 3 iterations.
-
-Using both a change detection method (maximum slope) and a threshold method (50% amplitude) to calculate sos and eos.
-
-Approach similar to https://doi.org/10.1016/j.jag.2020.102172 for GAM fitting and change detection method, and to https://www.mdpi.com/2072-4292/12/22/3738 for threshold method.
-
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
   suppressPackageStartupMessages({
     library(mgcv)
@@ -226,11 +201,9 @@ compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
   if (length(results) == 0) return(tibble())  # or return(NULL)
   bind_rows(results)
 }
-```
 
-# Function to extract average values of indices per month and AUC between March and October 
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 # extract_monthly_avg_indices <- function(
 #   GAM_data, 
 #   monthly_doys = list("01" = 1:31, "02" = 32:59, "03" = 60:90, "04" = 91:120, 
@@ -270,9 +243,9 @@ compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
 #   
 #   return(monthly_df)
 # }
-```
 
-```{r}
+
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 extract_monthly_avg_indices <- function(
   GAM_data, 
   monthly_doys = list("01" = 1:31, "02" = 32:59, "03" = 60:90, "04" = 91:120, 
@@ -316,13 +289,9 @@ extract_monthly_avg_indices <- function(
   
   return(final_df)
 }
-```
 
-# Function to smooth the time series of NDMI and NDWI
 
-Using GAM, also replacing values in DOY 1–50 and DOY 315–end with separate base values, use only unweighted GAM.
-
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_unweighted_fit <- function(
     # Data frame df with index values over time (DOY)
     df, 
@@ -386,11 +355,9 @@ compute_unweighted_fit <- function(
   
   bind_rows(fits_list)
 }
-```
 
-# Function to create histograms
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 plot_histogram <- function(data, x_var, x_label) {
   ggplot(data %>%
            dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
@@ -399,11 +366,9 @@ plot_histogram <- function(data, x_var, x_label) {
     labs(x = x_label, y = "Frequency") +
     theme_bw()
 }
-```
 
-# Function to create plots with violin + boxplot + points
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 distr_plot <- function(data, y_vars, y_labels) {
   for (i in seq_along(y_vars)) {
     y_var <- y_vars[[i]]
@@ -428,11 +393,9 @@ distr_plot <- function(data, y_vars, y_labels) {
     print(p)
   }
 }
-```
 
-# Function to create plots with violin + boxplot + points per bioregion
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 distr_plot_biogeo <- function(data, y_vars, y_labels) {
   plots <- list()
   
@@ -461,65 +424,60 @@ distr_plot_biogeo <- function(data, y_vars, y_labels) {
   
   return(plots)
 }
-```
 
-# Functions for RF models
 
-## Function for splitting data into training and test data sets
-
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 split_train_test <- function(data, proportion = 0.7) {
   train_indices <- sample(1:nrow(data), size = floor(proportion * nrow(data)))
   train_data <- data[train_indices, ]
   test_data <- data[-train_indices, ]
   return(list(train = train_data, test = test_data))
   }
-```
 
-## Function for fitting RF models
 
-RF models fitted using the conditional inference version of random forest (first cforest in package party, now fastcforest in package moreparty). Suggested if the data are highly correlated. Cforest is more stable in deriving variable importance values in the presence of highly correlated variables, thus providing better accuracy in calculating variable importance (ref below).
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+run_rf <- function(vars_RF, train_data, response_var, ntree = 500, seed = 123) {
+  set.seed(seed)
+  execution_time <- system.time({
+    rf_model <- party::cforest(
+      formula  = reformulate(vars_RF, response = response_var),
+      data     = train_data,
+      controls = party::cforest_control(
+        mtry  = round(sqrt(length(vars_RF))),
+        ntree = ntree
+      )
+    )
+  })
+  list(model = rf_model, time = execution_time)
+}
 
-Hothorn, T., Hornik, K. and Zeileis, A. (2006) Unbiased Recursive Portioning: A Conditional Inference Framework. Journal of Computational and Graphical Statistics, 15, 651-
-674. http://dx.doi.org/10.1198/106186006X133933
 
-Choose the hyperparameter mtry based on the square root of the number of predictor variables:
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+run_rf_parallel <- function(vars_RF, train_data, response_var, ntree = 500) {
+  # Build formula locally (no NSE)
+  fmla <- reformulate(vars_RF, response = response_var)
 
-Hastie, T., Tibshirani, R., & Friedman, J. (2009). The elements of statistical
-learning: Data mining, inference, and prediction. Springer Science &
-Business Media.
+  # Start cluster
+  n_cores <- max(1, parallel::detectCores() - 1)
+  cl <- parallel::makeCluster(n_cores)
+  doParallel::registerDoParallel(cl)
 
-Maybe TO_DO:
-We variated ntree from 50 to 800 in steps of 50, leaving mtry constant at 2. Tis parameter variation showed that ntree=500 was optimal, while higher ntree led to no further model improvement (Supplementary Fig. S10). Subsequently, the hyperparameter mtry was varied from 2 to 8 with constant ntree=500. Here, mtry=3 led to the best results in almost all cases (Supplementary Fig. S11). Consequently, we chose ntree=500 and mtry=3 for our main analysis across all study sites.
+  # Make sure packages are available on workers
+  parallel::clusterEvalQ(cl, {
+    library(party)
+  })
 
-Define a function to run fastcforest models:
+  # Export the *data* to workers under a simple name
+  local_data <- train_data
+  parallel::clusterExport(cl, varlist = c("local_data"), envir = environment())
 
-```{r}
-run_rf <- function(vars_RF, train_data, response_var, ntree = 500) 
-  {
-  
-  # Detect and register available cores (leave one free)
-  n_cores <- parallel::detectCores() - 1
-  cl <- makeCluster(n_cores)
-  registerDoParallel(cl)
-  
-  train_name <- deparse(substitute(train_data))
-  
-  # Export necessary variables to the cluster
-  clusterExport(cl, varlist = c("vars_RF", "train_data", "response_var"),
-                envir = environment())
-
-  
-  # Set seed for reproducibility
-  set.seed(123)
-  
-  # Measure execution time
+  # Fit in parallel
   execution_time <- system.time({
     rf_model <- fastcforest(
-      formula = reformulate(vars_RF, response = response_var),
-      data = train_data,
+      formula  = fmla,
+      data     = local_data,   # use the exported name
       controls = party::cforest_control(
-        mtry = round(sqrt(length(vars_RF))),
+        mtry  = max(1, round(sqrt(length(vars_RF)))),
         ntree = ntree,
         # Decision trees were developed using subsampling without replacement,
         # which is appropriate to use when predictors vary in their scale of
@@ -529,21 +487,14 @@ run_rf <- function(vars_RF, train_data, response_var, ntree = 500)
       parallel = TRUE
     )
   })
-  
-  # Stop the cluster
-  stopCluster(cl)
-  
-  # Return both the model and execution time
+
+  parallel::stopCluster(cl)
+
   list(model = rf_model, time = execution_time)
 }
-```
 
-## Function to compute variable importance
 
-Using permimp() en permimp package:
-https://cran.r-project.org/web/packages/permimp/vignettes/permimp-package.html#fn1
-
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_varimp <- function(model, nperm = 100) {
 
   # Measure execution time
@@ -553,11 +504,9 @@ compute_varimp <- function(model, nperm = 100) {
 
   return(list(varimp = varimp_result, time = execution_time))
 }
-```
 
-## Function to compute CONDITIONAL variable importance
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_varimp_cond <- function(model, nperm = 100) {
 
   # Measure execution time
@@ -567,11 +516,9 @@ compute_varimp_cond <- function(model, nperm = 100) {
 
   return(list(varimp = varimp_result, time = execution_time))
 }
-```
 
-## Function to compute ROC (level 1)
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_roc_level1 <- function(model, test_data) {
   # Measure execution time
   execution_time <- system.time({
@@ -605,11 +552,9 @@ compute_roc_level1 <- function(model, test_data) {
   # Return both ROC data and execution time
   return(list(roc = roc_data, time = execution_time))
 }
-```
 
-## Function to compute ROC (level 2)
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_roc_level2 <- function(model, test_data) {
   # Measure execution time
   execution_time <- system.time({
@@ -646,11 +591,9 @@ compute_roc_level2 <- function(model, test_data) {
   # Return both ROC data and execution time
   return(list(roc = roc_data, time = execution_time))
 }
-```
 
-# Function for rough validation (S2)
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 rough_validation_S2 <- function(data) {
   data %>%
     mutate(
@@ -670,11 +613,9 @@ rough_validation_S2 <- function(data) {
     # Keep only rows with no rules broken
     dplyr::filter(valid_1 == "No rules broken so far")
 }
-```
 
-# Function for rough validation (SatEmb)
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 rough_validation_SatEmb <- function(data) {
   data %>%
     mutate(
@@ -690,11 +631,9 @@ rough_validation_SatEmb <- function(data) {
     # Keep only rows with no rules broken
     dplyr::filter(valid_1 == "No rules broken so far")
 }
-```
 
-# Function for rough validation (Landsat)
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 rough_validation_Landsat <- function(data) {
   data %>%
     mutate(
@@ -708,11 +647,9 @@ rough_validation_Landsat <- function(data) {
     # Keep only rows with no rules broken
     dplyr::filter(valid_1 == "No rules broken so far")
 }
-```
 
-# Function to create plots with violin + boxplot + points with percentiles
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 distr_plot_percentiles <- function(data, y_vars, y_labels) {
   for (i in seq_along(y_vars)) {
     y_var <- y_vars[[i]]
@@ -766,11 +703,9 @@ distr_plot_percentiles <- function(data, y_vars, y_labels) {
     print(p)
   }
 }
-```
 
-# Function to calculate auxiliary metrics for data refinement
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 calculate_df_aux <- function(data, prob_cols) {
   data %>%
     rowwise() %>%
@@ -792,76 +727,9 @@ calculate_df_aux <- function(data, prob_cols) {
     ) %>%
     ungroup()
 }
-```
 
-# Function for filtering based on model probabilities
 
-## Only negatives, class-size dependent
-
-```{r}
-filter_probs_conserv <- function(gdf, df) {
-  frac <- nrow(gdf) / nrow(df)
-  
-  # Removes negatives
-  cap_total <- if (frac < 0.05) {
-    # max 35% of the class for small classes (i.e. T)
-    ceiling(0.35 * nrow(gdf))
-  } else {
-    # max 10% of the class for other classes
-    ceiling(0.10 * nrow(gdf))
-  }
-  
-  neg <- gdf %>% filter(neg_flag) %>% arrange(desc(gap_neg))
-  drop_neg <- head(neg, cap_total)
-  cap_left <- cap_total - nrow(drop_neg)
-
-    drop_ids <- c(drop_neg$PlotObservationID)
-  gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
-    select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
-}
-```
-
-## Negatives + positives, class-size dependent
-
-```{r}
-filter_probs_neg35_pos10_class_size <- function(gdf, df) {
-  frac <- nrow(gdf) / nrow(df)
-  
-  # Removes negatives
-  cap_total <- if (frac < 0.05) {
-    # max 35% of the class for small classes (i.e. T)
-    ceiling(0.35 * nrow(gdf))
-  } else {
-    # max 10% of the class for other classes
-    ceiling(0.10 * nrow(gdf))
-  }
-  
-  neg <- gdf %>% filter(neg_flag) %>% arrange(desc(gap_neg))
-  drop_neg <- head(neg, cap_total)
-  cap_left <- cap_total - nrow(drop_neg)
-
-  drop_pos <- tibble()
-  if (cap_left > 0) {
-    remaining <- nrow(gdf) - nrow(drop_neg)
-    # If there is room, removes positives with doubts (small_flag = TRUE)
-    # until 10% of the rest
-    pos_cap <- ceiling(0.10 * remaining)
-
-    drop_pos <- gdf %>%
-      filter(!neg_flag & small_flag) %>%
-      arrange(delta) %>%
-      slice_head(n = min(cap_left, pos_cap))
-  }
-
-  drop_ids <- c(drop_neg$PlotObservationID, drop_pos$PlotObservationID)
-  gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
-    select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
-}
-```
-
-## Negatives + positives
-
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 filter_probs_neg35_pos10 <- function(gdf) {
   # Removes negatives until 35% of the class
   cap_total <- ceiling(0.35 * nrow(gdf))  # max 35% of the class
@@ -887,11 +755,9 @@ filter_probs_neg35_pos10 <- function(gdf) {
   gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
     select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
 }
-```
 
-## Negatives only
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 filter_probs_neg35 <- function(gdf) {
   # Removes negatives until 35% of the class
   cap_total <- ceiling(0.35 * nrow(gdf))  # max 35% of the class
@@ -904,11 +770,24 @@ filter_probs_neg35 <- function(gdf) {
   gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
     select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
 }
-```
 
-# Function for plotting confusion matrix
 
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+filter_probs_neg50 <- function(gdf) {
+  # Removes negatives until 50% of the class
+  cap_total <- ceiling(0.50 * nrow(gdf))  # max 50% of the class
+
+  neg <- gdf %>% filter(neg_flag) %>% arrange(desc(gap_neg))
+  drop_neg <- head(neg, cap_total)
+  cap_left <- cap_total - nrow(drop_neg)
+
+  drop_ids <- c(drop_neg$PlotObservationID)
+  gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
+    select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
+}
+
+
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 plot_confusion_matrix <- function(predictions, reference, 
                                   title = "Confusion Matrix") {
   cm_df <- as.data.frame(as.table(confusionMatrix(predictions, reference)))
@@ -918,7 +797,7 @@ plot_confusion_matrix <- function(predictions, reference,
     geom_tile(color = "white") +
     geom_text(aes(label = Freq), color = "black", size = 5) +
     scale_fill_gradient(low = "white", high = "steelblue") +
-    labs(x = "Reference", y = "Prediction") +
+    labs(title = title, x = "Reference", y = "Prediction") +
     theme_minimal() +
     theme(
       legend.position = "none",
@@ -927,202 +806,101 @@ plot_confusion_matrix <- function(predictions, reference,
       plot.title = element_text(size = 16, face = "bold")
     )
 }
-```
 
-# Function for comparing classes before and after filtering by model probabilities
 
-```{r}
-compare_classes <- function(data_before, data_after, class_col = "EUNISa_1") {
-  
-  # Count classes before and after
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+compare_classes <- function(data_before, data_step1, data_step2 = NULL,
+                            class_col = "EUNISa_1",
+                            title = "Size of each class across steps",
+                            x_lab = NULL) {
+  # Helper: safe counting that works with empty data frames
+  count_safe <- function(df, out_name) {
+    if (is.null(df) || nrow(df) == 0) {
+      tibble(!!class_col := character(), !!out_name := integer())
+    } else {
+      if (!(class_col %in% names(df))) {
+        abort(paste0("Column '", class_col, "' is missing in one of the inputs."))
+      }
+      df %>% count(.data[[class_col]], name = out_name)
+    }
+  }
+
+  # Build counts table (before + step1; optionally step2)
   counts <- full_join(
-    data_before %>% count(.data[[class_col]]) %>% rename(before = n),
-    data_after %>% count(.data[[class_col]]) %>% rename(after = n),
+    count_safe(data_before, "before"),
+    count_safe(data_step1,  "step1"),
     by = class_col
   )
 
-  # Convert to long format
-  counts_long <- counts %>%
-    pivot_longer(cols = c(before, after), names_to = "state", 
-                 values_to = "n") %>%
-    mutate(state = factor(state, levels = c("before", "after")))
+  has_step2 <- !is.null(data_step2)
+  if (has_step2) {
+    counts <- full_join(
+      counts,
+      count_safe(data_step2, "step2"),
+      by = class_col
+    )
+  } else {
+    # Ensure the column exists for consistent downstream handling (as NA)
+    counts <- counts %>% mutate(step2 = NA_integer_)
+  }
+
+  # Replace missing counts with zero for plotting
+  counts <- counts %>%
+    mutate(
+      before = replace_na(before, 0L),
+      step1  = replace_na(step1,  0L),
+      step2  = replace_na(step2,  0L)
+    )
+
+  # Prepare long format depending on availability of step2
+  if (has_step2) {
+    counts_long <- counts %>%
+      pivot_longer(
+        cols = c(before, step1, step2),
+        names_to = "state",
+        values_to = "n"
+      ) %>%
+      mutate(state = factor(state, levels = c("before", "step1", "step2")))
+    legend_title <- "State"
+  } else {
+    counts_long <- counts %>%
+      select(any_of(c(class_col, "before", "step1"))) %>%
+      pivot_longer(
+        cols = c(before, step1),
+        names_to = "state",
+        values_to = "n"
+      ) %>%
+      mutate(state = factor(state, levels = c("before", "step1")))
+    legend_title <- "State"
+  }
+
+  # Labels
+  if (is.null(x_lab)) {
+    x_lab <- paste0("Class (", class_col, ")")
+  }
 
   # Plot
-  ggplot(counts_long, aes(x = .data[[class_col]], y = n, fill = state)) +
-    geom_bar(stat = "identity", position = position_dodge()) +
+  p <- ggplot(counts_long, aes(x = .data[[class_col]], y = n, fill = state)) +
+    geom_col(position = position_dodge(width = 0.85), width = 0.8) +
     labs(
-      title = "Size of each class before and after filtering",
-      x = "Class (original_EUNIS)",
+      title = title,
+      x = x_lab,
       y = "Number of rows",
-      fill = "State"
+      fill = legend_title
     ) +
     theme_minimal() +
-    theme(axis.text.x = element_text(hjust = 1))
-}
-```
-
-# Functions for k-fold cross validation
-
-## TO TEST: New function for fitting RF models
-
-```{r}
-run_rf_new <- function(vars_RF, train_data, response_var, ntree = 500) {
-  set.seed(123)
-  execution_time <- system.time({
-    rf_model <- moreparty::fastcforest(
-      formula  = reformulate(vars_RF, response = response_var),
-      data     = train_data,
-      controls = party::cforest_control(
-        mtry    = max(1, round(sqrt(length(vars_RF)))),
-        ntree   = ntree,
-        replace = FALSE
-      )
+    theme(
+      axis.text.x = element_text(angle = 0, hjust = 1),
+      panel.grid.minor = element_blank()
     )
-  })
-  list(model = rf_model, time = execution_time)
+
+  # Print the plot and invisibly return counts
+  print(p)
+  invisible(counts)
 }
-```
 
-## TO TEST: Function for k-fold cross-validation
 
-```{r}
-cv_fastcforest <- function(data, vars_RF, response_var, k = 5, ntree = 500) {
-
-  # 1) Folds (estratificados si 'response_var' es factor)
-  folds <- caret::createFolds(data[[response_var]], k = k, list = TRUE)
-
-  # 2) Backend paralelo (PSOCK habitual en Windows)
-  n_cores <- max(1, parallel::detectCores() - 1)
-  cl <- parallel::makeCluster(n_cores, type = "PSOCK")
-  doParallel::registerDoParallel(cl)
-
-  # 3) Alinear rutas de librerías en los workers
-  parallel::clusterCall(cl, function(p) .libPaths(p), .libPaths())
-
-  # 4) Cargar paquetes necesarios en cada worker
-  parallel::clusterEvalQ(cl, {
-    suppressPackageStartupMessages({
-      library(moreparty)  # <- imprescindible
-      library(party)      # <- si usas cforest_control/unbiased
-      library(caret)
-    })
-    TRUE
-  })
-
-  # 5) Verificar que moreparty::fastcforest existe en cada worker
-  ok <- parallel::clusterEvalQ(cl, exists("fastcforest", where = asNamespace("moreparty")))
-  if (!all(unlist(ok))) {
-    parallel::stopCluster(cl)
-    stop("En al menos un worker no está disponible moreparty::fastcforest tras cargar paquetes.")
-  }
-
-  # 6) Exportar función y objetos necesarios
-  parallel::clusterExport(
-    cl,
-    varlist = c("run_rf_new", "vars_RF", "response_var", "data", "ntree"),
-    envir   = environment()
-  )
-
-  # 7) CV paralelo con foreach — nota: .packages incluye moreparty y party
-  cv_results <- foreach::foreach(
-    i = seq_len(k),
-    .packages = c("moreparty", "party", "caret"),
-    .errorhandling = "pass"
-  ) %dopar% {
-
-    test_idx <- folds[[i]]
-    train_df <- data[-test_idx, ]
-    test_df  <- data[test_idx, ]
-
-    fit   <- run_rf_new(vars_RF, train_df, response_var, ntree = ntree)
-    preds <- predict(fit$model, newdata = test_df)
-
-    list(
-      fold = i,
-      obs  = test_df[[response_var]],
-      pred = preds,
-      time = fit$time
-    )
-  }
-
-  # 8) Cerrar clúster
-  parallel::stopCluster(cl)
-
-  # 9) Reportar errores por fold si los hubo
-  had_error <- vapply(cv_results, inherits, logical(1), "error")
-  if (any(had_error)) {
-    idx <- which(had_error)
-    stop(sprintf("Errores en folds: %s. Primer error: %s",
-                 paste(idx, collapse = ", "),
-                 cv_results[[idx[1]]]$message))
-  }
-
-  # 10) Combinar predicciones
-  cv_df <- do.call(rbind, lapply(cv_results, function(x)
-    data.frame(fold = x$fold, obs = x$obs, pred = x$pred, stringsAsFactors = FALSE)))
-
-  list(
-    predictions = cv_df,
-    timing      = lapply(cv_results, `[[`, "time")
-  )
-}
-```
-
-## TO TEST: NEW Function for k-fold cross-validation
-
-```{r}
-cv_fastcforest_future <- function(data, vars_RF, response_var, k = 5, ntree = 500) {
-  
-  # Crear folds (estratificados si la respuesta es factor)
-  folds <- caret::createFolds(data[[response_var]], k = k, list = TRUE)
-  
-  # Ejecutar CV en paralelo usando future_lapply
-  cv_results <- future_lapply(seq_len(k), function(i) {
-    
-    # Cargar paquetes dentro del worker
-    library(moreparty)
-    library(party)
-    
-    # Partición train/test para el fold i
-    test_idx <- folds[[i]]
-    train_df <- data[-test_idx, ]
-    test_df  <- data[test_idx, ]
-    
-    # Entrenar modelo
-    fit <- run_rf_new(vars_RF, train_df, response_var, ntree = ntree)
-    
-    # Predecir
-    preds <- predict(fit$model, newdata = test_df)
-    
-    # Devolver resultados del fold
-    list(
-      fold = i,
-      obs  = test_df[[response_var]],
-      pred = preds,
-      time = fit$time
-    )
-  })
-  
-  # Combinar en un único data.frame
-  cv_df <- do.call(rbind, lapply(cv_results, function(x)
-    data.frame(
-      fold = x$fold,
-      obs  = x$obs,
-      pred = x$pred,
-      stringsAsFactors = FALSE
-    )
-  ))
-  
-  list(
-    predictions = cv_df,
-    timing = lapply(cv_results, `[[`, "time")
-  )
-}
-```
-
-# Session info
-
-```{r}
+## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 # Session info
 sessionInfo()
-```
+

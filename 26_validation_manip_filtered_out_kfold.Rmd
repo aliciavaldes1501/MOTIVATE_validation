@@ -433,23 +433,30 @@ set.seed(123)
 Split data:
 
 ```{r}
+# Split intro training and testing
 # S2
-train_data_slope_S2 <- split_train_test(filtered_data_slope_S2)$train
-test_data_slope_S2 <- split_train_test(filtered_data_slope_S2)$test
-train_data_months_S2 <- split_train_test(filtered_data_months_S2)$train
-test_data_months_S2 <- split_train_test(filtered_data_months_S2)$test
+split_slope_S2 <- split_train_test(filtered_data_slope_S2)
+train_data_slope_S2 <- split_slope_S2$train
+test_data_slope_S2 <- split_slope_S2$test
+split_months_S2 <- split_train_test(filtered_data_months_S2)
+train_data_months_S2 <- split_months_S2$train
+test_data_months_S2 <- split_months_S2$test
 
 # Landsat
-train_data_slope_Landsat <- split_train_test(filtered_data_slope_Landsat)$train
-test_data_slope_Landsat <- split_train_test(filtered_data_slope_Landsat)$test
-train_data_months_Landsat <- split_train_test(filtered_data_months_Landsat)$train
-test_data_months_Landsat <- split_train_test(filtered_data_months_Landsat)$test
+split_slope_Landsat <- split_train_test(filtered_data_slope_Landsat)
+train_data_slope_Landsat <- split_slope_Landsat$train
+test_data_slope_Landsat <- split_slope_Landsat$test
+split_months_Landsat <- split_train_test(filtered_data_months_Landsat)
+train_data_months_Landsat <- split_months_Landsat$train
+test_data_months_Landsat <- split_months_Landsat$test
 
 # SatEmb
-train_data_SatEmb <- split_train_test(filtered_data_SatEmb)$train
-test_data_SatEmb <- split_train_test(filtered_data_SatEmb)$test
-train_data_SatEmb_CH <- split_train_test(filtered_data_SatEmb_CH)$train
-test_data_SatEmb_CH <- split_train_test(filtered_data_SatEmb_CH)$test
+split_SatEmb <- split_train_test(filtered_data_SatEmb)
+train_data_SatEmb <- split_SatEmb$train
+test_data_SatEmb <- split_SatEmb$test
+split_SatEmb_CH <- split_train_test(filtered_data_SatEmb_CH)
+train_data_SatEmb_CH <- split_SatEmb_CH$train
+test_data_SatEmb_CH <- split_SatEmb_CH$test
 ```
 
 ### Fit models
@@ -494,7 +501,7 @@ Save:
 for (model_name in models_no_refin) {
   file_path <- paste0("objects/RF_1500/", model_name, "_model.Rdata")
   save(list = model_name, file = file_path)
-  }
+}
 ```
 
 ### Predictions
@@ -876,27 +883,27 @@ Applying "Morralla" protocol once, removing negatives until 35% of the class and
 ```{r}
 df_final_35_10_slope_S2 <- df_aux_slope_S2 %>%
   group_split(original_EUNIS) %>%
-  map_dfr(filter_probs_neg35_pos10_class_size,
+  map_dfr(filter_probs_neg35_pos10,
           df = df_aux_slope_S2)
 df_final_35_10_months_S2 <- df_aux_months_S2 %>%
   group_split(original_EUNIS) %>%
-  map_dfr(filter_probs_neg35_pos10_class_size,
+  map_dfr(filter_probs_neg35_pos10,
           df = df_aux_months_S2)
 df_final_35_10_slope_Landsat <- df_aux_slope_Landsat %>%
   group_split(original_EUNIS) %>%
-  map_dfr(filter_probs_neg35_pos10_class_size,
+  map_dfr(filter_probs_neg35_pos10,
           df = df_aux_slope_Landsat)
 df_final_35_10_months_Landsat <- df_aux_months_Landsat %>%
   group_split(original_EUNIS) %>%
-  map_dfr(filter_probs_neg35_pos10_class_size,
+  map_dfr(filter_probs_neg35_pos10,
           df = df_aux_months_Landsat)
 df_final_35_10_SatEmb <- df_aux_SatEmb %>%
   group_split(original_EUNIS) %>%
-  map_dfr(filter_probs_neg35_pos10_class_size,
+  map_dfr(filter_probs_neg35_pos10,
           df = df_aux_SatEmb)
 df_final_35_10_SatEmb_CH <- df_aux_SatEmb_CH %>%
   group_split(original_EUNIS) %>%
-  map_dfr(filter_probs_neg35_pos10_class_size,
+  map_dfr(filter_probs_neg35_pos10,
           df = df_aux_SatEmb_CH)
 ```
 

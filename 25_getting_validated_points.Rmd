@@ -25,8 +25,8 @@ library(here)
 # Load functions
 
 ```{r}
-knitr::purl("functions.Rmd", output = "functions.R")
-source("functions.R")
+knitr::purl("functions_20260122.Rmd", output = "functions_20260122.R")
+source("functions_20260122.R")
 ```
 
 # Load previously created objects
@@ -46,21 +46,21 @@ lapply(rdata_files, load, envir = .GlobalEnv)
 
 Model with SatEmb + CH for predicting where there is SatEmb data:
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 load(here("objects", "RF_1500", "rf_SatEmb_CH_model.RData"))
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 rf_SatEmb_CH <- rf_SatEmb_CH$model
 ```
 
 Model with months, Landsat for predicting where there is no SatEmb data:
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 load(here("objects", "RF_1500", "rf_months_Landsat_model.RData"))
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 rf_months_Landsat <- rf_months_Landsat$model
 ```
 
@@ -244,6 +244,11 @@ data_validated_clean <- data_validated %>%
   ))
 ```
 
+```{r}
+data_validated_clean %>% count(valid)
+```
+
+
 How many NAs for each row?
 
 ```{r}
@@ -387,6 +392,25 @@ write_csv(data_validated_clean,
 write_csv(data_validated_clean_latest,
           here("data", "clean","data_validated_clean_latest_20260120.csv"))
 ```
+
+# Plots
+
+```{r}
+data_validated_clean %>%
+  count(EUNISa_1, valid, name = "n") %>% 
+  ggplot(aes(x = EUNISa_1, y = n, fill = valid)) +
+  geom_col(position = position_dodge()) +
+  labs(
+    x = "Habitat type (EUNIS level 1)",
+    y = "Number of observations",
+    fill = "Validated"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
 
 # Session info
 

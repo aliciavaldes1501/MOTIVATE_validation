@@ -1,0 +1,412 @@
+---
+title: "Script to get correlations between embeddings and other data"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This R script is used to get correlations between embeddings and other data.
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+```
+
+# Read data
+
+Read data validation S2, SatEmb and Landsat:
+
+```{r}
+data_validation_S2 <- read_tsv(here(
+  "data", "clean","final_RS_data_bands_S2_all_20251021.csv"))
+data_validation_SatEmb <- read_tsv(here(
+  "data", "clean","final_RS_data_SatEmb_20251010.csv")) %>%
+  rename(EUNISa_1_descr = EUNIS_1_d)
+data_validation_Landsat <- read_tsv(here(
+  "data", "clean","final_RS_data_bands_Landsat_all_20251021.csv"))
+```
+
+No parsing issues!
+
+```{r}
+nrow(data_validation_S2)
+nrow(data_validation_Landsat)
+nrow(data_validation_SatEmb)
+```
+
+# Filter out manipulated observations
+
+## Read list of PlotObservationIDs to keep
+
+```{r}
+PlotObservationID_list <- read_csv(
+  here("data", "clean","PlotObservationIDs_filtered_QRST_20251211.csv"))
+```
+
+## Filter out data to keep only those PlotObservationIDs
+
+```{r}
+data_validation_S2 <- data_validation_S2 %>%
+  filter(PlotObservationID %in% PlotObservationID_list$PlotObservationID)
+data_validation_SatEmb <- data_validation_SatEmb %>%
+  filter(PlotObservationID %in% PlotObservationID_list$PlotObservationID)
+data_validation_Landsat <- data_validation_Landsat %>%
+  filter(PlotObservationID %in% PlotObservationID_list$PlotObservationID)
+```
+
+```{r}
+nrow(data_validation_S2)
+nrow(data_validation_Landsat)
+nrow(data_validation_SatEmb)
+```
+
+# Merge the three datasets
+
+```{r}
+data_validation <- data_validation_Landsat %>% 
+  # Add "Landsat_" prefix to RS vars
+  rename_with(
+    ~ paste0("Landsat_", .x),
+    matches("^(NDVI|SAVI|EVI|NDMI|NDWI)")
+    ) %>%
+  # Join S2 data
+  full_join(
+    data_validation_S2 %>%
+      # Add "S2_ prefix to RS vars
+      rename_with(
+        ~ paste0("S2_", .x),
+        matches("^(NDVI|SAVI|EVI|NDMI|NDWI)")
+      )
+    ) %>%
+  # Add S2 T/F
+  mutate(S2 = rowSums(!is.na(across(starts_with("S2_"))))>0) %>%
+  # Join SatEmb data
+  full_join(data_validation_SatEmb) %>%
+  # Add SatEmb T/F
+  mutate(SatEmb = ifelse(is.na(A00), FALSE, TRUE))
+```
+
+```{r}
+data_validation %>% count(S2)
+data_validation %>% count(SatEmb)
+```
+
+# Define lists of predictor vars
+
+```{r}
+vars_RF_both <- c(
+  # Min values of all indices
+  "NDVI_min", "EVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, EVI and SAVI
+  "NDVI_auc_slope", "EVI_auc_slope", "SAVI_auc_slope",
+  # AUC of NDVI, EVI and SAVI between march and oct
+  "NDVI_auc_mar_oct", "EVI_auc_mar_oct", "SAVI_auc_mar_oct",
+  # Values of NDVI, EVI and SAVI at sos, pos and eos
+  "NDVI_sos_slope_value", "NDVI_pos_value", "NDVI_eos_slope_value",
+  "EVI_sos_slope_value", "EVI_pos_value", "EVI_eos_slope_value", 
+  "SAVI_sos_slope_value", "SAVI_pos_value", "SAVI_eos_slope_value",
+  # Differences pos-sos in value and doy
+  "NDVI_diff_pos_sos_slope_value", "EVI_diff_pos_sos_slope_value",
+  "SAVI_diff_pos_sos_slope_value","NDVI_diff_pos_sos_slope_doy", 
+  "EVI_diff_pos_sos_slope_doy", "SAVI_diff_pos_sos_slope_doy",
+  # Differences pos-eos in value and doy
+  "NDVI_diff_pos_eos_slope_value", "EVI_diff_pos_eos_slope_value",
+  "SAVI_diff_pos_eos_slope_value", "NDVI_diff_pos_eos_slope_doy", 
+  "EVI_diff_pos_eos_slope_doy", "SAVI_diff_pos_eos_slope_doy",
+  # Growing season duration
+  "NDVI_slope_gsd", "EVI_slope_gsd", "SAVI_slope_gsd",
+  # Values of NDVI, EVI and SAVI at march and oct
+  "NDVI_avg_value_03", "NDVI_avg_value_10",
+  "EVI_avg_value_03", "EVI_avg_value_10", 
+  "SAVI_avg_value_03", "SAVI_avg_value_10",
+  # Differences pos-march in value and doy
+  "NDVI_diff_pos_march_value", "EVI_diff_pos_march_value",
+  "SAVI_diff_pos_march_value","NDVI_diff_pos_march_doy", 
+  "EVI_diff_pos_march_doy", "SAVI_diff_pos_march_doy",
+  # Differences pos-oct in value and doy
+  "NDVI_diff_pos_oct_value", "EVI_diff_pos_oct_value",
+  "SAVI_diff_pos_oct_value", "NDVI_diff_pos_oct_doy", 
+  "EVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy",
+  # Canopy height
+  "canopy_height")
+```
+
+```{r}
+# Excluding EVI because many values outside of range -1, 1
+vars_RF_both_Landsat <- c(
+  # Min values of all indices
+  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI and SAVI
+  "NDVI_auc_slope", "SAVI_auc_slope",
+  # AUC of NDVI, and SAVI between march and oct
+  "NDVI_auc_mar_oct", "SAVI_auc_mar_oct",
+  # Values of NDVI and SAVI at sos, pos and eos
+  "NDVI_sos_slope_value", "NDVI_pos_value", "NDVI_eos_slope_value",
+  "SAVI_sos_slope_value", "SAVI_pos_value", "SAVI_eos_slope_value",
+  # Differences pos-sos in value and doy
+  "NDVI_diff_pos_sos_slope_value","SAVI_diff_pos_sos_slope_value",
+  "NDVI_diff_pos_sos_slope_doy", "SAVI_diff_pos_sos_slope_doy",
+  # Differences pos-eos in value and doy
+  "NDVI_diff_pos_eos_slope_value", "SAVI_diff_pos_eos_slope_value",
+  "NDVI_diff_pos_eos_slope_doy", "SAVI_diff_pos_eos_slope_doy",
+  # Growing season duration
+  "NDVI_slope_gsd", "SAVI_slope_gsd",
+  # Values of NDVI and SAVI at march and oct
+  "NDVI_avg_value_03", "NDVI_avg_value_10",
+  "SAVI_avg_value_03", "SAVI_avg_value_10",
+  # Differences pos-march in value and doy
+  "NDVI_diff_pos_march_value", "SAVI_diff_pos_march_value",
+  "NDVI_diff_pos_march_doy", "SAVI_diff_pos_march_doy",
+  # Differences pos-oct in value and doy
+  "NDVI_diff_pos_oct_value", "SAVI_diff_pos_oct_value",
+  "NDVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy",
+  # Canopy height
+  "canopy_height")
+```
+
+# Correlations
+
+## SatEmb and canopy height
+
+```{r}
+cor_A_CH <- cor(
+  data_validation[, A_cols],
+  data_validation[, "canopy_height"],
+  use = "pairwise.complete.obs"
+)
+```
+
+```{r}
+cor_A_CH_df <- cor_A_CH %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("A_band") %>%
+  pivot_longer(
+    -A_band,
+    names_to = "CH",
+    values_to = "correlation"
+  )
+```
+
+```{r}
+thr <- 0.5
+
+A_CH_strong <- cor_A_CH_df %>%
+  filter(abs(correlation) >= thr) %>%
+  arrange(A_band, desc(abs(correlation)))
+```
+
+```{r}
+A_CH_strong
+```
+
+## SatEmb and S2
+
+```{r}
+A_cols  <- names(data_validation)[startsWith(names(data_validation), "A")]
+S2_cols <- names(data_validation)[startsWith(names(data_validation), "S2_")]
+
+S2_cols <- intersect(paste0("S2_", vars_RF_both), names(data_validation))
+
+length(A_cols)
+length(S2_cols)
+```
+
+```{r}
+cor_A_S2 <- cor(
+  data_validation[, A_cols],
+  data_validation[, S2_cols],
+  use = "pairwise.complete.obs"
+)
+```
+
+```{r}
+cor_A_S2_df <- cor_A_S2 %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("A_band") %>%
+  pivot_longer(
+    -A_band,
+    names_to = "S2_var",
+    values_to = "correlation"
+  )
+```
+
+See the three most strongly correlated vars for each embedding band:
+
+```{r}
+top3_A_S2 <- cor_A_S2_df %>%
+  group_by(A_band) %>%
+  slice_max(order_by = abs(correlation), n = 3, with_ties = FALSE) %>%
+  arrange(A_band, desc(abs(correlation)))
+```
+
+```{r}
+top3_A_S2
+```
+
+See the stronger correlations:
+
+```{r}
+thr <- 0.5
+
+A_S2_strong <- cor_A_S2_df %>%
+  filter(abs(correlation) >= thr) %>%
+  arrange(A_band, desc(abs(correlation)))
+```
+
+```{r}
+A_S2_strong
+```
+
+## SatEmb and Landsat
+
+```{r}
+A_cols  <- names(data_validation)[startsWith(names(data_validation), "A")]
+Landsat_cols <- names(data_validation)[startsWith(names(data_validation), "Landsat_")]
+
+Landsat_cols <- intersect(paste0("Landsat_", vars_RF_both_Landsat), names(data_validation))
+
+length(A_cols)
+length(Landsat_cols)
+```
+
+```{r}
+cor_A_Landsat <- cor(
+  data_validation[, A_cols],
+  data_validation[, Landsat_cols],
+  use = "pairwise.complete.obs"
+)
+```
+
+```{r}
+cor_A_Landsat_df <- cor_A_Landsat %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("A_band") %>%
+  pivot_longer(
+    -A_band,
+    names_to = "Landsat_var",
+    values_to = "correlation"
+  )
+```
+
+See the three most strongly correlated vars for each embedding band:
+
+```{r}
+top3_A_Landsat <- cor_A_Landsat_df %>%
+  group_by(A_band) %>%
+  slice_max(order_by = abs(correlation), n = 3, with_ties = FALSE) %>%
+  arrange(A_band, desc(abs(correlation)))
+```
+
+```{r}
+top3_A_Landsat
+```
+
+See the stronger correlations:
+
+```{r}
+thr <- 0.5
+
+A_Landsat_strong <- cor_A_Landsat_df %>%
+  filter(abs(correlation) >= thr) %>%
+  arrange(A_band, desc(abs(correlation)))
+```
+
+```{r}
+A_Landsat_strong
+```
+
+# Some trials or regressions
+
+```{r}
+ggplot(data_validation, aes(x = canopy_height, y = A07)) + geom_point() +
+  geom_smooth(method = "lm")
+ggplot(data_validation, aes(x = S2_NDVI_pos_value, y = A05)) + geom_point() +
+  geom_smooth(method = "lm")
+ggplot(data_validation, aes(x = Landsat_NDVI_pos_value, y = A05)) + geom_point() +
+  geom_smooth(method = "lm")
+ggplot(data_validation, aes(x = S2_NDMI_max, y = A61)) + geom_point() +
+  geom_smooth(method = "lm")
+ggplot(data_validation, aes(x = Landsat_NDMI_max, y = A61)) + geom_point() +
+  geom_smooth(method = "lm")
+```
+
+```{r}
+summary(lm(A07 ~ canopy_height, data = data_validation))
+summary(lm(A05 ~ S2_NDVI_pos_value, data = data_validation))
+summary(lm(A05 ~ Landsat_NDVI_pos_value, data = data_validation))
+summary(lm(A61 ~ S2_NDMI_max, data = data_validation))
+summary(lm(A61 ~ Landsat_NDMI_max, data = data_validation))
+```
+
+# PCA of A‑bands + RS loadings
+
+```{r}
+X_A <- data_validation[, A_cols]
+complete_rows <- complete.cases(X_A)
+X_A_complete <- X_A[complete_rows, ]
+X_A_scaled <- scale(X_A_complete)
+pca_A <- prcomp(X_A_scaled, center = FALSE, scale. = FALSE)
+```
+
+```{r}
+summary(pca_A)$importance[2, 1:5]
+```
+
+```{r}
+PC_scores <- pca_A$x[, 1:2]  # PC1 & PC2
+
+RS_cols <- c(S2_cols, Landsat_cols)
+RS_data_complete <- data_validation[complete_rows, RS_cols]
+
+RS_cor <- cor(PC_scores, RS_data_complete, use = "pairwise.complete.obs")
+```
+
+```{r}
+RS_loadings <- as.data.frame(t(RS_cor)) |>
+  rownames_to_column("RS_var") |>
+  rename(PC1 = PC1, PC2 = PC2)
+```
+
+```{r}
+ggplot() +
+  geom_point(
+    aes(pca_A$x[,1], pca_A$x[,2]),
+    alpha = 0.3, size = 1
+  ) +
+  geom_segment(
+    data = RS_loadings,
+    aes(x = 0, y = 0, xend = PC1 * 5, yend = PC2 * 5),
+    arrow = arrow(length = unit(0.15, "cm")),
+    color = "red", alpha = 0.7
+  ) +
+  geom_text(
+    data = RS_loadings,
+    aes(x = PC1 * 5, y = PC2 * 5, label = RS_var),
+    size = 2, vjust = 1.2
+  ) +
+  theme_minimal() +
+  labs(
+    x = "PC1 (embeddings)",
+    y = "PC2 (embeddings)",
+    title = "Embedding PCA with Sentinel-2 & Landsat correlations"
+  )
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
