@@ -1,14 +1,14 @@
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/fb53bd97121f7f9ce947837ef1a4c65a73bffb3f/geom_flat_violin.R")
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 printall <- function(tibble) {
   print(tibble, width = Inf)
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 extract_info <- function(filename) {
   first_word <- strsplit(filename, "_")[[1]][1]
   biogeo <- str_extract(first_word,
@@ -19,7 +19,7 @@ extract_info <- function(filename) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
   suppressPackageStartupMessages({
     library(mgcv)
@@ -203,7 +203,7 @@ compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 # extract_monthly_avg_indices <- function(
 #   GAM_data, 
 #   monthly_doys = list("01" = 1:31, "02" = 32:59, "03" = 60:90, "04" = 91:120, 
@@ -245,7 +245,7 @@ compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
 # }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 extract_monthly_avg_indices <- function(
   GAM_data, 
   monthly_doys = list("01" = 1:31, "02" = 32:59, "03" = 60:90, "04" = 91:120, 
@@ -291,7 +291,7 @@ extract_monthly_avg_indices <- function(
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 compute_unweighted_fit <- function(
     # Data frame df with index values over time (DOY)
     df, 
@@ -357,7 +357,7 @@ compute_unweighted_fit <- function(
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 plot_histogram <- function(data, x_var, x_label) {
   ggplot(data %>%
            dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
@@ -368,34 +368,109 @@ plot_histogram <- function(data, x_var, x_label) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
-distr_plot <- function(data, y_vars, y_labels) {
+## ----------------------------------------------------------------------------------------
+distr_plot <- function(data,
+                       y_vars,
+                       y_labels,
+                       grey = TRUE,
+                       p_low = 0.10,
+                       p_high = 0.90,
+                       low_groups = c("T"),
+                       high_groups = c("Q", "R", "S"),
+                       grey_color = "grey60",
+                       print_plots = FALSE) {
+  stopifnot(length(y_vars) == length(y_labels))
+
+  # Ensure y_vars/y_labels can be length-1 strings
+  if (!is.vector(y_vars))   y_vars   <- c(y_vars)
+  if (!is.vector(y_labels)) y_labels <- c(y_labels)
+
+  library(ggplot2)
+  library(dplyr)
+  library(rlang)
+  library(stringr)
+
+  base_data <- data %>%
+    dplyr::filter(EUNISa_1 %in% union(low_groups, high_groups))
+
+  plots <- vector("list", length(y_vars))
+
   for (i in seq_along(y_vars)) {
-    y_var <- y_vars[[i]]
+    y_var   <- y_vars[[i]]
     y_label <- y_labels[[i]]
-    
-    p <- ggplot(data = data %>%
-                  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
-                aes(x = EUNISa_1_descr, y = !!sym(y_var), fill = EUNISa_1_descr)) +
+
+    if (grey) {
+      df_flag <- base_data %>%
+        group_by(EUNISa_1) %>%
+        mutate(
+          q_low  = quantile(!!sym(y_var), p_low,  na.rm = TRUE),
+          q_high = quantile(!!sym(y_var), p_high, na.rm = TRUE),
+          grey_flag = case_when(
+            EUNISa_1 %in% low_groups  ~ (!!sym(y_var)) <= q_low,
+            EUNISa_1 %in% high_groups ~ (!!sym(y_var)) >= q_high,
+            TRUE ~ FALSE
+          ),
+          grey_flag = coalesce(grey_flag, FALSE)
+        ) %>%
+        ungroup()
+    }
+
+    p <- ggplot(
+      data = base_data,
+      aes(x = EUNISa_1, y = !!sym(y_var), fill = EUNISa_1)
+    ) +
+      # Violin
       geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
-      geom_point(aes(y = !!sym(y_var), color = EUNISa_1_descr),
-                 position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+
+      # Points (with or without greying)
+      {
+        if (grey) {
+          list(
+            geom_point(
+              data = df_flag %>% filter(!grey_flag),
+              aes(y = !!sym(y_var), color = EUNISa_1),
+              position = position_jitter(width = 0.15),
+              size = 0.25, alpha = 0.25
+            ),
+            geom_point(
+              data = df_flag %>% filter(grey_flag),
+              aes(y = !!sym(y_var)),
+              color = grey_color,
+              position = position_jitter(width = 0.15),
+              size = 0.25, alpha = 0.6
+            )
+          )
+        } else {
+          geom_point(
+            aes(y = !!sym(y_var), color = EUNISa_1),
+            position = position_jitter(width = 0.15),
+            size = 0.25, alpha = 0.25
+          )
+        }
+      } +
+
+      # BOX PLOT LAST (on top) — only change for rule #1
       geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
-      stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
-      stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
-                                                     label = length(x)),
-                   geom = "text", aes(label = ..label..), vjust = 0.5) +
+
       labs(y = y_label, x = "EUNIS level 1") +
       scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
-      guides(fill = FALSE, color = FALSE) +
+      guides(fill = "none", color = "none") +
       theme_bw() + coord_flip()
-    
-    print(p)
+
+    if (print_plots) print(p)
+    plots[[i]] <- p
+  }
+
+  # Return a single ggplot if length == 1 (so you can use it with grid.arrange directly)
+  if (length(plots) == 1L) {
+    return(plots[[1L]])
+  } else {
+    return(plots)  # list of ggplots
   }
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 distr_plot_biogeo <- function(data, y_vars, y_labels) {
   plots <- list()
   
@@ -426,7 +501,7 @@ distr_plot_biogeo <- function(data, y_vars, y_labels) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 split_train_test <- function(data, proportion = 0.7) {
   train_indices <- sample(1:nrow(data), size = floor(proportion * nrow(data)))
   train_data <- data[train_indices, ]
@@ -435,7 +510,7 @@ split_train_test <- function(data, proportion = 0.7) {
   }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 run_rf <- function(vars_RF, train_data, response_var, ntree = 500, seed = 123) {
   set.seed(seed)
   execution_time <- system.time({
@@ -452,7 +527,7 @@ run_rf <- function(vars_RF, train_data, response_var, ntree = 500, seed = 123) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 run_rf_parallel <- function(vars_RF, train_data, response_var, ntree = 500) {
   # Build formula locally (no NSE)
   fmla <- reformulate(vars_RF, response = response_var)
@@ -494,7 +569,7 @@ run_rf_parallel <- function(vars_RF, train_data, response_var, ntree = 500) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 compute_varimp <- function(model, nperm = 100) {
 
   # Measure execution time
@@ -506,7 +581,7 @@ compute_varimp <- function(model, nperm = 100) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 compute_varimp_cond <- function(model, nperm = 100) {
 
   # Measure execution time
@@ -518,7 +593,7 @@ compute_varimp_cond <- function(model, nperm = 100) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 compute_roc_level1 <- function(model, test_data) {
   # Measure execution time
   execution_time <- system.time({
@@ -554,7 +629,7 @@ compute_roc_level1 <- function(model, test_data) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 compute_roc_level2 <- function(model, test_data) {
   # Measure execution time
   execution_time <- system.time({
@@ -593,7 +668,7 @@ compute_roc_level2 <- function(model, test_data) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 rough_validation_S2 <- function(data) {
   data %>%
     mutate(
@@ -615,7 +690,7 @@ rough_validation_S2 <- function(data) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 rough_validation_SatEmb <- function(data) {
   data %>%
     mutate(
@@ -633,7 +708,7 @@ rough_validation_SatEmb <- function(data) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 rough_validation_Landsat <- function(data) {
   data %>%
     mutate(
@@ -649,7 +724,38 @@ rough_validation_Landsat <- function(data) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
+# data: your tibble/data.frame
+# y_var: name of the numeric column as a string, e.g., "NDVI_pos_value"
+filter_by_group_percentiles <- function(data, y_var) {
+  cats <- c("T","Q","R","S")
+
+  # Compute thresholds per group for the selected column
+  qs <- data %>%
+    dplyr::group_by(EUNISa_1) %>%
+    dplyr::summarise(
+      p10 = stats::quantile(.data[[y_var]], probs = 0.10, na.rm = TRUE),
+      p90 = stats::quantile(.data[[y_var]], probs = 0.90, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  # Join thresholds and filter rows according to the rule
+  d_filtered <- data %>%
+    dplyr::left_join(qs, by = "EUNISa_1") %>%
+    dplyr::filter(
+      dplyr::case_when(
+        EUNISa_1 == "T" ~ .data[[y_var]] >= p10,        # keep >= 10% for T
+        EUNISa_1 %in% c("Q","R","S") ~ .data[[y_var]] <= p90,  # keep <= 90% for Q/R/S
+        TRUE ~ TRUE
+      )
+    ) %>%
+    dplyr::select(-p10, -p90)  # drop helper columns
+
+  return(d_filtered)
+}
+
+
+## ----------------------------------------------------------------------------------------
 distr_plot_percentiles <- function(data, y_vars, y_labels) {
   for (i in seq_along(y_vars)) {
     y_var <- y_vars[[i]]
@@ -705,7 +811,7 @@ distr_plot_percentiles <- function(data, y_vars, y_labels) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 calculate_df_aux <- function(data, prob_cols) {
   data %>%
     rowwise() %>%
@@ -729,7 +835,7 @@ calculate_df_aux <- function(data, prob_cols) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 filter_probs_neg35_pos10 <- function(gdf) {
   # Removes negatives until 35% of the class
   cap_total <- ceiling(0.35 * nrow(gdf))  # max 35% of the class
@@ -757,7 +863,7 @@ filter_probs_neg35_pos10 <- function(gdf) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 filter_probs_neg35 <- function(gdf) {
   # Removes negatives until 35% of the class
   cap_total <- ceiling(0.35 * nrow(gdf))  # max 35% of the class
@@ -772,10 +878,38 @@ filter_probs_neg35 <- function(gdf) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
-filter_probs_neg50 <- function(gdf) {
-  # Removes negatives until 50% of the class
-  cap_total <- ceiling(0.50 * nrow(gdf))  # max 50% of the class
+## ----------------------------------------------------------------------------------------
+filter_probs_neg20_pos10 <- function(gdf) {
+  # Removes negatives until 20% of the class
+  cap_total <- ceiling(0.20 * nrow(gdf))  # max 20% of the class
+
+  neg <- gdf %>% filter(neg_flag) %>% arrange(desc(gap_neg))
+  drop_neg <- head(neg, cap_total)
+  cap_left <- cap_total - nrow(drop_neg)
+
+  drop_pos <- tibble()
+  if (cap_left > 0) {
+    remaining <- nrow(gdf) - nrow(drop_neg)
+    # If there is room, removes positives with doubts (small_flag = TRUE)
+    # until 10% of the rest
+    pos_cap <- ceiling(0.10 * remaining)
+
+    drop_pos <- gdf %>%
+      filter(!neg_flag & small_flag) %>%
+      arrange(delta) %>%
+      slice_head(n = min(cap_left, pos_cap))
+  }
+
+  drop_ids <- c(drop_neg$PlotObservationID, drop_pos$PlotObservationID)
+  gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
+    select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
+}
+
+
+## ----------------------------------------------------------------------------------------
+filter_probs_neg20 <- function(gdf) {
+  # Removes negatives until 20% of the class
+  cap_total <- ceiling(0.20 * nrow(gdf))  # max 20% of the class
 
   neg <- gdf %>% filter(neg_flag) %>% arrange(desc(gap_neg))
   drop_neg <- head(neg, cap_total)
@@ -787,7 +921,7 @@ filter_probs_neg50 <- function(gdf) {
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 plot_confusion_matrix <- function(predictions, reference, 
                                   title = "Confusion Matrix") {
   cm_df <- as.data.frame(as.table(confusionMatrix(predictions, reference)))
@@ -808,11 +942,16 @@ plot_confusion_matrix <- function(predictions, reference,
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
-compare_classes <- function(data_before, data_step1, data_step2 = NULL,
-                            class_col = "EUNISa_1",
-                            title = "Size of each class across steps",
-                            x_lab = NULL) {
+## ----------------------------------------------------------------------------------------
+compare_classes <- function(
+  data_before, data_step1, data_step2 = NULL,
+  class_col = "EUNISa_1",
+  x_lab = NULL,
+  title = NULL,
+  return = c("plot", "both", "counts")
+) {
+  return <- match.arg(return)
+
   # Helper: safe counting that works with empty data frames
   count_safe <- function(df, out_name) {
     if (is.null(df) || nrow(df) == 0) {
@@ -874,18 +1013,14 @@ compare_classes <- function(data_before, data_step1, data_step2 = NULL,
     legend_title <- "State"
   }
 
-  # Labels
-  if (is.null(x_lab)) {
-    x_lab <- paste0("Class (", class_col, ")")
-  }
-
-  # Plot
+    # Plot
   p <- ggplot(counts_long, aes(x = .data[[class_col]], y = n, fill = state)) +
-    geom_col(position = position_dodge(width = 0.85), width = 0.8) +
+    geom_col(position = position_dodge(width = 0.85),
+             width = 0.8, color = "black", linewidth = 0.25) +
     labs(
       title = title,
       x = x_lab,
-      y = "Number of rows",
+      y = "Number of observations",
       fill = legend_title
     ) +
     theme_minimal() +
@@ -894,13 +1029,22 @@ compare_classes <- function(data_before, data_step1, data_step2 = NULL,
       panel.grid.minor = element_blank()
     )
 
-  # Print the plot and invisibly return counts
-  print(p)
-  invisible(counts)
+  # Optionally attach counts to the plot as an attribute for quick retrieval
+  attr(p, "counts") <- counts
+
+  # Return mode
+  if (return == "plot") {
+    return(p)
+  } else if (return == "counts") {
+    return(counts)
+  } else {
+    # both
+    return(list(plot = p, counts = counts))
+  }
 }
 
 
-## ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+## ----------------------------------------------------------------------------------------
 # Session info
 sessionInfo()
 

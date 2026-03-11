@@ -83,7 +83,7 @@ ctrl <- trainControl(
   number = 4,
   allowParallel = FALSE,
   savePredictions = "final",
-  classProbs = FALSE,     # set TRUE if you also want probabilities (for ROC)
+  classProbs = TRUE,     # set TRUE if you also want probabilities (for ROC)
   summaryFunction = multiClassSummary  # optional, for multi-class summaries
 )
 
@@ -100,7 +100,7 @@ cv_SatEmb_CH <- caret::train(
     mtry = round(sqrt(length(vars_RF_SatEmb_CH)))
   ),
   controls = party::cforest_control(
-    ntree = 100
+    ntree = 5
   )
 )
 

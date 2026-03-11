@@ -1,0 +1,2111 @@
+---
+title: "Script to validate points in ReSurvey database using RS data (S2 + SatEmb + Landsat)"
+subtitle: "Fitting Random Forest models with ntree = 1500, excluding manipulated observations"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This R script is used to validate the points in the ReSurvey database using either RS indicators from S2 or Landsat (indices + phenology + canopy height), or bands from the Google Satellite Embedding dataset: https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_SATELLITE_EMBEDDING_V1_ANNUAL#description
+Here, we filter out manipulated observations to avoid using them in analyses.
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(parallel)
+library(doParallel)
+library(moreparty)
+library(caret)
+library(randomForest)
+library(pROC)
+library(rlang)
+library(stringr)
+library(beepr)
+library(permimp)
+library(purrr)
+library(gghalves)
+library(patchwork)
+library(scales)
+```
+
+# Load functions
+
+```{r}
+knitr::purl("functions_20260122.Rmd", output = "functions_20260122.R")
+source("functions_20260122.R")
+```
+
+# Load previously created objects
+
+```{r}
+# Define the folder path
+folder_path <- here("objects", "RF_1500_20260128")
+
+# List all .RData or .rda files in the folder
+rdata_files <- list.files(folder_path, full.names = TRUE)
+
+# Load each file
+lapply(rdata_files, load, envir = .GlobalEnv)
+```
+
+# Read data
+
+```{r}
+data_validation_S2 <- read_tsv(here(
+  "data", "clean","final_RS_data_bands_S2_all_20251021.csv"))
+data_validation_SatEmb <- read_tsv(here(
+  "data", "clean","final_RS_data_SatEmb_20251010.csv")) %>%
+  rename(EUNISa_1_descr = EUNIS_1_d)
+data_validation_Landsat <- read_tsv(here(
+  "data", "clean","final_RS_data_bands_Landsat_all_20251021.csv"))
+```
+
+No parsing issues!
+
+```{r}
+nrow(data_validation_S2)
+nrow(data_validation_Landsat)
+nrow(data_validation_SatEmb)
+```
+
+# Filter out manipulated observations
+
+## Read list of PlotObservationIDs to keep
+
+```{r}
+PlotObservationID_list <- read_csv(
+  here("data", "clean","PlotObservationIDs_filtered_QRST_20260122.csv"))
+```
+
+## Filter out data to keep only those PlotObservationIDs
+
+```{r}
+data_validation_S2 <- data_validation_S2 %>%
+  filter(PlotObservationID %in% PlotObservationID_list$PlotObservationID)
+data_validation_SatEmb <- data_validation_SatEmb %>%
+  filter(PlotObservationID %in% PlotObservationID_list$PlotObservationID)
+data_validation_Landsat <- data_validation_Landsat %>%
+  filter(PlotObservationID %in% PlotObservationID_list$PlotObservationID)
+```
+
+```{r}
+nrow(data_validation_S2)
+nrow(data_validation_Landsat)
+nrow(data_validation_SatEmb)
+```
+
+# Define lists of predictor vars
+
+## S2 and Landsat
+
+### Moments with slope method
+
+Not using threshold method cause it gave worse results earlier.
+
+```{r}
+vars_RF_slope <- c(
+  # Min values of all indices
+  "NDVI_min", "EVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, EVI and SAVI
+  "NDVI_auc_slope", "EVI_auc_slope", "SAVI_auc_slope",
+  # Values of NDVI, EVI and SAVI at sos, pos and eos
+  "NDVI_sos_slope_value", "NDVI_pos_value", "NDVI_eos_slope_value",
+  "EVI_sos_slope_value", "EVI_pos_value", "EVI_eos_slope_value", 
+  "SAVI_sos_slope_value", "SAVI_pos_value", "SAVI_eos_slope_value",
+  # Differences pos-sos in value and doy
+  "NDVI_diff_pos_sos_slope_value", "EVI_diff_pos_sos_slope_value",
+  "SAVI_diff_pos_sos_slope_value","NDVI_diff_pos_sos_slope_doy", 
+  "EVI_diff_pos_sos_slope_doy", "SAVI_diff_pos_sos_slope_doy",
+  # Differences pos-eos in value and doy
+  "NDVI_diff_pos_eos_slope_value", "EVI_diff_pos_eos_slope_value",
+  "SAVI_diff_pos_eos_slope_value", "NDVI_diff_pos_eos_slope_doy", 
+  "EVI_diff_pos_eos_slope_doy", "SAVI_diff_pos_eos_slope_doy",
+  # Growing season duration
+  "NDVI_slope_gsd", "EVI_slope_gsd", "SAVI_slope_gsd",
+  # Canopy height
+  "canopy_height")
+```
+
+```{r}
+# Excluding EVI because many values outside of range -1, 1
+vars_RF_slope_Landsat <- c(
+  # Min values of all indices
+  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI and SAVI
+  "NDVI_auc_slope", "SAVI_auc_slope",
+  # Values of NDVI and SAVI at sos, pos and eos
+  "NDVI_sos_slope_value", "NDVI_pos_value", "NDVI_eos_slope_value",
+  "SAVI_sos_slope_value", "SAVI_pos_value", "SAVI_eos_slope_value",
+  # Differences pos-sos in value and doy
+  "NDVI_diff_pos_sos_slope_value","SAVI_diff_pos_sos_slope_value",
+  "NDVI_diff_pos_sos_slope_doy", "SAVI_diff_pos_sos_slope_doy",
+  # Differences pos-eos in value and doy
+  "NDVI_diff_pos_eos_slope_value", "SAVI_diff_pos_eos_slope_value",
+  "NDVI_diff_pos_eos_slope_doy", "SAVI_diff_pos_eos_slope_doy",
+  # Growing season duration
+  "NDVI_slope_gsd", "SAVI_slope_gsd",
+  # Canopy height
+  "canopy_height")
+```
+
+### Months method
+
+```{r}
+vars_RF_months <- c(
+  # Min values of all indices
+  "NDVI_min", "EVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, EVI and SAVI between march and oct
+  "NDVI_auc_mar_oct", "EVI_auc_mar_oct", "SAVI_auc_mar_oct",
+  # Values of NDVI, EVI and SAVI at march, pos and oct
+  "NDVI_avg_value_03", "NDVI_pos_value", "NDVI_avg_value_10",
+  "EVI_avg_value_03", "EVI_pos_value", "EVI_avg_value_10", 
+  "SAVI_avg_value_03", "SAVI_pos_value", "SAVI_avg_value_10",
+  # Differences pos-march in value and doy
+  "NDVI_diff_pos_march_value", "EVI_diff_pos_march_value",
+  "SAVI_diff_pos_march_value","NDVI_diff_pos_march_doy", 
+  "EVI_diff_pos_march_doy", "SAVI_diff_pos_march_doy",
+  # Differences pos-oct in value and doy
+  "NDVI_diff_pos_oct_value", "EVI_diff_pos_oct_value",
+  "SAVI_diff_pos_oct_value", "NDVI_diff_pos_oct_doy", 
+  "EVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy",
+  # Canopy height
+  "canopy_height")
+```
+
+```{r}
+# Excluding EVI because many values outside of range -1, 1
+vars_RF_months_Landsat <- c(
+  # Min values of all indices
+  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, and SAVI between march and oct
+  "NDVI_auc_mar_oct", "SAVI_auc_mar_oct",
+  # Values of NDVI and SAVI at march, pos and oct
+  "NDVI_avg_value_03", "NDVI_pos_value", "NDVI_avg_value_10",
+  "SAVI_avg_value_03", "SAVI_pos_value", "SAVI_avg_value_10",
+  # Differences pos-march in value and doy
+  "NDVI_diff_pos_march_value", "SAVI_diff_pos_march_value",
+  "NDVI_diff_pos_march_doy", "SAVI_diff_pos_march_doy",
+  # Differences pos-oct in value and doy
+  "NDVI_diff_pos_oct_value", "SAVI_diff_pos_oct_value",
+  "NDVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy",
+  # Canopy height
+  "canopy_height")
+```
+
+### Both
+
+Slope + months (Borja's suggestion).
+
+```{r}
+vars_RF_both <- c(
+  # Min values of all indices
+  "NDVI_min", "EVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, EVI and SAVI
+  "NDVI_auc_slope", "EVI_auc_slope", "SAVI_auc_slope",
+  # AUC of NDVI, EVI and SAVI between march and oct
+  "NDVI_auc_mar_oct", "EVI_auc_mar_oct", "SAVI_auc_mar_oct",
+  # Values of NDVI, EVI and SAVI at sos, pos and eos
+  "NDVI_sos_slope_value", "NDVI_pos_value", "NDVI_eos_slope_value",
+  "EVI_sos_slope_value", "EVI_pos_value", "EVI_eos_slope_value", 
+  "SAVI_sos_slope_value", "SAVI_pos_value", "SAVI_eos_slope_value",
+  # Differences pos-sos in value and doy
+  "NDVI_diff_pos_sos_slope_value", "EVI_diff_pos_sos_slope_value",
+  "SAVI_diff_pos_sos_slope_value","NDVI_diff_pos_sos_slope_doy", 
+  "EVI_diff_pos_sos_slope_doy", "SAVI_diff_pos_sos_slope_doy",
+  # Differences pos-eos in value and doy
+  "NDVI_diff_pos_eos_slope_value", "EVI_diff_pos_eos_slope_value",
+  "SAVI_diff_pos_eos_slope_value", "NDVI_diff_pos_eos_slope_doy", 
+  "EVI_diff_pos_eos_slope_doy", "SAVI_diff_pos_eos_slope_doy",
+  # Growing season duration
+  "NDVI_slope_gsd", "EVI_slope_gsd", "SAVI_slope_gsd",
+  # Values of NDVI, EVI and SAVI at march and oct
+  "NDVI_avg_value_03", "NDVI_avg_value_10",
+  "EVI_avg_value_03", "EVI_avg_value_10", 
+  "SAVI_avg_value_03", "SAVI_avg_value_10",
+  # Differences pos-march in value and doy
+  "NDVI_diff_pos_march_value", "EVI_diff_pos_march_value",
+  "SAVI_diff_pos_march_value","NDVI_diff_pos_march_doy", 
+  "EVI_diff_pos_march_doy", "SAVI_diff_pos_march_doy",
+  # Differences pos-oct in value and doy
+  "NDVI_diff_pos_oct_value", "EVI_diff_pos_oct_value",
+  "SAVI_diff_pos_oct_value", "NDVI_diff_pos_oct_doy", 
+  "EVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy",
+  # Canopy height
+  "canopy_height")
+```
+
+```{r}
+# Excluding EVI because many values outside of range -1, 1
+vars_RF_both_Landsat <- c(
+  # Min values of all indices
+  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI and SAVI
+  "NDVI_auc_slope", "SAVI_auc_slope",
+  # AUC of NDVI, and SAVI between march and oct
+  "NDVI_auc_mar_oct", "SAVI_auc_mar_oct",
+  # Values of NDVI and SAVI at sos, pos and eos
+  "NDVI_sos_slope_value", "NDVI_pos_value", "NDVI_eos_slope_value",
+  "SAVI_sos_slope_value", "SAVI_pos_value", "SAVI_eos_slope_value",
+  # Differences pos-sos in value and doy
+  "NDVI_diff_pos_sos_slope_value","SAVI_diff_pos_sos_slope_value",
+  "NDVI_diff_pos_sos_slope_doy", "SAVI_diff_pos_sos_slope_doy",
+  # Differences pos-eos in value and doy
+  "NDVI_diff_pos_eos_slope_value", "SAVI_diff_pos_eos_slope_value",
+  "NDVI_diff_pos_eos_slope_doy", "SAVI_diff_pos_eos_slope_doy",
+  # Growing season duration
+  "NDVI_slope_gsd", "SAVI_slope_gsd",
+  # Values of NDVI and SAVI at march and oct
+  "NDVI_avg_value_03", "NDVI_avg_value_10",
+  "SAVI_avg_value_03", "SAVI_avg_value_10",
+  # Differences pos-march in value and doy
+  "NDVI_diff_pos_march_value", "SAVI_diff_pos_march_value",
+  "NDVI_diff_pos_march_doy", "SAVI_diff_pos_march_doy",
+  # Differences pos-oct in value and doy
+  "NDVI_diff_pos_oct_value", "SAVI_diff_pos_oct_value",
+  "NDVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy",
+  # Canopy height
+  "canopy_height")
+```
+
+## SatEmb
+
+```{r}
+vars_RF_SatEmb <- colnames(
+  data_validation_SatEmb)[startsWith(colnames(data_validation_SatEmb), "A")]
+vars_RF_SatEmb_CH <- c(vars_RF_SatEmb, "canopy_height")
+```
+
+# Filter data to use in RF models
+
+## Functions
+
+```{r}
+filter_data_S2 <- function(data, variables) {
+  data %>%
+    mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+    # Remove rows with missing values in predictors
+    dplyr::filter(if_all(all_of(variables), ~ !is.na(.))) %>%
+    # Remove all rows with wrong values of indices (not between -1 and 1)
+    dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+    dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+    dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+    dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+    dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+    # Select only variables needed
+    dplyr::select(PlotObservationID, EUNISa_1, all_of(variables), Lctnmth,
+           valid_1) %>%
+    # Keep only rows with differences > 0 in variables
+    filter(if_all(any_of(variables[grepl("diff", variables)]), 
+                  ~ .x > 0)) %>%
+    # Select only GPS points
+    dplyr::filter(Lctnmth == "Location with GPS" | 
+                    Lctnmth == "Location with differential GPS")
+}
+```
+
+```{r}
+filter_data_Landsat <- function(data, variables) {
+  data %>%
+    mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+    # Remove rows with missing values in predictors
+    dplyr::filter(if_all(all_of(variables), ~ !is.na(.))) %>%
+    # Remove all rows with wrong values of indices (not between -1 and 1)
+    dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+    # With Landsat data, many observations removed because of high/low EVI values
+    # In Landsat_extraction, values of EVI outside of expected range were set as NA,
+    # so better not to use EVI here
+    # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+    dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+    dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+    dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+    # Select only variables needed
+    dplyr::select(PlotObservationID, EUNISa_1, all_of(variables), Lctnmth,
+           valid_1) %>%
+    # Keep only rows with differences > 0 in variables
+    filter(if_all(any_of(variables[grepl("diff", variables)]), 
+                  ~ .x > 0)) %>%
+    # Select only GPS points
+    dplyr::filter(Lctnmth == "Location with GPS" | 
+                    Lctnmth == "Location with differential GPS")
+}
+```
+
+```{r}
+filter_data_SatEmb <- function(data, variables) {
+  data %>%
+    mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+    # Remove rows with missing values in predictors
+    dplyr::filter(if_all(all_of(variables), ~ !is.na(.))) %>%
+    # Select only variables needed
+    dplyr::select(PlotObservationID, EUNISa_1, all_of(variables), 
+           Lctnmth, valid_1) %>%
+    # Select only GPS points
+    dplyr::filter(Lctnmth == "Location with GPS" |
+                    Lctnmth == "Location with differential GPS")
+  }
+```
+
+## Filtered data
+
+Select only GPS points that have passed the rough validation in each case.
+
+For S2 and Landsat, use only slope and months methods, as threshold method has many missing values.
+
+```{r}
+# S2
+filtered_data_slope_S2 <- data_validation_S2 %>%
+  # Rough validation based on CH and NDWI
+  rough_validation_S2()  %>%
+  # Data filtering
+  filter_data_S2(vars_RF_slope) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value")
+
+filtered_data_months_S2 <- data_validation_S2 %>%
+  # Rough validation based on CH and NDWI
+  rough_validation_S2() %>% 
+  # Data filtering
+  filter_data_S2(vars_RF_months) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value")
+
+filtered_data_both_S2 <- data_validation_S2 %>%
+  # Rough validation based on CH and NDWI
+  rough_validation_S2() %>% 
+  # Data filtering
+  filter_data_S2(vars_RF_both) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value")
+
+# Landsat
+filtered_data_slope_Landsat <- data_validation_Landsat %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>% 
+  # Data filtering
+  filter_data_Landsat(vars_RF_slope_Landsat) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value")
+
+filtered_data_months_Landsat <- data_validation_Landsat %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>% 
+  # Data filtering
+  filter_data_Landsat(vars_RF_months_Landsat) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value")
+
+filtered_data_both_Landsat <- data_validation_Landsat %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>% 
+  # Data filtering
+  filter_data_Landsat(vars_RF_both_Landsat) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value")
+
+# SatEmb
+filtered_data_SatEmb <- data_validation_SatEmb %>%
+  # Rough validation based on CH
+  rough_validation_SatEmb() %>% 
+  # Join with S2 data to get NDWI_max info
+  left_join(
+    data_validation_S2 %>% select(PlotObservationID, NDWI_max)
+  ) %>%
+  # Rough validation based on NDWI (from S2)
+  # Remove those with NDWI_max > 0.3, keep if NDWI_max is NA
+  filter(NDWI_max <= 0.3 | is.na(NDWI_max)) %>%
+  # Remove unneeded var
+  select(-NDWI_max) %>%
+  # Data filtering
+  filter_data_SatEmb(vars_RF_SatEmb) %>% 
+  # Join with S2 data to get NDVI_pos_value info
+  left_join(
+    data_validation_S2 %>% select(PlotObservationID, NDVI_pos_value)
+  ) %>%
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value") %>%
+  # Remove unneeded var
+  select(-NDVI_pos_value) 
+filtered_data_SatEmb_CH <- data_validation_SatEmb %>%
+  # Rough validation based on CH
+  rough_validation_SatEmb() %>% 
+  # Join with S2 data to get NDWI_max info
+  left_join(
+    data_validation_S2 %>% select(PlotObservationID, NDWI_max)
+  ) %>%
+  # Rough validation based on NDWI (from S2)
+  # Remove those with NDWI_max > 0.3, keep if NDWI_max is NA
+  filter(NDWI_max <= 0.3 | is.na(NDWI_max)) %>%
+  # Remove unneeded var
+  select(-NDWI_max) %>%
+  # Data filtering
+  filter_data_SatEmb(vars_RF_SatEmb_CH) %>% 
+  # Join with S2 data to get NDVI_pos_value info
+  left_join(
+    data_validation_S2 %>% select(PlotObservationID, NDVI_pos_value)
+  ) %>%
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value") %>%
+  # Remove unneeded vars
+  select(-NDVI_pos_value) 
+```
+
+## (Appendix 2) Plots distribution max NDVI
+
+```{r}
+plot_perc_S2 <- data_validation_S2 %>%
+  # Rough validation based on CH and NDWI
+  rough_validation_S2() %>% 
+  # Data filtering
+  filter_data_S2(vars_RF_months) %>% 
+  distr_plot("NDVI_pos_value", "Maximum NDVI", grey = T)
+```
+
+```{r}
+plot_perc_Landsat <- data_validation_Landsat %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>% 
+  # Data filtering
+  filter_data_Landsat(vars_RF_months_Landsat) %>%
+  distr_plot("NDVI_pos_value", "Maximum NDVI", grey = T)
+```
+
+```{r}
+plot_perc_Landsat + plot_perc_S2 +
+  plot_annotation(tag_levels = "A", tag_suffix = ")")
+ggsave(here("output", "figures", "manuscript", "appendix2.jpeg"), 
+       dpi = 300, width = 8, height = 5)
+```
+
+# Fit RF models (level 1)
+
+## Without refinement
+
+### N points per category
+
+```{r}
+bind_rows(
+  # S2
+  filtered_data_slope_S2 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(sensor = "S2", method = "slope") %>% 
+    select(sensor, method, Q, R, S, T),
+  filtered_data_months_S2 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(sensor = "S2", method = "months") %>% 
+    select(sensor, method, Q, R, S, T),
+  filtered_data_both_S2 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(sensor = "S2", method = "both") %>% 
+    select(sensor, method, Q, R, S, T),
+  # # Landsat
+  filtered_data_slope_Landsat %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>%
+    mutate(sensor = "Landsat", method = "slope") %>% 
+    select(sensor, method, Q, R, S, T),
+  filtered_data_months_Landsat %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>%
+    mutate(sensor = "Landsat", method = "months") %>% 
+    select(sensor, method, Q, R, S, T),
+  filtered_data_both_Landsat %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>%
+    mutate(sensor = "Landsat", method = "both") %>% 
+    select(sensor, method, Q, R, S, T),
+  # SatEmb
+  filtered_data_SatEmb %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(sensor = "SatEmb", method ="SatEmb only") %>% 
+    select(sensor, method, Q, R, S, T),
+  filtered_data_SatEmb_CH %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(sensor = "SatEmb", method ="SatEmb + CH") %>% 
+    select(sensor, method, Q, R, S, T)
+)
+```
+
+```{r}
+bind_rows(
+  # S2
+  filtered_data_slope_S2 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(sensor = "S2", method = "slope") %>% 
+    select(sensor, method, Q, R, S, T),
+  filtered_data_months_S2 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(sensor = "S2", method = "months") %>% 
+    select(sensor, method, Q, R, S, T),
+  filtered_data_both_S2 %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(sensor = "S2", method = "both") %>% 
+    select(sensor, method, Q, R, S, T),
+  # # Landsat
+  filtered_data_slope_Landsat %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>%
+    mutate(sensor = "Landsat", method = "slope") %>% 
+    select(sensor, method, Q, R, S, T),
+  filtered_data_months_Landsat %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>%
+    mutate(sensor = "Landsat", method = "months") %>% 
+    select(sensor, method, Q, R, S, T),
+  filtered_data_both_Landsat %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>%
+    mutate(sensor = "Landsat", method = "both") %>% 
+    select(sensor, method, Q, R, S, T),
+  # SatEmb
+  filtered_data_SatEmb %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(sensor = "SatEmb", method ="SatEmb only") %>% 
+    select(sensor, method, Q, R, S, T),
+  filtered_data_SatEmb_CH %>% count(EUNISa_1) %>%
+    pivot_wider(names_from = EUNISa_1, values_from = n) %>% 
+    mutate(sensor = "SatEmb", method ="SatEmb + CH") %>% 
+    select(sensor, method, Q, R, S, T)
+) %>%
+  pivot_longer(cols = 3:6, names_to = "EUNIS", values_to = "Count") %>%
+  ggplot(aes(x = EUNIS, y = Count, fill = EUNIS, group = EUNIS)) +
+  geom_col() +
+  facet_wrap(~ sensor + method) + theme_bw() +
+  # ggtitle("Reduction in number of observations with filtering steps") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+```
+
+### Split into training and test data sets
+
+Split data:
+
+```{r}
+# S2
+# Slope
+set.seed(123)
+split_data_slope_S2 <- split_train_test(filtered_data_slope_S2)
+
+train_data_slope_S2 <- split_data_slope_S2$train
+test_data_slope_S2 <- split_data_slope_S2$test
+
+# Check overlap between training and testing datasets
+sum(train_data_slope_S2$PlotObservationID %in% test_data_slope_S2$PlotObservationID)
+
+# Months
+set.seed(123)
+split_data_months_S2 <- split_train_test(filtered_data_months_S2)
+
+train_data_months_S2 <- split_data_months_S2$train
+test_data_months_S2 <- split_data_months_S2$test
+
+# Check overlap between training and testing datasets
+sum(train_data_months_S2$PlotObservationID %in% test_data_months_S2$PlotObservationID)
+
+# Both
+set.seed(123)
+split_data_both_S2 <- split_train_test(filtered_data_both_S2)
+
+train_data_both_S2 <- split_data_both_S2$train
+test_data_both_S2 <- split_data_both_S2$test
+
+# Check overlap between training and testing datasets
+sum(train_data_both_S2$PlotObservationID %in% test_data_both_S2$PlotObservationID)
+
+# Landsat
+# Slope
+set.seed(123)
+split_data_slope_Landsat <- split_train_test(filtered_data_slope_Landsat)
+
+train_data_slope_Landsat <- split_data_slope_Landsat$train
+test_data_slope_Landsat <- split_data_slope_Landsat$test
+
+# Check overlap between training and testing datasets
+sum(train_data_slope_Landsat$PlotObservationID %in% test_data_slope_Landsat$PlotObservationID)
+
+# Months
+set.seed(123)
+split_data_months_Landsat <- split_train_test(filtered_data_months_Landsat)
+
+train_data_months_Landsat <- split_data_months_Landsat$train
+test_data_months_Landsat <- split_data_months_Landsat$test
+
+# Check overlap between training and testing datasets
+sum(train_data_months_Landsat$PlotObservationID %in% test_data_months_Landsat$PlotObservationID)
+
+# Both
+set.seed(123)
+split_data_both_Landsat <- split_train_test(filtered_data_both_Landsat)
+
+train_data_both_Landsat <- split_data_both_Landsat$train
+test_data_both_Landsat <- split_data_both_Landsat$test
+
+# Check overlap between training and testing datasets
+sum(train_data_both_Landsat$PlotObservationID %in% test_data_both_Landsat$PlotObservationID)
+
+# SatEmb
+set.seed(123)
+split_data_SatEmb <- split_train_test(filtered_data_SatEmb)
+
+train_data_SatEmb <- split_data_SatEmb$train
+test_data_SatEmb <- split_data_SatEmb$test
+
+# Check overlap between training and testing datasets
+sum(train_data_SatEmb$PlotObservationID %in% test_data_SatEmb$PlotObservationID)
+
+# SatEmb_CH
+set.seed(123)
+split_data_SatEmb_CH <- split_train_test(filtered_data_SatEmb_CH)
+
+train_data_SatEmb_CH <- split_data_SatEmb_CH$train
+test_data_SatEmb_CH <- split_data_SatEmb_CH$test
+
+# Check overlap between training and testing datasets
+sum(train_data_SatEmb_CH$PlotObservationID %in% test_data_SatEmb_CH$PlotObservationID)
+```
+
+### Fit models
+
+```{r eval=FALSE, include=FALSE}
+# S2
+rf_slope_S2 <- run_rf_parallel(vars_RF_slope, train_data_slope_S2, "EUNISa_1",
+                      ntree = 1500)
+rf_months_S2 <- run_rf_parallel(vars_RF_months, train_data_months_S2, "EUNISa_1",
+                       ntree = 1500)
+rf_both_S2 <- run_rf_parallel(vars_RF_both, train_data_both_S2, "EUNISa_1",
+                       ntree = 1500)
+
+# Landsat
+rf_slope_Landsat <- run_rf_parallel(vars_RF_slope_Landsat, train_data_slope_Landsat, 
+                           "EUNISa_1", ntree = 1500)
+rf_months_Landsat <- run_rf_parallel(vars_RF_months_Landsat, train_data_months_Landsat,
+                            "EUNISa_1", ntree = 1500)
+rf_both_Landsat <- run_rf_parallel(vars_RF_both_Landsat, train_data_both_Landsat,
+                            "EUNISa_1", ntree = 1500)
+
+# SatEmb
+rf_SatEmb <- run_rf_parallel(vars_RF_SatEmb, train_data_SatEmb, "EUNISa_1",
+                    ntree = 1500)
+rf_SatEmb_CH <- run_rf_parallel(vars_RF_SatEmb_CH, train_data_SatEmb_CH, "EUNISa_1",
+                       ntree = 1500)
+```
+
+```{r}
+models_no_refin <- c("rf_slope_S2", "rf_months_S2", "rf_both_S2", 
+                     "rf_slope_Landsat", "rf_months_Landsat", "rf_both_Landsat",
+                     "rf_SatEmb", "rf_SatEmb_CH")
+```
+
+Print the time:
+
+```{r}
+for (model_name in models_no_refin) {
+  obj <- get(model_name)
+  cat("Time for", model_name, ":\n")
+  print(obj$time)
+}
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (model_name in models_no_refin) {
+  file_path <- paste0("objects/RF_1500_20260128/", model_name, "_model.Rdata")
+  save(list = model_name, file = file_path)
+}
+```
+
+### Predictions
+
+```{r eval=FALSE, include=FALSE}
+for (model_name in models_no_refin) {
+  # Derive test data name by replacing "rf_" with "test_data_"
+  test_data_name <- sub("^rf_", "test_data_", model_name)
+  
+  # Create prediction variable name
+  prediction_name <- paste0(model_name, "_prediction")
+  
+  # Get model and test data
+  model <- get(model_name)$model
+  test_data <- get(test_data_name)
+  
+  # Run prediction
+  prediction <- predict(model, newdata = test_data, 
+                        type = "response")
+  
+  # Assign prediction to a variable
+  assign(prediction_name, prediction)
+}
+```
+
+```{r}
+predictions_no_refin <- c("rf_slope_S2_prediction", "rf_months_S2_prediction",
+                          "rf_both_S2_prediction", 
+                          "rf_slope_Landsat_prediction", 
+                          "rf_months_Landsat_prediction", 
+                          "rf_both_Landsat_prediction",
+                          "rf_SatEmb_prediction", "rf_SatEmb_CH_prediction")
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (prediction_name in predictions_no_refin) {
+  file_path <- paste0("objects/RF_1500_20260128/", prediction_name, ".Rdata")
+  save(list = prediction_name, file = file_path)
+}
+```
+
+### Confusion matrices
+
+```{r}
+for (prediction_name in predictions_no_refin) {
+  # Derive test data name by replacing "_prediction" with "" 
+  # and "rf_" with "test_data_"
+  test_data_name <- paste0("test_data_", sub("^rf_", "", sub("_prediction$", "",
+                                                             prediction_name)))
+  
+  # Get prediction and test data
+  prediction <- get(prediction_name)
+  test_data <- get(test_data_name)
+  
+  # Compute confusion matrix
+  cat("Confusion Matrix for", sub("_prediction$", "", prediction_name), ":\n")
+  print(confusionMatrix(prediction, test_data$EUNISa_1))
+  cat("\n")
+}
+```
+
+#### Plots
+
+```{r}
+for (prediction_name in predictions_no_refin) {
+  # Derive name of test data
+  test_data_name <- paste0("test_data_", sub("^rf_", "", sub("_prediction$", "",
+                                                             prediction_name)))
+  
+  # Obtain objects
+  prediction <- get(prediction_name)
+  test_data <- get(test_data_name)
+
+  # Personalized title
+  title <- paste(#"Confusion Matrix for", 
+    sub("_prediction$", "",
+                                              prediction_name))
+
+  # Plot
+  print(plot_confusion_matrix(prediction, test_data$EUNISa_1, title))
+}
+```
+
+## Refinement step 1
+
+Based on PAs "Morralla protocol".
+
+### Compute predictions for all data and combine with original data
+
+```{r eval=FALSE, include=FALSE}
+# S2, slope
+filtered_data_slope_S2_with_probs <- bind_cols(
+  filtered_data_slope_S2 %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_slope_S2$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_slope_S2,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_slope_S2$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_slope_S2,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# S2, months
+filtered_data_months_S2_with_probs <- bind_cols(
+  filtered_data_months_S2 %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_months_S2$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_months_S2,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_months_S2$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_months_S2,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# S2, both
+filtered_data_both_S2_with_probs <- bind_cols(
+  filtered_data_both_S2 %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_both_S2$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_both_S2,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_both_S2$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_both_S2,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# Landsat, slope
+filtered_data_slope_Landsat_with_probs <- bind_cols(
+  filtered_data_slope_Landsat %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_slope_Landsat$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_slope_Landsat,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_slope_Landsat$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_slope_Landsat,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# Landsat, months
+filtered_data_months_Landsat_with_probs <- bind_cols(
+  filtered_data_months_Landsat %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_months_Landsat$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_months_Landsat,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_months_Landsat$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_months_Landsat,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# Landsat, both
+filtered_data_both_Landsat_with_probs <- bind_cols(
+  filtered_data_both_Landsat %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_both_Landsat$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_both_Landsat,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_both_Landsat$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_both_Landsat,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# SatEmb
+filtered_data_SatEmb_with_probs <- bind_cols(
+  filtered_data_SatEmb %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_SatEmb$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_SatEmb,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_SatEmb$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_SatEmb,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# SatEmb_CH
+filtered_data_SatEmb_CH_with_probs <- bind_cols(
+  filtered_data_SatEmb_CH %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_SatEmb_CH$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_SatEmb_CH,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_SatEmb_CH$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_SatEmb_CH,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+```
+
+```{r}
+filtered_data_with_probs <- c("filtered_data_slope_S2_with_probs",
+                              "filtered_data_months_S2_with_probs",
+                              "filtered_data_both_S2_with_probs",
+                              "filtered_data_slope_Landsat_with_probs", 
+                              "filtered_data_months_Landsat_with_probs",
+                              "filtered_data_both_Landsat_with_probs",
+                              "filtered_data_SatEmb_with_probs", 
+                              "filtered_data_SatEmb_CH_with_probs")
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (filtered_data_name in filtered_data_with_probs) {
+  file_path <- paste0("objects/RF_1500_20260128/", filtered_data_name, ".Rdata")
+  save(list = filtered_data_name, file = file_path)
+}
+```
+
+### Detect probability columns
+
+```{r}
+prob_cols_slope_S2 <- names(filtered_data_slope_S2_with_probs)[grepl("^prob_", names(filtered_data_slope_S2_with_probs))]
+prob_cols_months_S2 <- names(filtered_data_months_S2_with_probs)[grepl("^prob_", names(filtered_data_months_S2_with_probs))]
+prob_cols_both_S2 <- names(filtered_data_both_S2_with_probs)[grepl("^prob_", names(filtered_data_both_S2_with_probs))]
+prob_cols_slope_Landsat <- names(filtered_data_slope_Landsat_with_probs)[grepl("^prob_", names(filtered_data_slope_Landsat_with_probs))]
+prob_cols_months_Landsat <- names(filtered_data_months_Landsat_with_probs)[grepl("^prob_", names(filtered_data_months_Landsat_with_probs))]
+prob_cols_both_Landsat <- names(filtered_data_both_Landsat_with_probs)[grepl("^prob_", names(filtered_data_both_Landsat_with_probs))]
+prob_cols_SatEmb <- names(filtered_data_SatEmb_with_probs)[grepl("^prob_", names(filtered_data_SatEmb_with_probs))]
+prob_cols_SatEmb_CH <- names(filtered_data_SatEmb_CH_with_probs)[grepl("^prob_", names(filtered_data_SatEmb_CH_with_probs))]
+```
+
+### Calculate auxiliary metrics
+
+```{r}
+df_aux_slope_S2 <- calculate_df_aux(filtered_data_slope_S2_with_probs,
+                                     prob_cols_slope_S2)
+df_aux_months_S2 <- calculate_df_aux(filtered_data_months_S2_with_probs,
+                                     prob_cols_months_S2)
+df_aux_both_S2 <- calculate_df_aux(filtered_data_both_S2_with_probs,
+                                     prob_cols_both_S2)
+df_aux_slope_Landsat <- calculate_df_aux(filtered_data_slope_Landsat_with_probs,
+                                     prob_cols_slope_Landsat)
+df_aux_months_Landsat <- calculate_df_aux(filtered_data_months_Landsat_with_probs,
+                                     prob_cols_months_Landsat)
+df_aux_both_Landsat <- calculate_df_aux(filtered_data_both_Landsat_with_probs,
+                                     prob_cols_both_Landsat)
+df_aux_SatEmb <- calculate_df_aux(filtered_data_SatEmb_with_probs,
+                                  prob_cols_SatEmb)
+df_aux_SatEmb_CH <- calculate_df_aux(filtered_data_SatEmb_CH_with_probs,
+                                     prob_cols_SatEmb_CH)
+```
+
+### Apply filtering function
+
+Applying "Morralla" protocol once, removing negatives until 20% of the class and, if there is room, uncertain positives until 10% of the rest.
+
+```{r}
+df_final_20_10_slope_S2 <- df_aux_slope_S2 %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20_pos10)
+df_final_20_10_months_S2 <- df_aux_months_S2 %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20_pos10)
+df_final_20_10_both_S2 <- df_aux_both_S2 %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20_pos10)
+df_final_20_10_slope_Landsat <- df_aux_slope_Landsat %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20_pos10)
+df_final_20_10_months_Landsat <- df_aux_months_Landsat %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20_pos10)
+df_final_20_10_both_Landsat <- df_aux_both_Landsat %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20_pos10)
+df_final_20_10_SatEmb <- df_aux_SatEmb %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20_pos10)
+df_final_20_10_SatEmb_CH <- df_aux_SatEmb_CH %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20_pos10)
+```
+
+```{r}
+filtered_data_20_10_slope_S2_probs <- filtered_data_slope_S2 %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_slope_S2$PlotObservationID)
+filtered_data_20_10_months_S2_probs <- filtered_data_months_S2 %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_months_S2$PlotObservationID)
+filtered_data_20_10_both_S2_probs <- filtered_data_both_S2 %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_both_S2$PlotObservationID)
+filtered_data_20_10_slope_Landsat_probs <- filtered_data_slope_Landsat %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_slope_Landsat$PlotObservationID)
+filtered_data_20_10_months_Landsat_probs <- filtered_data_months_Landsat %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_months_Landsat$PlotObservationID)
+filtered_data_20_10_both_Landsat_probs <- filtered_data_both_Landsat %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_both_Landsat$PlotObservationID)
+filtered_data_20_10_SatEmb_probs <- filtered_data_SatEmb %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_SatEmb$PlotObservationID)
+filtered_data_20_10_SatEmb_CH_probs <- filtered_data_SatEmb_CH %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_SatEmb_CH$PlotObservationID)
+```
+
+### Compare classes before and after
+
+```{r}
+compare_classes(filtered_data_slope_S2, filtered_data_20_10_slope_S2_probs)
+compare_classes(filtered_data_months_S2, filtered_data_20_10_months_S2_probs)
+compare_classes(filtered_data_both_S2, filtered_data_20_10_both_S2_probs)
+compare_classes(filtered_data_slope_Landsat, filtered_data_20_10_slope_Landsat_probs)
+compare_classes(filtered_data_months_Landsat, filtered_data_20_10_months_Landsat_probs)
+compare_classes(filtered_data_both_Landsat, filtered_data_20_10_both_Landsat_probs)
+compare_classes(filtered_data_SatEmb, filtered_data_20_10_SatEmb_probs)
+compare_classes(filtered_data_SatEmb_CH, filtered_data_20_10_SatEmb_CH_probs)
+```
+
+### Split into training and testing
+
+```{r}
+# S2
+# Slope
+set.seed(123)
+split_data_20_10_slope_S2 <- split_train_test(filtered_data_20_10_slope_S2_probs)
+
+train_data_20_10_slope_S2 <- split_data_20_10_slope_S2$train
+test_data_20_10_slope_S2 <- split_data_20_10_slope_S2$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_slope_S2$PlotObservationID %in% test_data_20_10_slope_S2$PlotObservationID)
+
+# Months
+set.seed(123)
+split_data_20_10_months_S2 <- split_train_test(filtered_data_20_10_months_S2_probs)
+
+train_data_20_10_months_S2 <- split_data_20_10_months_S2$train
+test_data_20_10_months_S2 <- split_data_20_10_months_S2$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_months_S2$PlotObservationID %in% test_data_20_10_months_S2$PlotObservationID)
+
+# Both
+set.seed(123)
+split_data_20_10_both_S2 <- split_train_test(filtered_data_20_10_both_S2_probs)
+
+train_data_20_10_both_S2 <- split_data_20_10_both_S2$train
+test_data_20_10_both_S2 <- split_data_20_10_both_S2$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_both_S2$PlotObservationID %in% test_data_20_10_both_S2$PlotObservationID)
+
+# Landsat
+# Slope
+set.seed(123)
+split_data_20_10_slope_Landsat <- split_train_test(filtered_data_20_10_slope_Landsat_probs)
+
+train_data_20_10_slope_Landsat <- split_data_20_10_slope_Landsat$train
+test_data_20_10_slope_Landsat <- split_data_20_10_slope_Landsat$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_slope_Landsat$PlotObservationID %in% test_data_20_10_slope_Landsat$PlotObservationID)
+
+# Months
+set.seed(123)
+split_data_20_10_months_Landsat <- split_train_test(filtered_data_20_10_months_Landsat_probs)
+
+train_data_20_10_months_Landsat <- split_data_20_10_months_Landsat$train
+test_data_20_10_months_Landsat <- split_data_20_10_months_Landsat$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_months_Landsat$PlotObservationID %in% test_data_20_10_months_Landsat$PlotObservationID)
+
+# Both
+set.seed(123)
+split_data_20_10_both_Landsat <- split_train_test(filtered_data_20_10_both_Landsat_probs)
+
+train_data_20_10_both_Landsat <- split_data_20_10_both_Landsat$train
+test_data_20_10_both_Landsat <- split_data_20_10_both_Landsat$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_both_Landsat$PlotObservationID %in% test_data_20_10_both_Landsat$PlotObservationID)
+
+# SatEmb
+set.seed(123)
+split_data_20_10_SatEmb <- split_train_test(filtered_data_20_10_SatEmb_probs)
+
+train_data_20_10_SatEmb <- split_data_20_10_SatEmb$train
+test_data_20_10_SatEmb <- split_data_20_10_SatEmb$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_SatEmb$PlotObservationID %in% test_data_20_10_SatEmb$PlotObservationID)
+
+# SatEmb_CH
+set.seed(123)
+split_data_20_10_SatEmb_CH <- split_train_test(filtered_data_20_10_SatEmb_CH_probs)
+
+train_data_20_10_SatEmb_CH <- split_data_20_10_SatEmb_CH$train
+test_data_20_10_SatEmb_CH <- split_data_20_10_SatEmb_CH$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_SatEmb_CH$PlotObservationID %in% test_data_20_10_SatEmb_CH$PlotObservationID)
+```
+
+### Fit models
+
+```{r eval=FALSE, include=FALSE}
+rf_slope_S2_refin_20_10 <- run_rf_parallel(vars_RF_slope, 
+                                  train_data_20_10_slope_S2, "EUNISa_1",
+                                  ntree = 1500)
+rf_months_S2_refin_20_10 <- run_rf_parallel(vars_RF_months,
+                                   train_data_20_10_months_S2, "EUNISa_1",
+                                   ntree = 1500)
+rf_both_S2_refin_20_10 <- run_rf_parallel(vars_RF_both,
+                                   train_data_20_10_both_S2, "EUNISa_1",
+                                   ntree = 1500)
+rf_slope_Landsat_refin_20_10 <- run_rf_parallel(vars_RF_slope_Landsat,
+                                       train_data_20_10_slope_Landsat, 
+                                       "EUNISa_1", ntree = 1500)
+rf_months_Landsat_refin_20_10 <- run_rf_parallel(vars_RF_months_Landsat,
+                                        train_data_20_10_months_Landsat, 
+                                        "EUNISa_1", ntree = 1500)
+rf_both_Landsat_refin_20_10 <- run_rf_parallel(vars_RF_both_Landsat,
+                                        train_data_20_10_both_Landsat, 
+                                        "EUNISa_1", ntree = 1500)
+rf_SatEmb_refin_20_10 <- run_rf_parallel(vars_RF_SatEmb, train_data_20_10_SatEmb, 
+                                "EUNISa_1", ntree = 1500)
+rf_SatEmb_CH_refin_20_10 <- run_rf_parallel(vars_RF_SatEmb_CH, 
+                                   train_data_20_10_SatEmb_CH, "EUNISa_1",
+                                   ntree = 1500)
+```
+
+```{r}
+models_refin_20_10 <- c("rf_slope_S2_refin_20_10", "rf_months_S2_refin_20_10",
+                        "rf_both_S2_refin_20_10", 
+                        "rf_slope_Landsat_refin_20_10", 
+                        "rf_months_Landsat_refin_20_10",
+                        "rf_both_Landsat_refin_20_10",
+                        "rf_SatEmb_refin_20_10", "rf_SatEmb_CH_refin_20_10")
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (model_name in models_refin_20_10) {
+  file_path <- paste0("objects/RF_1500_20260128/", model_name, "_model.Rdata")
+  save(list = model_name, file = file_path)
+}
+```
+
+### Predictions
+
+```{r eval=FALSE, include=FALSE}
+for (model_name in models_refin_20_10) {
+  # Derive test data name
+  test_data_name <- paste0(gsub("_refin_20_10$", "", 
+                                sub("^rf_", "test_data_20_10_", model_name)))
+
+  # Create prediction variable name
+  prediction_name <- paste0(model_name, "_prediction")
+  
+  # Get model and test data
+  model <- get(model_name)$model
+  test_data <- get(test_data_name)
+  
+  # Run prediction
+  prediction <- predict(model, newdata = test_data, 
+                        type = "response")
+  
+  # Assign prediction to a variable
+  assign(prediction_name, prediction)
+}
+```
+
+```{r}
+predictions_refin_20_10 <- c("rf_slope_S2_refin_20_10_prediction",
+                        "rf_months_S2_refin_20_10_prediction",
+                        "rf_both_S2_refin_20_10_prediction",
+                        "rf_slope_Landsat_refin_20_10_prediction",
+                        "rf_months_Landsat_refin_20_10_prediction",
+                        "rf_both_Landsat_refin_20_10_prediction",
+                        "rf_SatEmb_refin_20_10_prediction",
+                        "rf_SatEmb_CH_refin_20_10_prediction")
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (prediction_name in predictions_refin_20_10) {
+  file_path <- paste0("objects/RF_1500_20260128/", prediction_name, ".Rdata")
+  save(list = prediction_name, file = file_path)
+  }
+```
+
+### Confusion matrices
+
+```{r}
+for (prediction_name in predictions_refin_20_10) {
+  # Derive test data name
+  test_data_name <- paste0(gsub("_refin_20_10$", "",
+                              sub("^rf_", "test_data_20_10_", 
+                                  sub("_prediction$", "", prediction_name))))
+  
+  # Get prediction and test data
+  prediction <- get(prediction_name)
+  test_data <- get(test_data_name)
+  
+  # Compute confusion matrix
+  cat("Confusion Matrix for", sub("_prediction$", "", prediction_name), ":\n")
+  print(confusionMatrix(prediction, test_data$EUNISa_1))
+  cat("\n")
+}
+```
+
+#### Plots
+
+```{r}
+for (prediction_name in predictions_refin_20_10) {
+  # Derive test data name
+  test_data_name <- paste0(gsub("_refin_20_10$", "",
+                              sub("^rf_", "test_data_20_10_", 
+                                  sub("_prediction$", "", prediction_name))))
+  
+  # Obtain objects
+  prediction <- get(prediction_name)
+  test_data <- get(test_data_name)
+
+  # Personalized title
+  title <- paste("Confusion Matrix for", sub("_prediction$", "",
+                                              prediction_name))
+
+  # Plot
+  print(plot_confusion_matrix(prediction, test_data$EUNISa_1, title))
+}
+```
+
+## Refinement step 2
+
+Then refitting the model and applying "Morralla" protocol again, removing only negatives until 20% of the class.
+
+#### Compute predictions for all data and combine with original data
+
+```{r eval=FALSE, include=FALSE}
+# S2, slope
+filtered_data_slope_S2_with_probs_2x <- bind_cols(
+  filtered_data_20_10_slope_S2_probs %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_slope_S2_refin_20_10$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_20_10_slope_S2_probs,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_slope_S2_refin_20_10$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_20_10_slope_S2_probs,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# S2, months
+filtered_data_months_S2_with_probs_2x <- bind_cols(
+  filtered_data_20_10_months_S2_probs %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_months_S2_refin_20_10$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_20_10_months_S2_probs,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_months_S2_refin_20_10$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_20_10_months_S2_probs,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# S2, both
+filtered_data_both_S2_with_probs_2x <- bind_cols(
+  filtered_data_20_10_both_S2_probs %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_both_S2_refin_20_10$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_20_10_both_S2_probs,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_both_S2_refin_20_10$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_20_10_both_S2_probs,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# Landsat, slope
+filtered_data_slope_Landsat_with_probs_2x <- bind_cols(
+  filtered_data_20_10_slope_Landsat_probs %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_slope_Landsat_refin_20_10$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_20_10_slope_Landsat_probs,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_slope_Landsat_refin_20_10$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_20_10_slope_Landsat_probs,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# Landsat, months
+filtered_data_months_Landsat_with_probs_2x <- bind_cols(
+  filtered_data_20_10_months_Landsat_probs %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_months_Landsat_refin_20_10$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_20_10_months_Landsat_probs,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_months_Landsat_refin_20_10$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_20_10_months_Landsat_probs,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# Landsat, both
+filtered_data_both_Landsat_with_probs_2x <- bind_cols(
+  filtered_data_20_10_both_Landsat_probs %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_both_Landsat_refin_20_10$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_20_10_both_Landsat_probs,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_both_Landsat_refin_20_10$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_20_10_both_Landsat_probs,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# SatEmb
+filtered_data_SatEmb_with_probs_2x <- bind_cols(
+  filtered_data_20_10_SatEmb_probs %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_SatEmb_refin_20_10$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_20_10_SatEmb_probs,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_SatEmb_refin_20_10$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_20_10_SatEmb_probs,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+
+# SatEmb_CH
+filtered_data_SatEmb_CH_with_probs_2x <- bind_cols(
+  filtered_data_20_10_SatEmb_CH_probs %>% select(PlotObservationID, EUNISa_1),
+  as.data.frame(predict(rf_SatEmb_CH_refin_20_10$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_20_10_SatEmb_CH_probs,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(rf_SatEmb_CH_refin_20_10$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_20_10_SatEmb_CH_probs,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNISa_1, prob_Q = EUNISa_1.Q,
+         prob_R = EUNISa_1.R, prob_S = EUNISa_1.S, prob_T = EUNISa_1.T)
+```
+
+```{r}
+filtered_data_with_probs_2x <- c("filtered_data_slope_S2_with_probs_2x",
+                              "filtered_data_months_S2_with_probs_2x",
+                              "filtered_data_both_S2_with_probs_2x",
+                              "filtered_data_slope_Landsat_with_probs_2x", 
+                              "filtered_data_months_Landsat_with_probs_2x",
+                              "filtered_data_both_Landsat_with_probs_2x",
+                              "filtered_data_SatEmb_with_probs_2x", 
+                              "filtered_data_SatEmb_CH_with_probs_2x")
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (filtered_data_name in filtered_data_with_probs_2x) {
+  file_path <- paste0("objects/RF_1500_20260128/", filtered_data_name, ".Rdata")
+  save(list = filtered_data_name, file = file_path)
+}
+```
+
+#### Calculate auxiliary metrics
+
+```{r}
+df_aux_slope_S2_2x <- calculate_df_aux(filtered_data_slope_S2_with_probs_2x,
+                                     prob_cols_slope_S2)
+df_aux_months_S2_2x <- calculate_df_aux(filtered_data_months_S2_with_probs_2x,
+                                     prob_cols_months_S2)
+df_aux_both_S2_2x <- calculate_df_aux(filtered_data_both_S2_with_probs_2x,
+                                     prob_cols_both_S2)
+df_aux_slope_Landsat_2x <- calculate_df_aux(filtered_data_slope_Landsat_with_probs_2x,
+                                     prob_cols_slope_Landsat)
+df_aux_months_Landsat_2x <- calculate_df_aux(filtered_data_months_Landsat_with_probs_2x,
+                                     prob_cols_months_Landsat)
+df_aux_both_Landsat_2x <- calculate_df_aux(filtered_data_both_Landsat_with_probs_2x,
+                                     prob_cols_both_Landsat)
+df_aux_SatEmb_2x <- calculate_df_aux(filtered_data_SatEmb_with_probs_2x,
+                                  prob_cols_SatEmb)
+df_aux_SatEmb_CH_2x <- calculate_df_aux(filtered_data_SatEmb_CH_with_probs_2x,
+                                     prob_cols_SatEmb_CH)
+```
+
+#### Apply filtering function
+
+```{r}
+df_final_20_10_slope_S2_2x <- df_aux_slope_S2_2x %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20)
+df_final_20_10_months_S2_2x <- df_aux_months_S2_2x %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20)
+df_final_20_10_both_S2_2x <- df_aux_both_S2_2x %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20)
+df_final_20_10_slope_Landsat_2x <- df_aux_slope_Landsat_2x %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20)
+df_final_20_10_months_Landsat_2x <- df_aux_months_Landsat_2x %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20)
+df_final_20_10_both_Landsat_2x <- df_aux_both_Landsat_2x %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20)
+df_final_20_10_SatEmb_2x <- df_aux_SatEmb_2x %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20)
+df_final_20_10_SatEmb_CH_2x <- df_aux_SatEmb_CH_2x %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20)
+```
+
+```{r}
+filtered_data_20_10_slope_S2_probs_2x <- filtered_data_slope_S2 %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_slope_S2_2x$PlotObservationID)
+filtered_data_20_10_months_S2_probs_2x <- filtered_data_months_S2 %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_months_S2_2x$PlotObservationID)
+filtered_data_20_10_both_S2_probs_2x <- filtered_data_both_S2 %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_both_S2_2x$PlotObservationID)
+filtered_data_20_10_slope_Landsat_probs_2x <- filtered_data_slope_Landsat %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_slope_Landsat_2x$PlotObservationID)
+filtered_data_20_10_months_Landsat_probs_2x <- filtered_data_months_Landsat %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_months_Landsat_2x$PlotObservationID)
+filtered_data_20_10_both_Landsat_probs_2x <- filtered_data_both_Landsat %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_both_Landsat_2x$PlotObservationID)
+filtered_data_20_10_SatEmb_probs_2x <- filtered_data_SatEmb %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_SatEmb_2x$PlotObservationID)
+filtered_data_20_10_SatEmb_CH_probs_2x <- filtered_data_SatEmb_CH %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_SatEmb_CH_2x$PlotObservationID)
+```
+
+#### (Appendix 3) Compare classes before and after
+
+```{r}
+compare_classes(filtered_data_slope_S2, filtered_data_20_10_slope_S2_probs,
+                filtered_data_20_10_slope_S2_probs_2x)
+compare_classes(filtered_data_months_S2, filtered_data_20_10_months_S2_probs,
+                filtered_data_20_10_months_S2_probs_2x)
+compare_classes(filtered_data_both_S2, filtered_data_20_10_both_S2_probs,
+                filtered_data_20_10_both_S2_probs_2x)
+compare_classes(filtered_data_slope_Landsat,
+                filtered_data_20_10_slope_Landsat_probs,
+                filtered_data_20_10_slope_Landsat_probs_2x)
+compare_classes(filtered_data_months_Landsat, 
+                filtered_data_20_10_months_Landsat_probs,
+                filtered_data_20_10_months_Landsat_probs_2x)
+compare_classes(filtered_data_both_Landsat, 
+                filtered_data_20_10_both_Landsat_probs,
+                filtered_data_20_10_both_Landsat_probs_2x)
+compare_classes(filtered_data_SatEmb, filtered_data_20_10_SatEmb_probs,
+                filtered_data_20_10_SatEmb_probs_2x)
+compare_classes(filtered_data_SatEmb_CH, filtered_data_20_10_SatEmb_CH_probs,
+                filtered_data_20_10_SatEmb_CH_probs_2x)
+```
+
+```{r}
+(
+  compare_classes(filtered_data_months_Landsat, 
+                  filtered_data_20_10_months_Landsat_probs,
+                  filtered_data_20_10_months_Landsat_probs_2x,
+                  return = "plot") +
+  compare_classes(filtered_data_SatEmb, 
+                  filtered_data_20_10_SatEmb_probs,
+                  filtered_data_20_10_SatEmb_probs_2x,
+                  return = "plot")
+) +
+  plot_annotation(tag_levels = "A", tag_suffix = ")") +
+  plot_layout(guides = "collect") &
+  scale_fill_manual(
+    breaks = c("before", "step1", "step2"),
+    labels = c("No refinement", "Refinement step 1", "Refinement step 2"),
+    values = c(
+      "before" = "#edf8b1", 
+      "step1"  = "#7fcdbb",
+      "step2"  = "#2c7fb8"
+    )
+  ) &
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k")) &
+  theme(legend.position = "bottom", legend.title = element_blank())
+ggsave(here("output", "figures", "manuscript", "appendix3.jpeg"), 
+       dpi = 300, width = 6, height = 4)
+```
+
+
+
+
+#### Split into training and testing
+
+```{r}
+# S2
+# Slope
+set.seed(123)
+split_data_20_10_2x_slope_S2 <- split_train_test(filtered_data_20_10_slope_S2_probs_2x)
+
+train_data_20_10_2x_slope_S2 <- split_data_20_10_2x_slope_S2$train
+test_data_20_10_2x_slope_S2 <- split_data_20_10_2x_slope_S2$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_2x_slope_S2$PlotObservationID %in% test_data_20_10_2x_slope_S2$PlotObservationID)
+
+# Months
+set.seed(123)
+split_data_20_10_2x_months_S2 <- split_train_test(filtered_data_20_10_months_S2_probs_2x)
+
+train_data_20_10_2x_months_S2 <- split_data_20_10_2x_months_S2$train
+test_data_20_10_2x_months_S2 <- split_data_20_10_2x_months_S2$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_2x_months_S2$PlotObservationID %in% test_data_20_10_2x_months_S2$PlotObservationID)
+
+# Both
+set.seed(123)
+split_data_20_10_2x_both_S2 <- split_train_test(filtered_data_20_10_both_S2_probs_2x)
+
+train_data_20_10_2x_both_S2 <- split_data_20_10_2x_both_S2$train
+test_data_20_10_2x_both_S2 <- split_data_20_10_2x_both_S2$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_2x_both_S2$PlotObservationID %in% test_data_20_10_2x_both_S2$PlotObservationID)
+
+# Landsat
+# Slope
+set.seed(123)
+split_data_20_10_2x_slope_Landsat <- split_train_test(filtered_data_20_10_slope_Landsat_probs_2x)
+
+train_data_20_10_2x_slope_Landsat <- split_data_20_10_2x_slope_Landsat$train
+test_data_20_10_2x_slope_Landsat <- split_data_20_10_2x_slope_Landsat$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_2x_slope_Landsat$PlotObservationID %in% test_data_20_10_2x_slope_Landsat$PlotObservationID)
+
+# Months
+set.seed(123)
+split_data_20_10_2x_months_Landsat <- split_train_test(filtered_data_20_10_months_Landsat_probs_2x)
+
+train_data_20_10_2x_months_Landsat <- split_data_20_10_2x_months_Landsat$train
+test_data_20_10_2x_months_Landsat <- split_data_20_10_2x_months_Landsat$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_2x_months_Landsat$PlotObservationID %in% test_data_20_10_2x_months_Landsat$PlotObservationID)
+
+# Both
+set.seed(123)
+split_data_20_10_2x_both_Landsat <- split_train_test(filtered_data_20_10_both_Landsat_probs_2x)
+
+train_data_20_10_2x_both_Landsat <- split_data_20_10_2x_both_Landsat$train
+test_data_20_10_2x_both_Landsat <- split_data_20_10_2x_both_Landsat$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_2x_both_Landsat$PlotObservationID %in% test_data_20_10_2x_both_Landsat$PlotObservationID)
+
+# SatEmb
+set.seed(123)
+split_data_20_10_2x_SatEmb <- split_train_test(filtered_data_20_10_SatEmb_probs_2x)
+
+train_data_20_10_2x_SatEmb <- split_data_20_10_2x_SatEmb$train
+test_data_20_10_2x_SatEmb <- split_data_20_10_2x_SatEmb$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_2x_SatEmb$PlotObservationID %in% test_data_20_10_2x_SatEmb$PlotObservationID)
+
+# SatEmb_CH
+set.seed(123)
+split_data_20_10_2x_SatEmb_CH <- split_train_test(filtered_data_20_10_SatEmb_CH_probs)
+
+train_data_20_10_2x_SatEmb_CH <- split_data_20_10_2x_SatEmb_CH$train
+test_data_20_10_2x_SatEmb_CH <- split_data_20_10_2x_SatEmb_CH$test
+
+# Check overlap between training and testing datasets
+sum(train_data_20_10_2x_SatEmb_CH$PlotObservationID %in% test_data_20_10_2x_SatEmb_CH$PlotObservationID)
+```
+
+#### Fit models
+
+```{r eval=FALSE, include=FALSE}
+rf_slope_S2_refin_20_10_2x <- run_rf_parallel(vars_RF_slope, 
+                                  train_data_20_10_2x_slope_S2, "EUNISa_1",
+                                  ntree = 1500)
+rf_months_S2_refin_20_10_2x <- run_rf_parallel(vars_RF_months,
+                                   train_data_20_10_2x_months_S2, "EUNISa_1",
+                                   ntree = 1500)
+rf_both_S2_refin_20_10_2x <- run_rf_parallel(vars_RF_both,
+                                   train_data_20_10_2x_both_S2, "EUNISa_1",
+                                   ntree = 1500)
+rf_slope_Landsat_refin_20_10_2x <- run_rf_parallel(vars_RF_slope_Landsat,
+                                       train_data_20_10_2x_slope_Landsat, 
+                                       "EUNISa_1", ntree = 1500)
+rf_months_Landsat_refin_20_10_2x <- run_rf_parallel(vars_RF_months_Landsat,
+                                        train_data_20_10_2x_months_Landsat, 
+                                        "EUNISa_1", ntree = 1500)
+rf_both_Landsat_refin_20_10_2x <- run_rf_parallel(vars_RF_both_Landsat,
+                                        train_data_20_10_2x_both_Landsat, 
+                                        "EUNISa_1", ntree = 1500)
+rf_SatEmb_refin_20_10_2x <- run_rf_parallel(vars_RF_SatEmb, train_data_20_10_2x_SatEmb, 
+                                "EUNISa_1", ntree = 1500)
+rf_SatEmb_CH_refin_20_10_2x <- run_rf_parallel(vars_RF_SatEmb_CH, 
+                                   train_data_20_10_2x_SatEmb_CH, "EUNISa_1",
+                                   ntree = 1500)
+```
+
+```{r}
+models_refin_20_10_2x <- c("rf_slope_S2_refin_20_10_2x", 
+                     "rf_months_S2_refin_20_10_2x",
+                     "rf_both_S2_refin_20_10_2x", 
+                     "rf_slope_Landsat_refin_20_10_2x", 
+                     "rf_months_Landsat_refin_20_10_2x",
+                     "rf_both_Landsat_refin_20_10_2x",
+                     "rf_SatEmb_refin_20_10_2x", 
+                     "rf_SatEmb_CH_refin_20_10_2x")
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (model_name in models_refin_20_10_2x) {
+  file_path <- paste0("objects/RF_1500_20260128/", model_name, "_model.Rdata")
+  save(list = model_name, file = file_path)
+}
+```
+
+#### Predictions
+
+```{r eval=FALSE, include=FALSE}
+for (model_name in models_refin_20_10_2x) {
+  # Derive test data name
+  test_data_name <- paste0(gsub("_refin_20_10_2x$", "", 
+                                sub("^rf_", "test_data_20_10_2x_", model_name)))
+
+  # Create prediction variable name
+  prediction_name <- paste0(model_name, "_prediction")
+  
+  # Get model and test data
+  model <- get(model_name)$model
+  test_data <- get(test_data_name)
+  
+  # Run prediction
+  prediction <- predict(model, newdata = test_data, 
+                        type = "response")
+  
+  # Assign prediction to a variable
+  assign(prediction_name, prediction)
+}
+```
+
+```{r}
+predictions_refin_20_10_2x <- c("rf_slope_S2_refin_20_10_2x_prediction",
+                        "rf_months_S2_refin_20_10_2x_prediction",
+                        "rf_both_S2_refin_20_10_2x_prediction",
+                        "rf_slope_Landsat_refin_20_10_2x_prediction",
+                        "rf_months_Landsat_refin_20_10_2x_prediction",
+                        "rf_both_Landsat_refin_20_10_2x_prediction",
+                        "rf_SatEmb_refin_20_10_2x_prediction",
+                        "rf_SatEmb_CH_refin_20_10_2x_prediction")
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (prediction_name in predictions_refin_20_10_2x) {
+  file_path <- paste0("objects/RF_1500_20260128/", prediction_name, ".Rdata")
+  save(list = prediction_name, file = file_path)
+  }
+```
+
+#### Confusion matrices
+
+```{r}
+for (prediction_name in predictions_refin_20_10_2x) {
+  # Derive test data name
+  test_data_name <- paste0(gsub("_refin_20_10_2x$", "",
+                              sub("^rf_", "test_data_20_10_2x_", 
+                                  sub("_prediction$", "", prediction_name))))
+  
+  # Get prediction and test data
+  prediction <- get(prediction_name)
+  test_data <- get(test_data_name)
+  
+  # Compute confusion matrix
+  cat("Confusion Matrix for", sub("_prediction$", "", prediction_name), ":\n")
+  print(confusionMatrix(prediction, test_data$EUNISa_1))
+  cat("\n")
+}
+```
+
+##### Plots
+
+```{r}
+for (prediction_name in predictions_refin_20_10_2x) {
+  # Derive test data name
+  test_data_name <- paste0(gsub("_refin_20_10_2x$", "",
+                              sub("^rf_", "test_data_20_10_2x_", 
+                                  sub("_prediction$", "", prediction_name))))
+  
+  # Obtain objects
+  prediction <- get(prediction_name)
+  test_data <- get(test_data_name)
+
+  # Personalized title
+  title <- paste("Confusion Matrix for", sub("_prediction$", "",
+                                              prediction_name))
+
+  # Plot
+  print(plot_confusion_matrix(prediction, test_data$EUNISa_1, title))
+}
+```
+
+# N obs
+
+## N obs with metrics extracted
+
+```{r}
+data_validation_Landsat %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  nrow()
+data_validation_S2 %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  nrow()
+data_validation_SatEmb %>%
+  filter(if_any(c(2:65), ~ !is.na(.))) %>%
+  nrow()
+```
+
+## N obs after data filtering
+
+```{r}
+data_validation_Landsat %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_slope_Landsat), ~ !is.na(.))) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+  # With Landsat data, many observations removed because of high/low EVI values
+  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
+  # so better not to use EVI here
+  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNISa_1, all_of(vars_RF_slope_Landsat), 
+                Lctnmth) %>%
+  # Keep only rows with differences > 0 in variables
+  filter(if_all(any_of(vars_RF_slope_Landsat[grepl("diff", 
+                                                   vars_RF_slope_Landsat)]), 
+                ~ .x > 0)) %>%
+  nrow()
+data_validation_Landsat %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_months_Landsat), ~ !is.na(.))) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+  # With Landsat data, many observations removed because of high/low EVI values
+  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
+  # so better not to use EVI here
+  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNISa_1, all_of(vars_RF_months_Landsat), 
+                Lctnmth) %>%
+  # Keep only rows with differences > 0 in variables
+  filter(if_all(any_of(vars_RF_months_Landsat[grepl("diff", 
+                                                   vars_RF_months_Landsat)]), 
+                ~ .x > 0)) %>%
+  nrow()
+data_validation_S2 %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_slope), ~ !is.na(.))) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+  dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNISa_1, all_of(vars_RF_slope), Lctnmth) %>%
+  # Keep only rows with differences > 0 in variables
+  filter(if_all(any_of(vars_RF_slope[grepl("diff", vars_RF_slope)]), 
+                ~ .x > 0)) %>%
+  nrow()
+data_validation_S2 %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_months), ~ !is.na(.))) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+  dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNISa_1, all_of(vars_RF_months), Lctnmth) %>%
+  # Keep only rows with differences > 0 in variables
+  filter(if_all(any_of(vars_RF_months[grepl("diff", vars_RF_months)]), 
+                ~ .x > 0)) %>%
+  nrow()
+data_validation_SatEmb %>%
+  filter(if_any(c(2:65), ~ !is.na(.))) %>%
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_SatEmb), ~ !is.na(.))) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNISa_1, all_of(vars_RF_SatEmb), 
+                Lctnmth) %>%
+  nrow()
+```
+
+## N obs after rough validation
+
+```{r}
+data_validation_Landsat %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>% 
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_slope_Landsat), ~ !is.na(.))) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+  # With Landsat data, many observations removed because of high/low EVI values
+  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
+  # so better not to use EVI here
+  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNISa_1, all_of(vars_RF_slope_Landsat), 
+                Lctnmth) %>%
+  # Keep only rows with differences > 0 in variables
+  filter(if_all(any_of(vars_RF_slope_Landsat[grepl("diff", 
+                                                   vars_RF_slope_Landsat)]), 
+                ~ .x > 0)) %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>%
+  nrow()
+data_validation_Landsat %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.)))%>% 
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_months_Landsat), ~ !is.na(.))) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+  # With Landsat data, many observations removed because of high/low EVI values
+  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
+  # so better not to use EVI here
+  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNISa_1, all_of(vars_RF_months_Landsat), 
+                Lctnmth) %>%
+  # Keep only rows with differences > 0 in variables
+  filter(if_all(any_of(vars_RF_months_Landsat[grepl("diff", 
+                                                   vars_RF_months_Landsat)]), 
+                ~ .x > 0)) %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>%
+  nrow()
+data_validation_S2 %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_slope), ~ !is.na(.))) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+  dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNISa_1, all_of(vars_RF_slope), Lctnmth) %>%
+  # Keep only rows with differences > 0 in variables
+  filter(if_all(any_of(vars_RF_slope[grepl("diff", vars_RF_slope)]), 
+                ~ .x > 0)) %>%
+  # Rough validation based on CH and NDWI
+  rough_validation_S2() %>%
+  nrow()
+data_validation_S2 %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_months), ~ !is.na(.))) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+  dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNISa_1, all_of(vars_RF_months), Lctnmth) %>%
+  # Keep only rows with differences > 0 in variables
+  filter(if_all(any_of(vars_RF_months[grepl("diff", vars_RF_months)]), 
+                ~ .x > 0)) %>%
+  # Rough validation based on CH and NDWI
+  rough_validation_S2() %>%
+  nrow()
+data_validation_SatEmb %>%
+  filter(if_any(c(2:65), ~ !is.na(.))) %>%
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_SatEmb), ~ !is.na(.))) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNISa_1, all_of(vars_RF_SatEmb_CH), 
+                Lctnmth) %>%
+  # Rough validation based on CH
+  rough_validation_SatEmb() %>% 
+  # Join with S2 data to get NDWI_max info
+  left_join(
+    data_validation_S2 %>% select(PlotObservationID, NDWI_max)
+  ) %>%
+  # Rough validation based on NDWI (from S2)
+  # Remove those with NDWI_max > 0.3, keep if NDWI_max is NA
+  filter(NDWI_max <= 0.3 | is.na(NDWI_max)) %>%
+  # Remove unneeded var
+  select(-NDWI_max) %>%
+  nrow()
+```
+
+## N obs GPS-lcoated
+
+```{r}
+data_validation_Landsat %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>% 
+  filter_data_Landsat(vars_RF_slope_Landsat) %>% 
+  nrow()
+data_validation_Landsat %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>% 
+  filter_data_Landsat(vars_RF_months_Landsat) %>% 
+  nrow()
+data_validation_S2 %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Rough validation based on CH and NDWI
+  rough_validation_S2() %>%
+  filter_data_S2(vars_RF_slope) %>%
+  nrow()
+data_validation_S2 %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Rough validation based on CH and NDWI
+  rough_validation_S2() %>%
+  filter_data_S2(vars_RF_months) %>%
+  nrow()
+data_validation_SatEmb %>%
+  filter(if_any(c(2:65), ~ !is.na(.))) %>%
+  # Rough validation based on CH
+  rough_validation_SatEmb()%>%
+  # Join with S2 data to get NDWI_max info
+  left_join(
+    data_validation_S2 %>% select(PlotObservationID, NDWI_max)
+  ) %>%
+  # Rough validation based on NDWI (from S2)
+  # Remove those with NDWI_max > 0.3, keep if NDWI_max is NA
+  filter(NDWI_max <= 0.3 | is.na(NDWI_max)) %>%
+  # Remove unneeded var
+  select(-NDWI_max) %>%
+  filter_data_SatEmb(vars_RF_SatEmb) %>% 
+  nrow()
+```
+
+## N obs after NDVI-filtering
+
+```{r}
+data_validation_Landsat %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>% 
+  filter_data_Landsat(vars_RF_slope_Landsat) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value") %>% 
+  nrow()
+data_validation_Landsat %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>% 
+  filter_data_Landsat(vars_RF_months_Landsat) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value") %>% 
+  nrow()
+data_validation_S2 %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Rough validation based on CH and NDWI
+  rough_validation_S2() %>%
+  filter_data_S2(vars_RF_slope) %>%
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value") %>% 
+  nrow()
+data_validation_S2 %>%
+  filter(if_any(c(2:86, 91:132), ~ !is.na(.))) %>%
+  # Rough validation based on CH and NDWI
+  rough_validation_S2() %>%
+  filter_data_S2(vars_RF_months) %>%
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value") %>% 
+  nrow()
+data_validation_SatEmb %>%
+  filter(if_any(c(2:65), ~ !is.na(.))) %>%
+  # Rough validation based on CH
+  rough_validation_SatEmb()%>%
+  # Join with S2 data to get NDWI_max info
+  left_join(
+    data_validation_S2 %>% select(PlotObservationID, NDWI_max)
+  ) %>%
+  # Rough validation based on NDWI (from S2)
+  # Remove those with NDWI_max > 0.3, keep if NDWI_max is NA
+  filter(NDWI_max <= 0.3 | is.na(NDWI_max)) %>%
+  # Remove unneeded var
+  select(-NDWI_max) %>%
+  filter_data_SatEmb(vars_RF_SatEmb) %>%
+  # Join with S2 data to get NDVI_pos_value info
+  left_join(
+    data_validation_S2 %>% select(PlotObservationID, NDVI_pos_value)
+  ) %>%
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value") %>%
+  # Remove unneeded var
+  select(-NDVI_pos_value) %>%
+  nrow()
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```

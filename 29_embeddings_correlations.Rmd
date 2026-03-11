@@ -178,6 +178,12 @@ vars_RF_both_Landsat <- c(
 
 # Correlations
 
+```{r}
+A_cols <- data_validation %>%
+  select(starts_with("A")) %>%
+  names()
+```
+
 ## SatEmb and canopy height
 
 ```{r}
@@ -403,6 +409,13 @@ ggplot() +
     title = "Embedding PCA with Sentinel-2 & Landsat correlations"
   )
 ```
+
+# Corr matrix 4 most imp bands
+
+```{r}
+top3_A_S2 %>% filter(A_band %in% c("A24", "A33", "A07", "A58"))
+```
+
 
 # Session info
 

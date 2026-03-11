@@ -44,7 +44,7 @@ source("functions_20260122.R")
 
 ```{r}
 # Define the folder path
-folder_path <- here("objects", "RF_1500_202601")
+folder_path <- here("objects", "RF_1500_20260126")
 
 # List all .RData or .rda files in the folder
 rdata_files <- list.files(folder_path, full.names = TRUE)
@@ -660,7 +660,7 @@ Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (model_name in models_no_refin) {
-  file_path <- paste0("objects/RF_1500_202601/", model_name, "_model.Rdata")
+  file_path <- paste0("objects/RF_1500_20260126/", model_name, "_model.Rdata")
   save(list = model_name, file = file_path)
 }
 ```
@@ -701,7 +701,7 @@ Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (prediction_name in predictions_no_refin) {
-  file_path <- paste0("objects/RF_1500_202601/", prediction_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260126/", prediction_name, ".Rdata")
   save(list = prediction_name, file = file_path)
 }
 ```
@@ -778,7 +778,7 @@ Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (varimp_name in varimp_no_refin) {
-  file_path <- paste0("objects/RF_1500_202601/", varimp_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260126/", varimp_name, ".Rdata")
   save(list = varimp_name, file = file_path)
 }
 ```
@@ -857,7 +857,7 @@ Save:
 ```{r eval=FALSE, include=FALSE}
 for (model_name in models_no_refin) {
   roc_data_name <- paste0(model_name, "_roc_data")
-  file_path <- paste0("objects/RF_1500_202601/", roc_data_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260126/", roc_data_name, ".Rdata")
   save(list = roc_data_name, file = file_path)
 }
 ```
@@ -1040,7 +1040,7 @@ Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (filtered_data_name in filtered_data_with_probs) {
-  file_path <- paste0("objects/RF_1500_202601/", filtered_data_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260126/", filtered_data_name, ".Rdata")
   save(list = filtered_data_name, file = file_path)
 }
 ```
@@ -1269,7 +1269,7 @@ Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (model_name in models_refin_35_10) {
-  file_path <- paste0("objects/RF_1500_202601/", model_name, "_model.Rdata")
+  file_path <- paste0("objects/RF_1500_20260126/", model_name, "_model.Rdata")
   save(list = model_name, file = file_path)
 }
 ```
@@ -1313,7 +1313,7 @@ Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (prediction_name in predictions_refin_35_10) {
-  file_path <- paste0("objects/RF_1500_202601/", prediction_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260126/", prediction_name, ".Rdata")
   save(list = prediction_name, file = file_path)
   }
 ```
@@ -1393,7 +1393,7 @@ Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (varimp_name in varimp_refin_35_10) {
-  file_path <- paste0("objects/RF_1500_202601/", varimp_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260126/", varimp_name, ".Rdata")
   save(list = varimp_name, file = file_path)
 }
 ```
@@ -1475,7 +1475,7 @@ Save:
 ```{r eval=FALSE, include=FALSE}
 for (model_name in models_refin_35_10) {
   roc_data_name <- paste0(model_name, "_roc_data")
-  file_path <- paste0("objects/RF_1500_202601/", roc_data_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260126/", roc_data_name, ".Rdata")
   save(list = roc_data_name, file = file_path)
 }
 ```
@@ -1658,7 +1658,7 @@ Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (filtered_data_name in filtered_data_with_probs_2x) {
-  file_path <- paste0("objects/RF_1500_202601/", filtered_data_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260126/", filtered_data_name, ".Rdata")
   save(list = filtered_data_name, file = file_path)
 }
 ```
@@ -1885,7 +1885,7 @@ Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (model_name in models_refin_35_10_2x) {
-  file_path <- paste0("objects/RF_1500_202601/", model_name, "_model.Rdata")
+  file_path <- paste0("objects/RF_1500_20260126/", model_name, "_model.Rdata")
   save(list = model_name, file = file_path)
 }
 ```
@@ -1929,7 +1929,7 @@ Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (prediction_name in predictions_refin_35_10_2x) {
-  file_path <- paste0("objects/RF_1500_202601/", prediction_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260126/", prediction_name, ".Rdata")
   save(list = prediction_name, file = file_path)
   }
 ```
@@ -2009,7 +2009,7 @@ Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (varimp_name in varimp_refin_35_10_2x) {
-  file_path <- paste0("objects/RF_1500_202601/", varimp_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260126/", varimp_name, ".Rdata")
   save(list = varimp_name, file = file_path)
 }
 ```

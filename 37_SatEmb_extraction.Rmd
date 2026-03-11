@@ -1,0 +1,181 @@
+---
+title: "Script to work with Satellite Embeddings dataset bands derived from GEE"
+subtitle: "Read and manipulation data, calculate indices"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+# Load libraries
+
+```{r}
+library(signal)
+library(tidyverse)
+library(here)
+library(lubridate)
+library(dtplyr)
+library(sf)
+library(knitr)
+library(mgcv)
+library(future)
+library(furrr)
+library(progressr)
+library(pracma)
+```
+
+# Load functions
+
+```{r}
+knitr::purl("functions_20260225.Rmd", output = "functions_20260225.R")
+source("functions_20260225.R")
+```
+
+
+# Supress package messages
+
+```{r}
+suppressPackageStartupMessages({
+  library(mgcv)
+  library(nlme)
+})
+```
+
+# Read files with band data
+
+I got these files using the GEE code prepared by Bea.
+
+These files contain all observations in the ReSurvey database from 2016 onward. In order to avoid computation problems in GEE, biogeographical units that contain more than 4500 points have been subdivided in ArcGIS.
+
+```{r}
+# Set the folder path
+folder_path <- "C:/Data/MOTIVATE/MOTIVATE_RS_data/validation/Satellite_Embeddings"
+
+# List CSV files
+csv_files <- list.files(folder_path, full.names = TRUE, recursive = TRUE)
+
+# Read one file to get column names
+sample_file <- csv_files[1]
+sample_data <- read_csv(sample_file, n_max = 0)
+
+# Read and process each file
+data_list <- lapply(csv_files, function(file) {
+  info <- extract_info(basename(file)) # Use only the filename
+  
+  # Read the file
+  df <- read_csv(file) %>%
+    mutate(biogeo = info$biogeo, unit = info$unit)
+  
+  return(df)
+  })
+
+# Combine all data
+data_RS_SatEmb_bands <- bind_rows(data_list) %>%
+  rename(PlotObservationID = PltObID)
+
+# View the resulting tibble
+print(data_RS_SatEmb_bands)
+
+# Counts per biogeo and unit
+print(data_RS_SatEmb_bands %>% count(biogeo, unit), n = 100)
+```
+
+# Remove unneded cols
+
+```{r}
+data_RS_SatEmb_bands <- data_RS_SatEmb_bands %>%
+  select(-UNIT)
+```
+
+# Read file with band data for points outside polygons
+
+Some points from the ReSurvey database fall outside the bioregion polygons. These points were manually assigned to the closest biogeo and unit in ArcGIS (those far out were assigned biogeo = OUT and unit = OUT). Data for these points has been extracted with a different GEE script.
+
+```{r}
+data_RS_SatEmb_bands_out <- read_csv(
+  "C:/Data/MOTIVATE/MOTIVATE_RS_data/validation/Satellite_Embeddings_out/AllPoints_SatelliteEmbedding_Annual.csv") %>%
+  rename(biogeo = BIOGEO, unit = UNIT, PlotObservationID = PltObID)
+```
+
+Check that column names are the same:
+
+```{r}
+# Columns in data_RS_SatEmb_bands but not in data_RS_SatEmb_bands_out
+setdiff(names(data_RS_SatEmb_bands), names(data_RS_SatEmb_bands_out))
+
+# Columns in data_RS_SatEmb_bands_out but not in data_RS_SatEmb_bands
+setdiff(names(data_RS_SatEmb_bands_out), names(data_RS_SatEmb_bands))
+```
+
+# Join all data
+
+```{r}
+data_RS_SatEmb_bands <- bind_rows(data_RS_SatEmb_bands,
+                                  data_RS_SatEmb_bands_out)
+```
+
+# Solve problem with duplicate rows
+
+```{r}
+data_RS_SatEmb_bands <- data_RS_SatEmb_bands %>%
+  select(-`system:index`, -image_id, -time_utc, -timestamp, -.geo)
+```
+
+```{r}
+# Find duplicated ids
+dupl_ids <- data_RS_SatEmb_bands %>%
+  group_by(PlotObservationID) %>%
+  dplyr::filter(n() > 1) %>%
+  ungroup()
+```
+
+```{r}
+dupl_ids
+```
+
+Group the data by PlotObservationID, and for duplicate ids, average the values of the bands (and keep the first value for other cols).
+
+```{r}
+data_RS_SatEmb_bands <- data_RS_SatEmb_bands %>%
+  group_by(PlotObservationID) %>%
+  summarise(across(starts_with("A"), mean, na.rm = TRUE),
+            across(!starts_with("A"), first), .groups = "drop")
+```
+
+# Add canopy height data
+
+Read the data:
+
+```{r}
+data_RS_CH <- read_csv(
+  "C:/Data/MOTIVATE/MOTIVATE_RS_data/validation/Canopy_Height_1m/CanopyHeight_1m.csv")
+```
+
+Join:
+
+```{r}
+final_RS_data <- data_RS_SatEmb_bands %>%
+  mutate(PlotObservationID = factor(PlotObservationID)) %>%
+  left_join(data_RS_CH %>% 
+              dplyr::select(PltObID, canopy_height) %>%
+              rename(PlotObservationID = PltObID) %>%
+              mutate(PlotObservationID = factor(PlotObservationID)))
+```
+
+# Save to clean data
+
+```{r}
+write_tsv(final_RS_data,
+          here("data", "clean","final_RS_data_SatEmb_20260309.csv"))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,1056 @@
+---
+title: "Script to prepare data from ReSurvey database v2025.2"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This R script is used to prepare data of the ReSurvey database for GEE, starting from the raw data downloaded from:
+https://onedrive.live.com/?redeem=aHR0cHM6Ly8xZHJ2Lm1zL2YvYy8zOWE2ZDZiNzFmMzM1ZTE4L0VoaGVNeC0zMXFZZ2dEbmo0d0lBQUFBQkEwdmo5RjRyYTRnd1VyUGVXQy1UbEE%5FZT1yMUNHVlk&id=39A6D6B71F335E18%21sc5fde9e31e1d49aaab78bfe905b546d1&cid=39A6D6B71F335E18&sb=name&sd=1
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(readxl)
+library(sf)
+library(cowplot)
+```
+
+# Read data
+
+```{r}
+data_V2025.2 <- read_tsv(
+  "C:/Data/MOTIVATE/MOTIVATE_data/Data/EVA and ReSurvey Data/2025 data - V2025.2/Core data/200_Motivate20250415_notJUICE_header_with_precise_coordinates.csv")
+```
+
+No parsing issues!
+
+# Keep only the columns needed
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  select(PlotObservationID, Country, `Date of recording`, 
+         `Expert system`, `ReSurvey plot (Y/N)`, `ReSurvey project`, 
+         `ReSurvey site`, `ReSurvey plot`, `ReSurvey observation`,
+         `Manipulate (y/n)`, `Type of manipulation`, `Location method`,
+         RS_CODE, RS_PROJTYP, Dataset, Longitude, Latitude, Lon_prec, Lat_prec)
+```
+
+# Filter only ReSurvey part
+
+How many observations are truly resurveyed?
+
+```{r}
+nrow(data_V2025.2 %>% dplyr::filter(!is.na(RS_CODE))) 
+# Includes observations in ReSurvey DB
+nrow(data_V2025.2 %>% dplyr::filter(`ReSurvey plot (Y/N)` == "Y"))
+# Includes observations in ReSurvey DB that were actually resurveyed 
+# (i.e. repeated in time) --> Use these
+```
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  dplyr::filter(`ReSurvey plot (Y/N)` == "Y") %>%
+  select(-`ReSurvey plot (Y/N)`)
+```
+
+# Remove manipulated observations
+
+Homogeneize RS_PROJTYP column:
+
+```{r}
+data_V2025.2 %>% count(RS_PROJTYP)
+data_V2025.2 <- data_V2025.2 %>% 
+  mutate(RS_PROJTYP = case_when(
+    RS_PROJTYP == "Permanent (man)" ~ "permanent (man)",
+    RS_PROJTYP == "Resampling" ~ "resampling",
+    TRUE  ~ RS_PROJTYP
+  ))
+data_V2025.2 %>% count(RS_PROJTYP)
+```
+
+```{r}
+nrow(data_V2025.2)
+# Removing all manipulated plots --> Use this
+nrow(data_V2025.2 %>% dplyr::filter(RS_PROJTYP != "permanent (man)"))
+# Keep control plots, but `Manipulate (y/n)` == "N" does not always mean 
+# 'control' in the strict experimental sense
+nrow(data_V2025.2 %>%
+       dplyr::filter(!(RS_PROJTYP == "permanent (man)" & `Manipulate (y/n)` == "Y")))
+```
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  dplyr::filter(RS_PROJTYP != "permanent (man)")
+nrow(data_V2025.2)
+```
+
+# Data manipulation
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  # Update coordinates
+  mutate(Lon_updated = ifelse(is.na(Lon_prec), Longitude, Lon_prec),
+        Lat_updated = ifelse(is.na(Lat_prec), Latitude, Lat_prec)) %>%
+  # Remove old coordinate columns
+  select(-Longitude, -Latitude, -Lon_prec, -Lat_prec) %>%
+  # Remove 459 observations without coordinates
+  dplyr::filter(!is.na(Lon_updated)) %>%
+  # Translate codes from Location method to words
+  # Update `Location method`if edit_loc_method = TRUE
+  mutate(`Location method` = 
+           str_replace_all(
+             `Location method`,
+             c("01" = "Permanently marked plot isolated (i.e. somewhere within the site)",
+               "02" = "Marked plot in a grid (i.e. with regularly spaced neighbor plots)",
+               "03" = "Location with differential GPS",
+               "04" = "Location with GPS",
+               "05" = "Location from accurate map",
+               "06" = "Location from a description",
+               "07" = "Other",
+               "08" = "Marked plot in a transect")), `Location method`) %>%
+  # Add columns date and year
+  mutate(date = dmy(`Date of recording`), year = as.integer(year(date)))
+```
+
+# Clean info on Expert system column and separate it
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>% 
+  mutate(
+    # Clean 'Expert System' column by removing "!" and replacing "~" with NA
+    `Expert system` = case_when(
+      `Expert system` == "~" ~ NA_character_,  # Replace "~" with NA
+      TRUE ~ str_replace_all(`Expert system`, "!", "")  # Remove "!"
+    )
+  ) %>%
+  # Separate the values in 'Expert System' into multiple columns
+  separate(
+    `Expert system`,
+    into = c("EUNISa", "EUNISb", "EUNISc"), # At most, there are 3 diff values
+    sep = ",",
+    extra = "drop",  # Drop extra values if there are more than columns
+    fill = "right",   # Fill missing values with NA for cases with fewer values
+    remove = FALSE    # Keep the original 'Expert System' column
+  ) %>%
+  # Add columns for the different EUNIS levels
+  mutate(
+    # EUNISa levels
+    EUNISa_1 = substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 2, 1)),
+    EUNISa_2 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 3, 2), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 3, 2)),
+      NA_character_
+    ),
+    EUNISa_3 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 4, 3), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 4, 3)),
+      NA_character_
+      ),
+    EUNISa_4 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 5, 4), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 5, 4)),
+      NA_character_
+    ),
+    # EUNISb levels
+    EUNISb_1 = substr(EUNISb, 1, ifelse(str_starts(EUNISb, "MA"), 2, 1)),
+    EUNISb_2 = ifelse(
+      nchar(EUNISb) >= ifelse(str_starts(EUNISb, "MA"), 3, 2), 
+      substr(EUNISb, 1, ifelse(str_starts(EUNISb, "MA"), 3, 2)),
+      NA_character_
+    ),
+    EUNISb_3 = ifelse(
+      nchar(EUNISb) >= ifelse(str_starts(EUNISb, "MA"), 4, 3), 
+      substr(EUNISb, 1, ifelse(str_starts(EUNISb, "MA"), 4, 3)),
+      NA_character_
+    ),
+    EUNISb_4 = ifelse(
+      nchar(EUNISb) >= ifelse(str_starts(EUNISb, "MA"), 5, 4), 
+      substr(EUNISb, 1, ifelse(str_starts(EUNISb, "MA"), 5, 4)),
+      NA_character_
+    ),
+    # EUNISc levels
+    EUNISc_1 = substr(EUNISc, 1, ifelse(str_starts(EUNISc, "MA"), 2, 1)),
+    EUNISc_2 = ifelse(
+      nchar(EUNISc) >= ifelse(str_starts(EUNISc, "MA"), 3, 2), 
+      substr(EUNISc, 1, ifelse(str_starts(EUNISc, "MA"), 3, 2)),
+      NA_character_
+    ),
+    EUNISc_3 = ifelse(
+      nchar(EUNISc) >= ifelse(str_starts(EUNISc, "MA"), 4, 3), 
+      substr(EUNISc, 1, ifelse(str_starts(EUNISc, "MA"), 4, 3)),
+      NA_character_
+    ),
+    EUNISc_4 = ifelse(
+      nchar(EUNISc) >= ifelse(str_starts(EUNISc, "MA"), 5, 4), 
+      substr(EUNISc, 1, ifelse(str_starts(EUNISc, "MA"), 5, 4)),
+      NA_character_
+    )
+  )
+```
+
+# Add EUNIS from info on HabitatID from DK 
+
+Based on information got from Jesper.
+
+## Read the data sent by Jesper from DK
+
+```{r}
+db_DK_J<-read_tsv(
+  "C:/Data/MOTIVATE/DK_Naturdata_Res_habitat_hab_codes_Jesper/DK_Naturdata_Res_habitat_hab_codes.txt")
+```
+
+## Add info on HabitatID
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  # Keeping all obs in data_V2025.2 but not all in db_DK_J
+  left_join(db_DK_J %>% select(PlotObservationID, HabitatID))
+```
+
+## Change some Annex I habitat codes that were wrong
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(HabitatID = as.character(HabitatID)) %>%
+  mutate(HabitatID = ifelse(HabitatID == "9998", "91D0",
+                            ifelse(HabitatID == "9999", "91E0", HabitatID)))
+```
+
+## Add info on correspondences HabitatID (DK, Jesper) - EUNIS
+
+Read correspondences file:
+
+```{r}
+correspondences<-read_excel(here("..", "DB_first_check", "data", "edited",
+                                 "correspondence_HabitatID_DK.xlsx"))
+```
+
+Add info to data_V2025.2:
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  # Keeping all obs in data_V2025.2 but not all in db_DK_J
+  left_join(correspondences %>% select(HabitatID, EUNIS))
+```
+
+Correct NA values in EUNIS
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(EUNIS = ifelse(EUNIS == "NA", NA, EUNIS))
+```
+
+Add info on EUNIS (DK) to EUNISa:
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(EUNISa =
+           # If EUNIS (DK) is available, add as EUNISa
+           ifelse(!is.na(EUNIS), EUNIS, 
+                  # Otherwise keep EUNISa
+                  EUNISa),
+         EUNIS_assignation = ifelse(!is.na(EUNIS), "Info from DK",
+                                    ifelse(is.na(EUNISa), "Not possible",
+                                           "Expert system"))) %>%
+  # Remove unneeded columns
+  select(-EUNIS, -HabitatID)
+```
+
+## Update columns for EUNIS levels
+
+Update the columns for the different EUNIS levels:
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(
+    # EUNISa levels
+    EUNISa_1 = substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 2, 1)),
+    EUNISa_2 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 3, 2), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 3, 2)),
+      NA_character_
+    ),
+    EUNISa_3 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 4, 3), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 4, 3)),
+      NA_character_
+      ),
+    EUNISa_4 = ifelse(
+      nchar(EUNISa) >= ifelse(str_starts(EUNISa, "MA"), 5, 4), 
+      substr(EUNISa, 1, ifelse(str_starts(EUNISa, "MA"), 5, 4)),
+      NA_character_
+    )
+  ) 
+```
+
+## Update number of different EUNIS codes
+
+Recalculate how many different EUNIS codes have been assigned:
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(
+    # Count the number of non-NA values across the EUNIS columns
+    n_EUNIS = rowSums(!is.na(select(., EUNISa:EUNISc)))
+  )
+```
+
+New plot for EUNISa_1 (the first assigned EUNIS in cases of multiple assignations, level 1):
+
+```{r}
+ggplot(data_V2025.2, aes(EUNISa_1)) +
+         geom_bar(aes(y = (..count..) / sum(..count..) * 100)) +
+  labs(y = "Percentage of ReSurvey observations",
+       x = "EUNIS level 1") + coord_flip()
+ggplot(data_V2025.2 %>% dplyr::filter(!is.na(EUNISa_1)),
+       aes(EUNISa_1)) +
+         geom_bar(aes(y = (..count..) / sum(..count..) * 100)) +
+  labs(y = "Percentage of ReSurvey observations",
+       x = "EUNIS level 1") + coord_flip()
+```
+
+# Add descriptions of EUNIS levels
+
+## Level 1
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(
+    EUNISa_1_descr = case_when(
+      EUNISa_1 == "V" ~ "Vegetated man-made habitats",
+      EUNISa_1 == "U" ~ "Inland habitats with no or little soil",
+      EUNISa_1 == "T" ~ "Forests and other wooded land",
+      EUNISa_1 == "S" ~ "Heathlands, scrub and tundra",
+      EUNISa_1 == "R" ~ "Grasslands",
+      EUNISa_1 == "Q" ~ "Wetlands",
+      EUNISa_1 == "P" ~ "Inland waters",
+      EUNISa_1 == "N" ~ "Coastal habitats",
+      EUNISa_1 == "MA" ~ "Marine habitats",
+      TRUE ~ NA_character_
+    ),
+    EUNISb_1_descr = case_when(
+      EUNISb_1 == "V" ~ "Vegetated man-made habitats",
+      EUNISb_1 == "U" ~ "Inland habitats with no or little soil",
+      EUNISb_1 == "T" ~ "Forests and other wooded land",
+      EUNISb_1 == "S" ~ "Heathlands, scrub and tundra",
+      EUNISb_1 == "R" ~ "Grasslands",
+      EUNISb_1 == "Q" ~ "Wetlands",
+      EUNISb_1 == "P" ~ "Inland waters",
+      EUNISb_1 == "N" ~ "Coastal habitats",
+      EUNISb_1 == "MA" ~ "Marine habitats",
+      TRUE ~ NA_character_
+    ),
+    EUNISc_1_descr = case_when(
+      EUNISc_1 == "V" ~ "Vegetated man-made habitats",
+      EUNISc_1 == "U" ~ "Inland habitats with no or little soil",
+      EUNISc_1 == "T" ~ "Forests and other wooded land",
+      EUNISc_1 == "S" ~ "Heathlands, scrub and tundra",
+      EUNISc_1 == "R" ~ "Grasslands",
+      EUNISc_1 == "Q" ~ "Wetlands",
+      EUNISc_1 == "P" ~ "Inland waters",
+      EUNISc_1 == "N" ~ "Coastal habitats",
+      EUNISc_1 == "MA" ~ "Marine habitats",
+      TRUE ~ NA_character_
+    )
+  )
+```
+
+## Level 2
+
+```{r}
+descriptions<-read_excel(here("..", "DB_first_check", "data", "edited",
+                                 "EUNIS-Habitats-2021-06-01_modified.xlsx"))
+```
+
+```{r}
+# Define the columns and corresponding description column names
+eunis_cols <- c("EUNISa_2", "EUNISa_3", "EUNISa_4",
+                "EUNISb_2", "EUNISb_3", "EUNISb_4", 
+                "EUNISc_2", "EUNISc_3", "EUNISc_4")
+
+# Create corresponding description column names
+descr_col_names <- paste0(eunis_cols, "_descr")
+
+# Use reduce to loop through the columns and join dynamically based on level
+data_V2025.2 <- reduce(seq_along(eunis_cols), function(data, i) {
+  # Extract level number from the column name (e.g., EUNISa_2 -> 2)
+  level <- as.numeric(gsub("\\D", "", eunis_cols[i]))
+  
+  # Filter descriptions for the corresponding level
+  descriptions_level <- descriptions %>%
+    dplyr::filter(level == level) %>%
+    select(`EUNIS 2020 code`, `EUNIS-2021 habitat name`)
+  
+  # Perform the left_join and rename the column dynamically
+  data %>%
+    left_join(
+      descriptions_level,
+      by = setNames("EUNIS 2020 code", eunis_cols[i])
+    ) %>%
+    rename(!!descr_col_names[i] := `EUNIS-2021 habitat name`)
+}, .init = data_V2025.2)
+```
+
+See where matching did not work:
+
+```{r}
+data_V2025.2 %>% 
+  dplyr::filter(!is.na(EUNISa_2) & is.na(EUNISa_2_descr)) %>% count(EUNISa_2)
+data_V2025.2 %>% 
+  dplyr::filter(!is.na(EUNISa_3) & is.na(EUNISa_3_descr)) %>% count(EUNISa_3)
+data_V2025.2 %>% 
+  dplyr::filter(!is.na(EUNISa_4) & is.na(EUNISa_4_descr)) %>% count(EUNISa_4)
+```
+
+The matching did not work sometimes, correct!
+
+```{r}
+# Correct EUNISa levels 2-4 descriptions
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(EUNISa_2_descr = 
+           ifelse(!is.na(EUNISa_2_descr), EUNISa_2_descr,
+                  case_when(
+                    EUNISa_2 == "P2" ~ "Running aquatic habitats",
+                    EUNISa_2 == "P3" ~ "Aquatic plant communities",
+                    EUNISa_2 == "Pf" ~ "Fresh-water submerged vegetation",
+                    EUNISa_2 == "Pj" ~ "Stonewort vegetation",
+                    EUNISa_2 == "R4" ~ "Alpine and subalpine grasslands",
+                    EUNISa_2 == "Pb" ~ "Calcareous spring and spring brook",
+                    EUNISa_2 == "Qb" ~ "Wetlands",
+                    EUNISa_2 == "R3" ~ "Seasonally wet and wet grasslands",
+                    EUNISa_2 == "Qa" ~ "Mires",
+                    EUNISa_2 == "Pa" ~ "Base-poor spring and spring brook",
+                    EUNISa_2 == "Ph" ~ "Oligotrophic-water vegetation",
+                    EUNISa_2 == "Pg" ~ "Fresh-water nymphaeid vegetation",
+                    EUNISa_2 ==
+                      "Pd" ~ "Fresh-water small pleustophyte vegetation",
+                    EUNISa_2 == "Pc" ~ "Brackish-water vegetation",
+                    EUNISa_2 ==
+                      "Pe" ~ "Fresh-water large pleustophyte vegetation",
+                    EUNISa_2 == "Pi" ~ "Dystrophic-water vegetation",
+                    EUNISa_2 == "S1" ~ "Tundra",
+                    EUNISa_2 ==
+                      "U7" ~ "Unvegetated or sparsely vegetated gravel bars",
+                    EUNISa_2 == "Q6" ~ "Periodically exposed shores",
+                    EUNISa_2 == "R3" ~ "Seasonally wet and wet grasslands",
+                    EUNISa_2 == "R4" ~ "Alpine and subalpine grasslands",
+                    EUNISa_2 == "U7" ~ "Unvegetated or sparsely vegetated gravel bars",
+                    # Sa & Sb, not sure what these are, left without description
+                    TRUE ~ NA_character_)
+                  ),
+         EUNISa_3_descr = 
+           ifelse(!is.na(EUNISa_3_descr), EUNISa_3_descr,
+                  case_when(
+                    EUNISa_3 =="U71" ~ "Unvegetated or sparsely vegetated gravel bar in montane and alpine regions",
+                    EUNISa_3 =="Q61" ~ "Periodically exposed shore with stable, eutrophic sediments with pioneer or ephemeral vegetation",
+                    EUNISa_3 =="Q62" ~ "Periodically exposed shore with stable, mesotrophic sediments with pioneer or ephemeral vegetation",
+                    EUNISa_3 == "P2N" ~ "Spring",
+                    EUNISa_3 == "P3a" ~ "Brackish-water vegetation",
+                    EUNISa_3 == "P3b" ~ "Fresh-water small pleustophyte vegetation",
+                    EUNISa_3 == "P3c" ~ "Fresh-water large pleustophyte vegetation",
+                    EUNISa_3 == "P3d" ~ "Fresh-water submerged vegetation",
+                    EUNISa_3 == "P3e" ~ "Fresh-water nymphaeid vegetation",
+                    EUNISa_3 == "P3f" ~ "Oligotrophic-water vegetation",
+                    EUNISa_3 == "P3g" ~ "Dystrophic-water vegetation",
+                    EUNISa_3 == "P3h" ~ "Stonewort vegetation",
+                    TRUE ~ NA_character_
+                    ))
+         )
+```
+
+# Remove EUNIS cols that are all NA
+
+```{r}
+data_V2025.2 %>% dplyr::filter(!is.na(EUNISb_4))
+data_V2025.2 %>% dplyr::filter(!is.na(EUNISc_4))
+```
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>% select(-EUNISb_4, -EUNISc_4,
+                                        -EUNISb_4_descr, -EUNISc_4_descr)
+```
+
+# Remove EUNIS cols and other cols that will not be used
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  select(-`Date of recording`, -`Expert system`, -EUNISa , -EUNISb, -EUNISc, 
+         -`Manipulate (y/n)`, -`Type of manipulation`)
+```
+
+# Remove obs where there are multiple assignments at EUNIS level 1
+
+See PlotObservationIDs for those rows:
+
+```{r}
+multiple_assign <- data_V2025.2 %>% 
+  filter(!is.na(EUNISb_1) & EUNISb_1 != EUNISa_1) %>%
+  pull(PlotObservationID)
+```
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  filter(!PlotObservationID %in% multiple_assign)
+```
+
+# Identify ESY columns
+
+Add "ESY_" before all EUNIS columns that come from the Expert system or from info from DK.
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  rename_with(~ gsub("EUNIS", "ESY_EUNIS", .x), contains("EUNIS"))
+```
+
+# Add Pl@ntBert predictions
+
+## Abundance
+
+```{r}
+plantbert_ab <- read_csv(
+  "C:/Data/MOTIVATE/Pl@ntBERT/plantbert_habitat_predictions.csv")
+```
+
+```{r}
+nrow(plantbert_ab)
+```
+
+```{r}
+# Code adapted from Michael (Data_Cleaning_20251027_Michael.Rmd)
+# Normalize column names
+colnames(plantbert_ab) <- gsub(" ", ".", colnames(plantbert_ab))
+
+# Compute the top-level EUNIS (level-2) code (2 characters)
+plantbert_ab$top.lvl2 <- substr(
+  plantbert_ab$`Most.likely.EUNIS.level-2.habitat`, 1, 2)
+plantbert_ab$top.lvl2 <- gsub("MA", "M2", plantbert_ab$top.lvl2)
+
+# Extract the certainty percentage as a numeric value
+plantbert_ab$top.lvl2.perc <- as.numeric(
+  sub(".*\\(([^%]+)%\\).*", "\\1", 
+      plantbert_ab$`Most.likely.EUNIS.level-2.habitat`))
+
+# Label this dataset’s method
+plantbert_ab$PB_method <- "PB_abund"
+
+# Define cutoff thresholds
+cutoff <- c(75, 80,  85, 90, 95, 97, 99)
+  
+# Compute how many rows remain above each cutoff
+plantbert_ab.cutoff <- plantbert_ab %>% 
+  dplyr::reframe(cutoff = cutoff, 
+                 n.remaining = sapply(cutoff, 
+                                      function (c) sum(top.lvl2.perc >= c)))
+
+# Plot the histogram of certainty values
+plot.pb.hist <- ggplot(plantbert_ab) +
+  geom_histogram(aes(x = top.lvl2.perc)) +
+  scale_x_continuous(breaks = seq(0, 100, 10)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(x = "certainty (%)", y = "plots")
+
+# Plot the remaining rows by cutoff
+plot.pb.cutoff <- ggplot(plantbert_ab.cutoff) +
+  geom_bar(aes(x = cutoff, y = n.remaining), stat = "identity", width = 0.75) +
+  scale_x_continuous(breaks = cutoff) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  geom_label(aes(x = cutoff, y = n.remaining * 1.1, 
+                 label = paste0(round(n.remaining / 1000), "k")),
+             size = 3) +
+    labs(x = "cutoff value (%)", y = "remaining plots")
+
+# Combine both plots vertically
+grid.pb <- plot_grid(plot.pb.hist, plot.pb.cutoff, nrow = 2)
+grid.pb
+
+# Choose a final cutoff and filter the data
+pb.cut.abund <- 75
+
+plantbert_ab <- plantbert_ab %>% 
+  dplyr::filter(top.lvl2.perc >= pb.cut.abund) %>% 
+  mutate(PB_method = "PB_abund")
+
+nrow(plantbert_ab)
+```
+
+```{r}
+plantbert_ab <- plantbert_ab %>%
+  # Keep columns needed
+  select(PlotObservationID, top.lvl2, top.lvl2.perc, PB_method) %>%
+  # Rename columns
+  rename(PB_EUNIS = top.lvl2, PB_EUNIS_perc = top.lvl2.perc)
+```
+
+## Pres-abs
+
+```{r}
+plantbert_pa <- read_csv(
+  "C:/Data/MOTIVATE/Pl@ntBERT/plantbert_habitat_predictions_random.csv")
+```
+
+```{r}
+nrow(plantbert_pa)
+```
+
+```{r}
+# Code adapted from Michael (Data_Cleaning_20251027_Michael.Rmd)
+# Normalize column names
+colnames(plantbert_pa) <- gsub(" ", ".", colnames(plantbert_pa))
+
+# Compute the top-level EUNIS (level-2) code (2 characters)
+plantbert_pa$top.lvl2 <- substr(
+  plantbert_pa$`Most.likely.EUNIS.level-2.habitat`, 1, 2)
+plantbert_pa$top.lvl2 <- gsub("MA", "M2", plantbert_pa$top.lvl2)
+
+# Extract the certainty percentage as a numeric value
+plantbert_pa$top.lvl2.perc <- as.numeric(
+  sub(".*\\(([^%]+)%\\).*", "\\1", 
+      plantbert_pa$`Most.likely.EUNIS.level-2.habitat`))
+
+# Label this dataset’s method
+plantbert_pa$PB_method <- "PB_presabs"
+
+# Define cutoff thresholds
+cutoff <- c(75, 80,  85, 90, 95, 97, 99)
+  
+# Compute how many rows remain above each cutoff
+plantbert_pa.cutoff <- plantbert_pa %>% 
+  dplyr::reframe(cutoff = cutoff, 
+                 n.remaining = sapply(cutoff, 
+                                      function (c) sum(top.lvl2.perc >= c)))
+
+# Plot the histogram of certainty values
+plot.pb.pa.hist <- ggplot(plantbert_pa) +
+  geom_histogram(aes(x = top.lvl2.perc)) +
+  scale_x_continuous(breaks = seq(0, 100, 10)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(x = "certainty (%)", y = "plots")
+
+# Plot the remaining rows by cutoff
+plot.pb.pa.cutoff <- ggplot(plantbert_pa.cutoff) +
+  geom_bar(aes(x = cutoff, y = n.remaining), stat = "identity", width = 0.75) +
+  scale_x_continuous(breaks = cutoff) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  geom_label(aes(x = cutoff, y = n.remaining * 1.1, 
+                 label = paste0(round(n.remaining / 1000), "k")),
+             size = 3) +
+    labs(x = "cutoff value (%)", y = "remaining plots")
+
+# Combine both plots vertically
+grid.pb.pa <- plot_grid(plot.pb.pa.hist, plot.pb.pa.cutoff, nrow = 2)
+grid.pb.pa
+
+# Choose a final cutoff and filter the data
+# Michael: We can't  choose the same accuracy cutoff for both datasets,
+# because their global accuracy is different (0.92 versus 0.78).
+# So by scaling pb.cut.abund by the quotient of the global accuracies 
+# we are at least achieving some statistical cohesion. 
+# Thinking based on model weighting using various indices...
+pb.cut.pa <- pb.cut.abund * 0.92/0.78
+
+plantbert_pa <- plantbert_pa %>% 
+  dplyr::filter(top.lvl2.perc >= pb.cut.pa) %>% 
+  mutate(PB_method = "PB_presabs")
+
+nrow(plantbert_pa)
+```
+
+```{r}
+plantbert_pa <- plantbert_pa %>%
+  # Keep columns needed
+  select(PlotObservationID, top.lvl2, top.lvl2.perc, PB_method) %>%
+  # Rename columns
+  rename(PB_EUNIS = top.lvl2, PB_EUNIS_perc = top.lvl2.perc)
+```
+
+## Check how many observations are in common between the two datasets
+
+```{r}
+any(plantbert_pa$PlotObservationID %in% plantbert_ab$PlotObservationID)
+```
+
+No common observations.
+
+## Merge with previous data
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  left_join(rbind(plantbert_ab, plantbert_pa)) %>%
+    # Add columns for the different EUNIS levels
+  mutate(
+    # EUNISa levels
+    PB_EUNIS_1 = substr(PB_EUNIS, 1, ifelse(str_starts(PB_EUNIS, "MA"), 2, 1)),
+    PB_EUNIS_2 = ifelse(
+      nchar(PB_EUNIS) >= ifelse(str_starts(PB_EUNIS, "MA"), 3, 2), 
+      substr(PB_EUNIS, 1, ifelse(str_starts(PB_EUNIS, "MA"), 3, 2)),
+      NA_character_)
+    ) %>%
+  select(-PB_EUNIS)
+```
+
+## See differences in level 1 between ESY and PB
+
+```{r}
+data_V2025.2 %>% dplyr::filter(ESY_EUNISa_1 != PB_EUNIS_1) %>% nrow()
+```
+
+# Almost final EUNIS1 and EUNIS2
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  mutate(
+    # Final EUNIS level 1 (option 1): If ESY is available, use it,
+    # otherwise use PB
+    EUNIS1_dk = ifelse(!is.na(ESY_EUNISa_1), ESY_EUNISa_1, PB_EUNIS_1),
+    # Final EUNIS level 1 (option 2): If ESY is available 
+    # and habitat assignation is from the Expert system, use it, 
+    # otherwise use PB
+    EUNIS1_pb = ifelse(!is.na(ESY_EUNISa_1) &
+                         ESY_EUNIS_assignation == "Expert system",
+                       ESY_EUNISa_1, PB_EUNIS_1),
+    # Final EUNIS level 2 (option 1): If ESY is available, use it, 
+    # otherwise use PB
+    EUNIS2_dk = ifelse(!is.na(ESY_EUNISa_1), ESY_EUNISa_2, PB_EUNIS_2),
+    # Final EUNIS level 2 (option 2): If ESY is available 
+    # and habitat assignation is from the Expert system, use it, 
+    # otherwise use PB
+    EUNIS2_pb = ifelse(!is.na(ESY_EUNISa_1) & 
+                         ESY_EUNIS_assignation == "Expert system", 
+                       ESY_EUNISa_2, PB_EUNIS_2)
+  )
+```
+
+# Numbers of total observations
+
+```{r}
+# With ESY
+data_V2025.2 %>% dplyr::filter(!is.na(ESY_EUNISa_1)) %>% nrow()
+# With PB
+data_V2025.2 %>% dplyr::filter(!is.na(PB_EUNIS_1)) %>% nrow()
+# With mix ESY-PB (dk)
+data_V2025.2 %>% dplyr::filter(!is.na(EUNIS1_dk)) %>% nrow() # Higher number of obs
+# With mix ESY-PB (pb)
+data_V2025.2 %>% dplyr::filter(!is.na(EUNIS1_pb)) %>% nrow()
+```
+
+# Numbers of observations in Q. R, S, T
+
+```{r}
+# With ESY
+data_V2025.2 %>% dplyr::filter(ESY_EUNISa_1 %in% c("Q", "R", "S", "T")) %>% nrow()
+# With PB
+data_V2025.2 %>% dplyr::filter(PB_EUNIS_1 %in% c("Q", "R", "S", "T")) %>% nrow()
+# With mix ESY-PB (dk)
+data_V2025.2 %>% dplyr::filter(EUNIS1_dk %in% c("Q", "R", "S", "T")) %>% nrow() # Higher number of obs
+# With mix ESY-PB (pb)
+data_V2025.2 %>% dplyr::filter(EUNIS1_pb %in% c("Q", "R", "S", "T")) %>% nrow()
+```
+
+# Difference between EUNIS1_dk and EUNIS1_pb
+
+```{r}
+# At level 1
+data_V2025.2 %>%
+  dplyr::filter(ESY_EUNIS_assignation == "Info from DK") %>% 
+  nrow()
+data_V2025.2 %>%
+  dplyr::filter(ESY_EUNIS_assignation == "Info from DK") %>% 
+  dplyr::filter(EUNIS1_dk != EUNIS1_pb) %>% nrow()
+```
+
+```{r}
+# At level 2
+data_V2025.2 %>%
+  dplyr::filter(ESY_EUNIS_assignation == "Info from DK") %>% 
+  nrow()
+data_V2025.2 %>%
+  dplyr::filter(ESY_EUNIS_assignation == "Info from DK") %>% 
+  dplyr::filter(EUNIS2_dk != EUNIS2_pb) %>% nrow()
+```
+
+# Final EUNIS1 and EUNIS2
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>%
+  # Create new cols with final EUNIS based on:
+  # 1) ESy, 2) Annex I crosswalk, 3) Pl@ntBert
+  # (keep other cols for reference)
+  mutate(EUNIS1 = EUNIS1_dk, EUNIS2 = EUNIS2_dk)
+```
+
+# Keep only Q, R, S, T
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>% dplyr::filter(EUNIS1 %in% c("Q", "R", "S", "T"))
+```
+
+# Descriptives
+
+Number of observations:
+
+```{r}
+data_V2025.2 %>% nrow()
+```
+
+Number of plots (i.e. unique combinations of RS_CODE, ReSurvey site and ReSurvey plot):
+
+```{r}
+data_V2025.2 %>% 
+  group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`) %>%
+  count() %>%
+  nrow()
+```
+
+BUT there are cases with different coordinates within the same plot, not at all sure about this number, ask Illona. 
+
+# Habitat assignation
+
+```{r}
+data_V2025.2 <- data_V2025.2 %>% 
+  mutate(EUNIS_assignation = ifelse(ESY_EUNIS_assignation == "Not possible",
+                                    "Pl@ntBert", ESY_EUNIS_assignation))
+```
+
+```{r}
+data_V2025.2 %>%
+  count(EUNIS_assignation) %>%
+  mutate(percentage = round(n*100 / sum(n)))
+```
+
+Cases where the expert system assigned more than one EUNIS habitat type at level 1: Removed already!
+
+```{r}
+data_V2025.2 %>% 
+  dplyr::filter(!is.na(ESY_EUNISb_1) & ESY_EUNISa_1 != ESY_EUNISb_1) 
+```
+
+# Remove spatial duplicates
+
+Spatial duplicates are plots have the same exact coordinates, because the surveyor did several plots at one location, and just recorded a pair of coordinates. 
+
+If a group of spatial duplicates has different habitats at EUNIS level 1 (column EUNIS1) -discard the whole group of plots. 
+If a group of spatial duplicates has the same habitat at EUNIS level 1 (column EUNIS1) - keep just one of the plots. 
+
+```{r}
+spatial_groups <- data_V2025.2 %>%
+  # Identify the plots
+  group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`) %>%
+  # unique numeric ID for each plot combination
+  mutate(plot_id = cur_group_id()) %>%   
+  # Calculate number of distinct EUNIS1 assignations for the plot
+  mutate(n_EUNIS1_plot = n_distinct(EUNIS1)) %>%
+  # Calculate EUNIS1 for the plot:
+  # If multiple observations for each plot, with the same EUNIS1,
+  # keep that EUNIS1, otherwise assign "mixed" to EUNIS1
+  mutate(EUNIS1_plot = ifelse(n_EUNIS1_plot == 1, first(EUNIS1), "mixed")) %>%
+  ungroup() %>%
+  # Group by coordinates to find spatial duplicates
+  group_by(Lat_updated, Lon_updated) %>%
+  # unique numeric ID for each coordinates combination
+  mutate(coord_id = cur_group_id()) %>%   
+  mutate(
+    # number of distinct plots at these coords
+    n_plots = n_distinct(plot_id),  
+    # number of distinct EUNIS1_plot values at these coords
+    n_EUNIS1_coords = n_distinct(EUNIS1_plot), 
+    ) %>%
+  # When there are several plots at the same coordinates,
+  # and the number of distinct EUNIS_plot values at these coords is 1, 
+  # but EUNIS1_plot is "mixed", 
+  # then we have a mixed-habitat group, so assign "mixed" to EUNIS1_coords
+  mutate(
+    n_EUNIS1_coords_real = ifelse(
+      n_plots > 1 & n_EUNIS1_coords == 1 & EUNIS1_plot == "mixed",
+      "mixed", as.character(n_EUNIS1_coords))
+    ) %>%
+  ungroup()
+
+# Identify spatial duplicates
+
+## A) Mixed-habitat groups → discard whole groups
+discard_mixed <- spatial_groups %>%
+  # We only want to keep groups of spatial duplicates with the same EUNIS1, 
+  # so we discard the ones with more than one EUNIS1 at the coordinates, 
+  # but we also want to discard the ones with several plots at the same 
+  # coordinates but with "mixed" EUNIS1_plot, 
+  # because they are also mixed-habitat groups
+  dplyr::filter(n_plots > 1 & n_EUNIS1_coords_real != 1)
+
+## B) Same-habitat groups → collapse to 1 plot
+same_habitat <- spatial_groups %>%
+  dplyr::filter(n_plots > 1 & n_EUNIS1_coords_real == 1)
+
+# keep one arbitrary plot per coordinate location
+collapsed_same <- same_habitat %>%
+  group_by(coord_id) %>%
+  slice(1) %>%      # OR: slice_min(year), slice_max(date), etc.
+  ungroup() %>%
+  # Add column to indicate that these were collapsed from several plots
+  mutate(collapsed_from = n_plots)
+
+## C) Unique plots (no spatial duplicates)
+unique_plots <- spatial_groups %>%
+  dplyr::filter(n_plots == 1) %>%
+  # Add column to indicate that these were unique plots
+  mutate(collapsed_from = 1)
+
+# Final cleaned dataset
+data_V2025.2_clean <- bind_rows(
+  unique_plots,
+  collapsed_same
+) %>%
+  arrange(plot_id) %>%     # optional
+  ungroup()
+```
+
+Counts:
+
+```{r}
+n_coord_total <- spatial_groups %>% distinct(coord_id) %>% nrow()
+
+n_coord_discard_mixed <- discard_mixed %>% distinct(coord_id) %>% nrow()
+n_coord_same_habitat  <- same_habitat  %>% distinct(coord_id) %>% nrow()
+n_coord_unique        <- unique_plots  %>% distinct(coord_id) %>% nrow()
+
+cat("Total number of coordinate groups: ", n_coord_total, "\n")
+cat("Coordinate groups discarded due to mixed habitats: ", n_coord_discard_mixed, "\n")
+cat("Coordinate groups kept by collapsing same‑habitat duplicates: ", n_coord_same_habitat, "\n")
+cat("Unique coordinate groups with no spatial duplicates: ", n_coord_unique, "\n")
+cat("Original number of plots: ", data_V2025.2 %>%
+      group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`) %>%
+      mutate(plot_id = cur_group_id()) %>% distinct(plot_id) %>% nrow(), "\n")
+cat("Final number of plots: ", data_V2025.2_clean %>% distinct(plot_id) %>% nrow(), "\n")
+n_coord_total == (n_coord_discard_mixed + n_coord_same_habitat + n_coord_unique)
+```
+
+# Flag plots where different obs have different coords
+
+We still have the problem (is it a problem?) that different observations of the same plot might have different coordinates.
+
+Plots with more than one coordinate group:
+
+```{r}
+# ¿Hay plots con más de un grupo de coordenadas?
+plots_multi_coords <- spatial_groups %>%
+  distinct(plot_id, coord_id) %>%
+  count(plot_id, name = "n_coord_groups") %>%
+  dplyr::filter(n_coord_groups > 1)
+
+plots_multi_in_clean <- data_V2025.2_clean %>%
+  # Returns all rows from x with a match in y
+  semi_join(plots_multi_coords, by = "plot_id") %>%
+  distinct(plot_id)
+
+nrow(plots_multi_in_clean)
+```
+
+Flag them:
+
+```{r}
+data_V2025.2_clean <- data_V2025.2_clean %>%
+  mutate(multi_coords = ifelse(plot_id %in% plots_multi_in_clean$plot_id, 
+                               TRUE, FALSE))
+```
+
+```{r}
+cat("Number of plots where different observations have different coordinates: ", 
+    data_V2025.2_clean %>% dplyr::filter(multi_coords == T) %>% distinct(plot_id) %>% nrow(), "\n")
+```
+
+# New descriptives
+
+Number of observations:
+
+```{r}
+cat("If using all plots:", 
+    data_V2025.2_clean %>% nrow(), "\n")
+cat("If using plots where all obs have same coords:", 
+    data_V2025.2_clean %>% dplyr::filter(multi_coords == F) %>% nrow(), "\n")
+```
+
+Number of plots (i.e. unique combinations of RS_CODE, ReSurvey site and ReSurvey plot):
+
+```{r}
+cat("All plots:", 
+    data_V2025.2_clean %>% distinct(plot_id) %>% 
+      nrow(), "\n")
+cat("Plots where all obs  have same coords:", 
+    data_V2025.2_clean %>% dplyr::filter(multi_coords == F) %>% distinct(plot_id) %>% 
+      nrow(), "\n")
+cat("Plots where obs have different coords:", 
+    data_V2025.2_clean %>% dplyr::filter(multi_coords == T) %>% distinct(plot_id) %>% 
+      nrow(), "\n")
+```
+
+# Save to clean datafiles and shapefiles
+
+## All data Q, R, S, T
+
+```{r}
+write_csv(data_V2025.2_clean,
+          here("data", "clean","ReSurvey_QRST_data_V2025.2_20260304.csv"))
+```
+
+```{r}
+st_write(st_as_sf(data_V2025.2_clean %>%
+                    # Keep minimum number of fields
+                    # to avoid problems with long names
+                    select(PlotObservationID, year, Lat_updated, Lon_updated),
+                  coords = c("Lon_updated", "Lat_updated"), crs = 4326),
+         here("data", "shp", "ReSurvey_QRST_data_V2025.2_20260304.shp"))
+```
+
+```{r}
+st_write(st_as_sf(data_V2025.2_clean %>%
+                    # Keep minimum number of fields
+                    # to avoid problems with long names
+                    select(PlotObservationID, year, Lat_updated, Lon_updated,
+                           EUNIS1, EUNIS2),
+                  coords = c("Lon_updated", "Lat_updated"), crs = 4326),
+         here("data", "shp", "ReSurvey_QRST_data_V2025.2_EUNIS_20260306.shp"))
+```
+
+## From 2016  Q, R, S, T
+
+```{r}
+write_csv(data_V2025.2_clean %>% 
+            dplyr::filter(year >= 2016),
+          here("data", "clean","ReSurvey_QRST_from2016_data_V2025.2_20260304.csv"))
+```
+
+```{r}
+st_write(st_as_sf(data_V2025.2_clean %>%
+                    # Keep minimum number of fields
+                    # to avoid problems with long names
+                    select(PlotObservationID, year, Lat_updated, Lon_updated) %>% 
+                    dplyr::filter(year >= 2016),
+                  coords = c("Lon_updated", "Lat_updated"), crs = 4326),
+         here("data", "shp", "ReSurvey_QRST_from2016_data_V2025.2_20260304.shp"))
+```
+
+```{r}
+st_write(st_as_sf(data_V2025.2_clean %>%
+                    # Keep minimum number of fields
+                    # to avoid problems with long names
+                    select(PlotObservationID, year, Lat_updated, Lon_updated,
+                           EUNIS1, EUNIS2) %>% 
+                    dplyr::filter(year >= 2016),
+                  coords = c("Lon_updated", "Lat_updated"), crs = 4326),
+         here("data", "shp", "ReSurvey_QRST_from2016_data_V2025.2_EUNIS_20260306.shp"))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+

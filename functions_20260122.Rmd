@@ -231,48 +231,6 @@ compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
 # Function to extract average values of indices per month and AUC between March and October 
 
 ```{r}
-# extract_monthly_avg_indices <- function(
-#   GAM_data, 
-#   monthly_doys = list("01" = 1:31, "02" = 32:59, "03" = 60:90, "04" = 91:120, 
-#                       "05" = 121:151, "06" = 152:181, "07" = 182:212, 
-#                       "08" = 213:243, "09" = 244:273, "10" = 274:304,
-#                       "11" = 305:334, "12" = 335:365)) {
-#   
-#   monthly_df <- GAM_data %>%
-#     mutate(month = purrr::map_chr(DOY, function(doy) {
-#       month_name <- names(monthly_doys)[sapply(monthly_doys, 
-#                                                function(r) doy %in% r)]
-#       if (length(month_name) > 0) month_name else NA_character_
-#     })) %>%
-#     dplyr::filter(!is.na(month)) %>%
-#     group_by(PlotObservationID, index, month) %>%
-#     summarise(avg_value = mean(value, na.rm = TRUE), .groups = "drop") %>%
-#     mutate(avg_value = ifelse(is.infinite(avg_value), NA, avg_value)) %>%
-#     arrange(PlotObservationID, match(month, names(monthly_doys))) %>%
-#     pivot_wider(names_from = month, values_from = avg_value, 
-#                 names_prefix = "avg_value_")
-#   
-#   # Calculate AUC between March and October using the trapezoidal rule
-#   months_auc <- c("03", "04", "05", "06", "07", "08", "09", "10")
-#   # Approximate DOY of the center of each month
-#   doy_midpoints <- c(75, 105, 135, 165, 195, 225, 255, 285)  
-#   
-#   monthly_df <- monthly_df %>%
-#     rowwise() %>%
-#     mutate(
-#       auc_mar_oct = {
-#         values <- c_across(all_of(paste0("avg_value_", months_auc)))
-#         if (any(is.na(values))) NA_real_ else sum(diff(doy_midpoints) *
-#                                                     zoo::rollmean(values, 2))
-#       }
-#     ) %>%
-#     ungroup()
-#   
-#   return(monthly_df)
-# }
-```
-
-```{r}
 extract_monthly_avg_indices <- function(
   GAM_data, 
   monthly_doys = list("01" = 1:31, "02" = 32:59, "03" = 60:90, "04" = 91:120, 
@@ -401,31 +359,106 @@ plot_histogram <- function(data, x_var, x_label) {
 }
 ```
 
-# Function to create plots with violin + boxplot + points
+# Function to create plots with violin + boxplot + points (NEW)
 
 ```{r}
-distr_plot <- function(data, y_vars, y_labels) {
+distr_plot <- function(data,
+                       y_vars,
+                       y_labels,
+                       grey = TRUE,
+                       p_low = 0.10,
+                       p_high = 0.90,
+                       low_groups = c("T"),
+                       high_groups = c("Q", "R", "S"),
+                       grey_color = "grey60",
+                       print_plots = FALSE) {
+  stopifnot(length(y_vars) == length(y_labels))
+
+  # Ensure y_vars/y_labels can be length-1 strings
+  if (!is.vector(y_vars))   y_vars   <- c(y_vars)
+  if (!is.vector(y_labels)) y_labels <- c(y_labels)
+
+  library(ggplot2)
+  library(dplyr)
+  library(rlang)
+  library(stringr)
+
+  base_data <- data %>%
+    dplyr::filter(EUNISa_1 %in% union(low_groups, high_groups))
+
+  plots <- vector("list", length(y_vars))
+
   for (i in seq_along(y_vars)) {
-    y_var <- y_vars[[i]]
+    y_var   <- y_vars[[i]]
     y_label <- y_labels[[i]]
-    
-    p <- ggplot(data = data %>%
-                  dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
-                aes(x = EUNISa_1_descr, y = !!sym(y_var), fill = EUNISa_1_descr)) +
+
+    if (grey) {
+      df_flag <- base_data %>%
+        group_by(EUNISa_1) %>%
+        mutate(
+          q_low  = quantile(!!sym(y_var), p_low,  na.rm = TRUE),
+          q_high = quantile(!!sym(y_var), p_high, na.rm = TRUE),
+          grey_flag = case_when(
+            EUNISa_1 %in% low_groups  ~ (!!sym(y_var)) <= q_low,
+            EUNISa_1 %in% high_groups ~ (!!sym(y_var)) >= q_high,
+            TRUE ~ FALSE
+          ),
+          grey_flag = coalesce(grey_flag, FALSE)
+        ) %>%
+        ungroup()
+    }
+
+    p <- ggplot(
+      data = base_data,
+      aes(x = EUNISa_1, y = !!sym(y_var), fill = EUNISa_1)
+    ) +
+      # Violin
       geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
-      geom_point(aes(y = !!sym(y_var), color = EUNISa_1_descr),
-                 position = position_jitter(width = 0.15), size = 1, alpha = 0.25) +
+
+      # Points (with or without greying)
+      {
+        if (grey) {
+          list(
+            geom_point(
+              data = df_flag %>% filter(!grey_flag),
+              aes(y = !!sym(y_var), color = EUNISa_1),
+              position = position_jitter(width = 0.15),
+              size = 0.25, alpha = 0.25
+            ),
+            geom_point(
+              data = df_flag %>% filter(grey_flag),
+              aes(y = !!sym(y_var)),
+              color = grey_color,
+              position = position_jitter(width = 0.15),
+              size = 0.25, alpha = 0.6
+            )
+          )
+        } else {
+          geom_point(
+            aes(y = !!sym(y_var), color = EUNISa_1),
+            position = position_jitter(width = 0.15),
+            size = 0.25, alpha = 0.25
+          )
+        }
+      } +
+
+      # BOX PLOT LAST (on top) — only change for rule #1
       geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
-      stat_summary(fun.y = mean, geom = "point", shape = 20, size = 1) +
-      stat_summary(fun.data = function(x) data.frame(y = max(x) + 0.1,
-                                                     label = length(x)),
-                   geom = "text", aes(label = ..label..), vjust = 0.5) +
+
       labs(y = y_label, x = "EUNIS level 1") +
       scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
-      guides(fill = FALSE, color = FALSE) +
+      guides(fill = "none", color = "none") +
       theme_bw() + coord_flip()
-    
-    print(p)
+
+    if (print_plots) print(p)
+    plots[[i]] <- p
+  }
+
+  # Return a single ggplot if length == 1 (so you can use it with grid.arrange directly)
+  if (length(plots) == 1L) {
+    return(plots[[1L]])
+  } else {
+    return(plots)  # list of ggplots
   }
 }
 ```
@@ -727,6 +760,41 @@ rough_validation_Landsat <- function(data) {
 }
 ```
 
+# Function for rough validation based on NDVI
+
+```{r}
+# data: your tibble/data.frame
+# y_var: name of the numeric column as a string, e.g., "NDVI_pos_value"
+filter_by_group_percentiles <- function(data, y_var) {
+  cats <- c("T","Q","R","S")
+
+  # Compute thresholds per group for the selected column
+  qs <- data %>%
+    dplyr::group_by(EUNISa_1) %>%
+    dplyr::summarise(
+      p10 = stats::quantile(.data[[y_var]], probs = 0.10, na.rm = TRUE),
+      p90 = stats::quantile(.data[[y_var]], probs = 0.90, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  # Join thresholds and filter rows according to the rule
+  d_filtered <- data %>%
+    dplyr::left_join(qs, by = "EUNISa_1") %>%
+    dplyr::filter(
+      dplyr::case_when(
+        EUNISa_1 == "T" ~ .data[[y_var]] >= p10,        # keep >= 10% for T
+        EUNISa_1 %in% c("Q","R","S") ~ .data[[y_var]] <= p90,  # keep <= 90% for Q/R/S
+        TRUE ~ TRUE
+      )
+    ) %>%
+    dplyr::select(-p10, -p90)  # drop helper columns
+
+  return(d_filtered)
+}
+```
+
+
+
 # Function to create plots with violin + boxplot + points with percentiles
 
 ```{r}
@@ -813,7 +881,7 @@ calculate_df_aux <- function(data, prob_cols) {
 
 # Function for filtering based on model probabilities
 
-## Negatives + positives
+## Negatives 35% + positives 10%
 
 ```{r}
 filter_probs_neg35_pos10 <- function(gdf) {
@@ -843,7 +911,7 @@ filter_probs_neg35_pos10 <- function(gdf) {
 }
 ```
 
-## Negatives only
+## Negatives only 35%
 
 ```{r}
 filter_probs_neg35 <- function(gdf) {
@@ -860,12 +928,42 @@ filter_probs_neg35 <- function(gdf) {
 }
 ```
 
-## Negatives only 50%
+## Negatives 20% + positives 10%
 
 ```{r}
-filter_probs_neg50 <- function(gdf) {
-  # Removes negatives until 50% of the class
-  cap_total <- ceiling(0.50 * nrow(gdf))  # max 50% of the class
+filter_probs_neg20_pos10 <- function(gdf) {
+  # Removes negatives until 20% of the class
+  cap_total <- ceiling(0.20 * nrow(gdf))  # max 20% of the class
+
+  neg <- gdf %>% filter(neg_flag) %>% arrange(desc(gap_neg))
+  drop_neg <- head(neg, cap_total)
+  cap_left <- cap_total - nrow(drop_neg)
+
+  drop_pos <- tibble()
+  if (cap_left > 0) {
+    remaining <- nrow(gdf) - nrow(drop_neg)
+    # If there is room, removes positives with doubts (small_flag = TRUE)
+    # until 10% of the rest
+    pos_cap <- ceiling(0.10 * remaining)
+
+    drop_pos <- gdf %>%
+      filter(!neg_flag & small_flag) %>%
+      arrange(delta) %>%
+      slice_head(n = min(cap_left, pos_cap))
+  }
+
+  drop_ids <- c(drop_neg$PlotObservationID, drop_pos$PlotObservationID)
+  gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
+    select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
+}
+```
+
+## Negatives only 20%
+
+```{r}
+filter_probs_neg20 <- function(gdf) {
+  # Removes negatives until 20% of the class
+  cap_total <- ceiling(0.20 * nrow(gdf))  # max 20% of the class
 
   neg <- gdf %>% filter(neg_flag) %>% arrange(desc(gap_neg))
   drop_neg <- head(neg, cap_total)
@@ -903,10 +1001,15 @@ plot_confusion_matrix <- function(predictions, reference,
 # Function for comparing classes before and after filtering by model probabilities
 
 ```{r}
-compare_classes <- function(data_before, data_step1, data_step2 = NULL,
-                            class_col = "EUNISa_1",
-                            title = "Size of each class across steps",
-                            x_lab = NULL) {
+compare_classes <- function(
+  data_before, data_step1, data_step2 = NULL,
+  class_col = "EUNISa_1",
+  x_lab = NULL,
+  title = NULL,
+  return = c("plot", "both", "counts")
+) {
+  return <- match.arg(return)
+
   # Helper: safe counting that works with empty data frames
   count_safe <- function(df, out_name) {
     if (is.null(df) || nrow(df) == 0) {
@@ -968,18 +1071,14 @@ compare_classes <- function(data_before, data_step1, data_step2 = NULL,
     legend_title <- "State"
   }
 
-  # Labels
-  if (is.null(x_lab)) {
-    x_lab <- paste0("Class (", class_col, ")")
-  }
-
-  # Plot
+    # Plot
   p <- ggplot(counts_long, aes(x = .data[[class_col]], y = n, fill = state)) +
-    geom_col(position = position_dodge(width = 0.85), width = 0.8) +
+    geom_col(position = position_dodge(width = 0.85),
+             width = 0.8, color = "black", linewidth = 0.25) +
     labs(
       title = title,
       x = x_lab,
-      y = "Number of rows",
+      y = "Number of observations",
       fill = legend_title
     ) +
     theme_minimal() +
@@ -988,9 +1087,18 @@ compare_classes <- function(data_before, data_step1, data_step2 = NULL,
       panel.grid.minor = element_blank()
     )
 
-  # Print the plot and invisibly return counts
-  print(p)
-  invisible(counts)
+  # Optionally attach counts to the plot as an attribute for quick retrieval
+  attr(p, "counts") <- counts
+
+  # Return mode
+  if (return == "plot") {
+    return(p)
+  } else if (return == "counts") {
+    return(counts)
+  } else {
+    # both
+    return(list(plot = p, counts = counts))
+  }
 }
 ```
 

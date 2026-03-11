@@ -1,14 +1,14 @@
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/fb53bd97121f7f9ce947837ef1a4c65a73bffb3f/geom_flat_violin.R")
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 printall <- function(tibble) {
   print(tibble, width = Inf)
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 extract_info <- function(filename) {
   first_word <- strsplit(filename, "_")[[1]][1]
   biogeo <- str_extract(first_word,
@@ -19,7 +19,7 @@ extract_info <- function(filename) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
   suppressPackageStartupMessages({
     library(mgcv)
@@ -203,7 +203,7 @@ compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 # extract_monthly_avg_indices <- function(
 #   GAM_data, 
 #   monthly_doys = list("01" = 1:31, "02" = 32:59, "03" = 60:90, "04" = 91:120, 
@@ -245,7 +245,7 @@ compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
 # }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 extract_monthly_avg_indices <- function(
   GAM_data, 
   monthly_doys = list("01" = 1:31, "02" = 32:59, "03" = 60:90, "04" = 91:120, 
@@ -291,7 +291,7 @@ extract_monthly_avg_indices <- function(
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 compute_unweighted_fit <- function(
     # Data frame df with index values over time (DOY)
     df, 
@@ -357,7 +357,7 @@ compute_unweighted_fit <- function(
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 plot_histogram <- function(data, x_var, x_label) {
   ggplot(data %>%
            dplyr::filter(EUNISa_1 %in% c("T", "R", "S", "Q")),
@@ -368,7 +368,7 @@ plot_histogram <- function(data, x_var, x_label) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 distr_plot <- function(data, y_vars, y_labels) {
   for (i in seq_along(y_vars)) {
     y_var <- y_vars[[i]]
@@ -395,7 +395,7 @@ distr_plot <- function(data, y_vars, y_labels) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 distr_plot_biogeo <- function(data, y_vars, y_labels) {
   plots <- list()
   
@@ -426,7 +426,7 @@ distr_plot_biogeo <- function(data, y_vars, y_labels) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 split_train_test <- function(data, proportion = 0.7) {
   train_indices <- sample(1:nrow(data), size = floor(proportion * nrow(data)))
   train_data <- data[train_indices, ]
@@ -435,7 +435,7 @@ split_train_test <- function(data, proportion = 0.7) {
   }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 run_rf <- function(vars_RF, train_data, response_var, ntree = 500) 
   {
   
@@ -479,7 +479,7 @@ run_rf <- function(vars_RF, train_data, response_var, ntree = 500)
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 compute_varimp <- function(model, nperm = 100) {
 
   # Measure execution time
@@ -491,7 +491,7 @@ compute_varimp <- function(model, nperm = 100) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 compute_varimp_cond <- function(model, nperm = 100) {
 
   # Measure execution time
@@ -503,7 +503,7 @@ compute_varimp_cond <- function(model, nperm = 100) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 compute_roc_level1 <- function(model, test_data) {
   # Measure execution time
   execution_time <- system.time({
@@ -539,7 +539,7 @@ compute_roc_level1 <- function(model, test_data) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 compute_roc_level2 <- function(model, test_data) {
   # Measure execution time
   execution_time <- system.time({
@@ -578,7 +578,7 @@ compute_roc_level2 <- function(model, test_data) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 rough_validation_S2 <- function(data) {
   data %>%
     mutate(
@@ -600,7 +600,7 @@ rough_validation_S2 <- function(data) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 rough_validation_SatEmb <- function(data) {
   data %>%
     mutate(
@@ -618,7 +618,7 @@ rough_validation_SatEmb <- function(data) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 rough_validation_Landsat <- function(data) {
   data %>%
     mutate(
@@ -634,7 +634,7 @@ rough_validation_Landsat <- function(data) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 distr_plot_percentiles <- function(data, y_vars, y_labels) {
   for (i in seq_along(y_vars)) {
     y_var <- y_vars[[i]]
@@ -690,7 +690,7 @@ distr_plot_percentiles <- function(data, y_vars, y_labels) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 calculate_df_aux <- function(data, prob_cols) {
   data %>%
     rowwise() %>%
@@ -714,7 +714,7 @@ calculate_df_aux <- function(data, prob_cols) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 filter_probs_conserv <- function(gdf, df) {
   frac <- nrow(gdf) / nrow(df)
   
@@ -737,7 +737,7 @@ filter_probs_conserv <- function(gdf, df) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 filter_probs_neg35_pos10_class_size <- function(gdf, df) {
   frac <- nrow(gdf) / nrow(df)
   
@@ -773,7 +773,7 @@ filter_probs_neg35_pos10_class_size <- function(gdf, df) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 filter_probs_neg35_pos10 <- function(gdf) {
   # Removes negatives until 35% of the class
   cap_total <- ceiling(0.35 * nrow(gdf))  # max 35% of the class
@@ -801,7 +801,7 @@ filter_probs_neg35_pos10 <- function(gdf) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 filter_probs_neg35 <- function(gdf) {
   # Removes negatives until 35% of the class
   cap_total <- ceiling(0.35 * nrow(gdf))  # max 35% of the class
@@ -816,7 +816,7 @@ filter_probs_neg35 <- function(gdf) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 plot_confusion_matrix <- function(predictions, reference, 
                                   title = "Confusion Matrix") {
   cm_df <- as.data.frame(as.table(confusionMatrix(predictions, reference)))
@@ -837,7 +837,7 @@ plot_confusion_matrix <- function(predictions, reference,
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 compare_classes <- function(data_before, data_after, class_col = "EUNISa_1") {
   
   # Count classes before and after
@@ -867,66 +867,74 @@ compare_classes <- function(data_before, data_after, class_col = "EUNISa_1") {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
-run_rf_new <- function(vars_RF, train_data, response_var, ntree = 1500) {
-  
-  # Set seed for reproducibility
+## ---------------------------------------------------------------------------------------------------------------------------------------
+run_rf_new <- function(vars_RF, train_data, response_var, ntree = 500) {
   set.seed(123)
-  
-  # Measure execution time
   execution_time <- system.time({
-    rf_model <- fastcforest(
-      formula = reformulate(vars_RF, response = response_var),
-      data = train_data,
+    rf_model <- moreparty::fastcforest(
+      formula  = reformulate(vars_RF, response = response_var),
+      data     = train_data,
       controls = party::cforest_control(
-        mtry = round(sqrt(length(vars_RF))),
-        ntree = ntree,
+        mtry    = max(1, round(sqrt(length(vars_RF)))),
+        ntree   = ntree,
         replace = FALSE
-      ),
-      parallel = TRUE   # safe because cluster is created outside
+      )
     )
   })
-  
   list(model = rf_model, time = execution_time)
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
-cv_fastcforest <- function(data, vars_RF, response_var, k = 4, ntree = 1500) {
-  
-  # Create CV folds
+## ---------------------------------------------------------------------------------------------------------------------------------------
+cv_fastcforest <- function(data, vars_RF, response_var, k = 5, ntree = 500) {
+
+  # 1) Folds (estratificados si 'response_var' es factor)
   folds <- caret::createFolds(data[[response_var]], k = k, list = TRUE)
 
-  # Create parallel backend
+  # 2) Backend paralelo (PSOCK habitual en Windows)
   n_cores <- max(1, parallel::detectCores() - 1)
-  cl <- parallel::makeCluster(n_cores)
+  cl <- parallel::makeCluster(n_cores, type = "PSOCK")
   doParallel::registerDoParallel(cl)
 
-  # ---- Load required packages on each worker ----
+  # 3) Alinear rutas de librerías en los workers
+  parallel::clusterCall(cl, function(p) .libPaths(p), .libPaths())
+
+  # 4) Cargar paquetes necesarios en cada worker
   parallel::clusterEvalQ(cl, {
-    library(partykit)
-    library(party)
-    library(caret)
+    suppressPackageStartupMessages({
+      library(moreparty)  # <- imprescindible
+      library(party)      # <- si usas cforest_control/unbiased
+      library(caret)
+    })
+    TRUE
   })
 
-  # ---- Export required objects ----
+  # 5) Verificar que moreparty::fastcforest existe en cada worker
+  ok <- parallel::clusterEvalQ(cl, exists("fastcforest", where = asNamespace("moreparty")))
+  if (!all(unlist(ok))) {
+    parallel::stopCluster(cl)
+    stop("En al menos un worker no está disponible moreparty::fastcforest tras cargar paquetes.")
+  }
+
+  # 6) Exportar función y objetos necesarios
   parallel::clusterExport(
     cl,
     varlist = c("run_rf_new", "vars_RF", "response_var", "data", "ntree"),
-    envir = environment()
+    envir   = environment()
   )
 
-  # ---- Parallel cross-validation ----
+  # 7) CV paralelo con foreach — nota: .packages incluye moreparty y party
   cv_results <- foreach::foreach(
     i = seq_len(k),
-    .packages = c("partykit", "party", "caret")
+    .packages = c("moreparty", "party", "caret"),
+    .errorhandling = "pass"
   ) %dopar% {
 
     test_idx <- folds[[i]]
     train_df <- data[-test_idx, ]
     test_df  <- data[test_idx, ]
 
-    fit <- run_rf_new(vars_RF, train_df, response_var, ntree = ntree)
+    fit   <- run_rf_new(vars_RF, train_df, response_var, ntree = ntree)
     preds <- predict(fit$model, newdata = test_df)
 
     list(
@@ -937,14 +945,72 @@ cv_fastcforest <- function(data, vars_RF, response_var, k = 4, ntree = 1500) {
     )
   }
 
-  # Stop cluster
+  # 8) Cerrar clúster
   parallel::stopCluster(cl)
 
-  # Combine CV predictions
-  cv_df <- do.call(rbind, lapply(cv_results, function(x)
-    data.frame(fold = x$fold, obs = x$obs, pred = x$pred,
-               stringsAsFactors = FALSE)))
+  # 9) Reportar errores por fold si los hubo
+  had_error <- vapply(cv_results, inherits, logical(1), "error")
+  if (any(had_error)) {
+    idx <- which(had_error)
+    stop(sprintf("Errores en folds: %s. Primer error: %s",
+                 paste(idx, collapse = ", "),
+                 cv_results[[idx[1]]]$message))
+  }
 
+  # 10) Combinar predicciones
+  cv_df <- do.call(rbind, lapply(cv_results, function(x)
+    data.frame(fold = x$fold, obs = x$obs, pred = x$pred, stringsAsFactors = FALSE)))
+
+  list(
+    predictions = cv_df,
+    timing      = lapply(cv_results, `[[`, "time")
+  )
+}
+
+
+## ---------------------------------------------------------------------------------------------------------------------------------------
+cv_fastcforest_future <- function(data, vars_RF, response_var, k = 5, ntree = 500) {
+  
+  # Crear folds (estratificados si la respuesta es factor)
+  folds <- caret::createFolds(data[[response_var]], k = k, list = TRUE)
+  
+  # Ejecutar CV en paralelo usando future_lapply
+  cv_results <- future_lapply(seq_len(k), function(i) {
+    
+    # Cargar paquetes dentro del worker
+    library(moreparty)
+    library(party)
+    
+    # Partición train/test para el fold i
+    test_idx <- folds[[i]]
+    train_df <- data[-test_idx, ]
+    test_df  <- data[test_idx, ]
+    
+    # Entrenar modelo
+    fit <- run_rf_new(vars_RF, train_df, response_var, ntree = ntree)
+    
+    # Predecir
+    preds <- predict(fit$model, newdata = test_df)
+    
+    # Devolver resultados del fold
+    list(
+      fold = i,
+      obs  = test_df[[response_var]],
+      pred = preds,
+      time = fit$time
+    )
+  })
+  
+  # Combinar en un único data.frame
+  cv_df <- do.call(rbind, lapply(cv_results, function(x)
+    data.frame(
+      fold = x$fold,
+      obs  = x$obs,
+      pred = x$pred,
+      stringsAsFactors = FALSE
+    )
+  ))
+  
   list(
     predictions = cv_df,
     timing = lapply(cv_results, `[[`, "time")
@@ -952,7 +1018,7 @@ cv_fastcforest <- function(data, vars_RF, response_var, k = 4, ntree = 1500) {
 }
 
 
-## -------------------------------------------------------------------------------------------------------------------------------
+## ---------------------------------------------------------------------------------------------------------------------------------------
 # Session info
 sessionInfo()
 

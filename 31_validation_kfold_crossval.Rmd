@@ -1,0 +1,292 @@
+---
+title: "Script to validate points in ReSurvey database using RS data (S2 + SatEmb + Landsat)"
+subtitle: "K-fold cross validation of best models"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This R script is used to validate the points in the ReSurvey database using either RS indicators from S2 or Landsat (indices + phenology + canopy height), or bands from the Google Satellite Embedding dataset: https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_SATELLITE_EMBEDDING_V1_ANNUAL#description
+Here, we perform a K-fold cross validation of the best models. 
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(parallel)
+library(doParallel)
+library(moreparty)
+library(caret)
+library(randomForest)
+library(pROC)
+library(rlang)
+library(stringr)
+library(beepr)
+library(permimp)
+library(purrr)
+library(MLmetrics)
+```
+
+# Load functions
+
+```{r}
+knitr::purl("functions_20260122.Rmd", output = "functions_20260122.R")
+source("functions_20260122.R")
+```
+
+# Load previously created objects (CHANGE TO BEST)
+
+```{r}
+# Load best model Landsat (and prediction) - Accuracy = 0.8212
+model_Landsat <- get(load(here("objects", "RF_1500_20260126",
+                               "rf_months_Landsat_refin_35_10_2x_model.Rdata")))
+prediction_Landsat <- get(load(here("objects", "RF_1500_20260126", 
+                                    "rf_months_Landsat_refin_35_10_2x_prediction.Rdata")))
+# Load filtered data Landsat
+filtered_data_months_Landsat_with_probs_2x <- get(load(here("objects", "RF_1500_20260126",
+                                       "filtered_data_months_Landsat_with_probs_2x.Rdata")))
+# Load best model S2 or SatEmb (and prediction) - Accuracy = 0.8218
+model_SatEmb <- get(load(here("objects", "RF_1500_20260126", 
+                              "rf_SatEmb_refin_35_10_2x_model.Rdata")))
+prediction_SatEmb <- get (load(here("objects", "RF_1500_20260126",
+                                    "rf_SatEmb_refin_35_10_2x_prediction.Rdata")))
+# Load filtered data S2 or SatEmb
+filtered_data_SatEmb_with_probs_2x <- get(load(here("objects", "RF_1500_20260126",
+                                       "filtered_data_SatEmb_with_probs_2x.Rdata")))
+```
+
+# Read data
+
+```{r}
+data_validation_SatEmb <- read_tsv(here(
+  "data", "clean","final_RS_data_SatEmb_20251010.csv")) %>%
+  rename(EUNISa_1_descr = EUNIS_1_d)
+data_validation_Landsat <- read_tsv(here(
+  "data", "clean","final_RS_data_bands_Landsat_all_20251021.csv"))
+```
+
+No parsing issues!
+
+```{r}
+nrow(data_validation_Landsat)
+nrow(data_validation_SatEmb)
+```
+
+# Filter out manipulated observations
+
+## Read list of PlotObservationIDs to keep
+
+```{r}
+PlotObservationID_list <- read_csv(
+  here("data", "clean","PlotObservationIDs_filtered_QRST_20260122.csv"))
+```
+
+## Filter out data to keep only those PlotObservationIDs
+
+```{r}
+data_validation_SatEmb <- data_validation_SatEmb %>%
+  filter(PlotObservationID %in% PlotObservationID_list$PlotObservationID)
+data_validation_Landsat <- data_validation_Landsat %>%
+  filter(PlotObservationID %in% PlotObservationID_list$PlotObservationID)
+```
+
+```{r}
+nrow(data_validation_Landsat)
+nrow(data_validation_SatEmb)
+```
+
+# Define lists of predictor vars
+
+```{r}
+# Excluding EVI because many values outside of range -1, 1
+vars_RF_months_Landsat <- c(
+  # Min values of all indices
+  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, and SAVI between march and oct
+  "NDVI_auc_mar_oct", "SAVI_auc_mar_oct",
+  # Values of NDVI and SAVI at march, pos and oct
+  "NDVI_avg_value_03", "NDVI_pos_value", "NDVI_avg_value_10",
+  "SAVI_avg_value_03", "SAVI_pos_value", "SAVI_avg_value_10",
+  # Differences pos-march in value and doy
+  "NDVI_diff_pos_march_value", "SAVI_diff_pos_march_value",
+  "NDVI_diff_pos_march_doy", "SAVI_diff_pos_march_doy",
+  # Differences pos-oct in value and doy
+  "NDVI_diff_pos_oct_value", "SAVI_diff_pos_oct_value",
+  "NDVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy",
+  # Canopy height
+  "canopy_height")
+```
+
+```{r}
+vars_RF_SatEmb <- colnames(
+  data_validation_SatEmb)[startsWith(colnames(data_validation_SatEmb), "A")]
+```
+
+# Get filtered data
+
+## Landsat
+
+```{r}
+filter_data_Landsat <- function(data, variables) {
+  data %>%
+    mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+    # Remove rows with missing values in predictors
+    dplyr::filter(if_all(all_of(variables), ~ !is.na(.))) %>%
+    # Remove all rows with wrong values of indices (not between -1 and 1)
+    dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+    # With Landsat data, many observations removed because of high/low EVI values
+    # In Landsat_extraction, values of EVI outside of expected range were set as NA,
+    # so better not to use EVI here
+    # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+    dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+    dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+    dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+    # Select only variables needed
+    dplyr::select(PlotObservationID, EUNISa_1, all_of(variables), Lctnmth,
+           valid_1) %>%
+    # Keep only rows with differences > 0 in variables
+    filter(if_all(any_of(variables[grepl("diff", variables)]), 
+                  ~ .x > 0)) %>%
+    # Select only GPS points
+    dplyr::filter(Lctnmth == "Location with GPS" | 
+                    Lctnmth == "Location with differential GPS")
+}
+```
+
+```{r}
+filtered_data_Landsat <- filter_data_Landsat(
+  data_validation_Landsat %>%
+    rough_validation_Landsat(), # Rough validation based on CH
+  vars_RF_months_Landsat)
+
+prob_cols_Landsat <- names(filtered_data_months_Landsat_with_probs_2x)[grepl("^prob_", names(filtered_data_months_Landsat_with_probs_2x))]
+
+df_aux_Landsat_2x <- calculate_df_aux(filtered_data_months_Landsat_with_probs_2x,
+                                  prob_cols_Landsat)
+
+df_final_20_10_months_Landsat_2x <- df_aux_Landsat_2x %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20)
+
+filtered_data_Landsat_cv <- filtered_data_Landsat %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_months_Landsat_2x$PlotObservationID)
+```
+
+## SatEmb
+
+```{r}
+filter_data_SatEmb <- function(data, variables) {
+  data %>%
+    mutate(EUNISa_1 = as.factor(EUNISa_1)) %>%
+    # Remove rows with missing values in predictors
+    dplyr::filter(if_all(all_of(variables), ~ !is.na(.))) %>%
+    # Select only variables needed
+    dplyr::select(PlotObservationID, EUNISa_1, all_of(variables), 
+           Lctnmth, valid_1) %>%
+    # Select only GPS points
+    dplyr::filter(Lctnmth == "Location with GPS" |
+                    Lctnmth == "Location with differential GPS")
+  }
+```
+
+```{r}
+filtered_data_SatEmb <- filter_data_SatEmb(
+  data_validation_SatEmb %>%
+    rough_validation_SatEmb(), # Rough validation based on CH
+  vars_RF_SatEmb)
+
+prob_cols_SatEmb <- names(filtered_data_SatEmb_with_probs_2x)[grepl("^prob_", names(filtered_data_SatEmb_with_probs_2x))]
+
+df_aux_SatEmb_2x <- calculate_df_aux(filtered_data_SatEmb_with_probs_2x,
+                                  prob_cols_SatEmb)
+
+df_final_20_10_SatEmb_2x <- df_aux_SatEmb_2x %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20)
+
+filtered_data_SatEmb_cv <- filtered_data_SatEmb %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_SatEmb_2x$PlotObservationID)
+```
+
+# k-fold cross-validation (4 folds)
+
+```{r}
+set.seed(123)
+ctrl <- trainControl(
+  method = "cv",
+  number = 4,
+  allowParallel = FALSE,
+  savePredictions = "final",
+  classProbs = TRUE,     # set TRUE if you also want probabilities (for ROC)
+  summaryFunction = multiClassSummary,  # optional, for multi-class summaries
+  verboseIter = TRUE      # <--- this gives progress output
+)
+```
+
+## Landsat
+
+```{r}
+cv_Landsat <- caret::train(
+  x = filtered_data_Landsat_cv[, vars_RF_months_Landsat],
+  y = filtered_data_Landsat_cv $EUNISa_1,
+  # Using cforest, not fastcforest
+  method = "cforest",
+  trControl = ctrl,
+  tuneGrid = expand.grid(
+    mtry = round(sqrt(length(vars_RF_months_Landsat)))
+  ),
+  controls = party::cforest_control(
+    ntree = 1500
+  )
+)
+```
+
+### Save
+
+```{r}
+save(cv_Landsat, file = "objects/RF_1500_cv/cv_Landsat.Rdata")
+```
+
+## SatEmb
+
+```{r}
+cv_SatEmb <- caret::train(
+  x = filtered_data_SatEmb_cv[, vars_RF_SatEmb],
+  y = filtered_data_SatEmb_cv $EUNISa_1,
+  # Using cforest, not fastcforest
+  method = "cforest",
+  trControl = ctrl,
+  tuneGrid = expand.grid(
+    mtry = round(sqrt(length(vars_RF_SatEmb)))
+  ),
+  controls = party::cforest_control(
+    ntree = 1500
+  )
+)
+```
+
+### Save
+
+```{r}
+save(cv_SatEmb, file = "objects/RF_1500_cv/cv_SatEmb.Rdata")
+```
+
+
+ADD: Have a look at results
+
+### Get an average ROC curve (macro‑average), varimp...
+
+```{r}
+
+```
+
+

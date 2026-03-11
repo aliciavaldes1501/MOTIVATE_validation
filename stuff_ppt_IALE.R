@@ -30,8 +30,6 @@ ggplot() +
   geom_bar(data = EUNIS1_plot, 
            aes(x = fct_rev(label), fill = label),
            position = position_stack(), width = 0.7) +
-  geom_text(data = total_counts,
-            aes(x = fct_rev(label), y = n, label = n), hjust = -0.3) +
   labs(x = "EUNIS habitat group", y = "Number of plots") +
   coord_flip() + theme_classic() +
   theme(legend.position = "none") +

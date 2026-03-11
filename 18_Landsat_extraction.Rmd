@@ -249,6 +249,7 @@ data_RS_Landsat_bands_indices %>%
   group_by(PlotObservationID) %>%
   summarise(n_days = first(n_days)) %>% ungroup() %>%
   ggplot(aes(x = n_days)) + geom_histogram(color = "black", fill = "white") +
+  geom_vline(xintercept = 10, color = "red", linewidth = 1) +
   theme_minimal()
 ```
 
