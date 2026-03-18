@@ -1,0 +1,1109 @@
+---
+title: "Script to validate points in ReSurvey database using RS data (S2 + SatEmb + Landsat)"
+subtitle: "K-fold cross validation of all models"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This R script is used to validate the points in the ReSurvey database using either RS indicators from S2 or Landsat (indices + phenology + canopy height), or bands from the Google Satellite Embedding dataset: https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_SATELLITE_EMBEDDING_V1_ANNUAL#description
+Here, we perform a K-fold cross validation of all the models in 39_validation_models.Rmd. 
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(parallel)
+library(doParallel)
+library(moreparty)
+library(caret)
+library(randomForest)
+library(pROC)
+library(rlang)
+library(stringr)
+library(beepr)
+library(permimp)
+library(purrr)
+library(MLmetrics)
+library(patchwork)
+```
+
+# Load functions
+
+```{r}
+knitr::purl("functions_20260225.Rmd", output = "functions_20260225.R")
+source("functions_20260225.R")
+```
+
+# Load previously created objects
+
+```{r eval=FALSE, include=FALSE}
+lapply(list.files(here("objects", "RF_1500_20260309"), full.names = TRUE), load,
+       envir = .GlobalEnv)
+```
+
+```{r eval=FALSE, include=FALSE}
+# Load cross-validation objects
+lapply(list.files(here("objects", "RF_1500_cv"), full.names = TRUE), load,
+       envir = .GlobalEnv)
+```
+
+```{r eval=FALSE, include=FALSE}
+# Load varimp objects
+lapply(list.files(here("objects", "RF_1500_varmip"), full.names = TRUE), load,
+       envir = .GlobalEnv)
+```
+
+# Read data
+
+```{r}
+data_validation_S2 <- read_tsv(here(
+  "data", "clean","final_RS_data_bands_S2_all_20260310.csv"))
+data_validation_SatEmb <- read_tsv(here(
+  "data", "clean","final_RS_data_SatEmb_20260309.csv"))
+data_validation_Landsat <- read_tsv(here(
+  "data", "clean","final_RS_data_bands_Landsat_all_20260309.csv"))
+```
+
+No parsing issues!
+
+```{r}
+nrow(data_validation_S2)
+nrow(data_validation_SatEmb)
+nrow(data_validation_Landsat)
+```
+
+# Load Resurvey db
+
+```{r}
+ReSurvey_data <- read_csv(
+  here("data", "clean", "ReSurvey_QRST_data_V2025.2_20260304.csv")) %>%
+  select(PlotObservationID, EUNIS1, EUNIS2, `Location method`) %>%
+  rename(Lctnmth = `Location method`)
+```
+
+# Define lists of predictor vars
+
+## S2 and Landsat
+
+### Moments with slope method
+
+Not using threshold method cause it gave worse results earlier.
+
+```{r}
+vars_RF_slope <- c(
+  # Min values of all indices
+  "NDVI_min", "EVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, EVI and SAVI
+  "NDVI_auc", "EVI_auc", "SAVI_auc",
+  # Values of NDVI, EVI and SAVI at sos, pos and eos
+  "NDVI_sos_value", "NDVI_pos_value", "NDVI_eos_value",
+  "EVI_sos_value", "EVI_pos_value", "EVI_eos_value", 
+  "SAVI_sos_value", "SAVI_pos_value", "SAVI_eos_value",
+  # Differences pos-sos in value and doy
+  "NDVI_diff_pos_sos_value", "EVI_diff_pos_sos_value",
+  "SAVI_diff_pos_sos_value","NDVI_diff_pos_sos_doy", 
+  "EVI_diff_pos_sos_doy", "SAVI_diff_pos_sos_doy",
+  # Differences pos-eos in value and doy
+  "NDVI_diff_pos_eos_value", "EVI_diff_pos_eos_value",
+  "SAVI_diff_pos_eos_value", "NDVI_diff_pos_eos_doy", 
+  "EVI_diff_pos_eos_doy", "SAVI_diff_pos_eos_doy",
+  # Growing season duration
+  "NDVI_gsd", "EVI_gsd", "SAVI_gsd",
+  # Canopy height
+  "canopy_height")
+```
+
+```{r}
+# Excluding EVI because many values outside of range -1, 1
+vars_RF_slope_Landsat <- c(
+  # Min values of all indices
+  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI and SAVI
+  "NDVI_auc", "SAVI_auc",
+  # Values of NDVI and SAVI at sos, pos and eos
+  "NDVI_sos_value", "NDVI_pos_value", "NDVI_eos_value",
+  "SAVI_sos_value", "SAVI_pos_value", "SAVI_eos_value",
+  # Differences pos-sos in value and doy
+  "NDVI_diff_pos_sos_value","SAVI_diff_pos_sos_value",
+  "NDVI_diff_pos_sos_doy", "SAVI_diff_pos_sos_doy",
+  # Differences pos-eos in value and doy
+  "NDVI_diff_pos_eos_value", "SAVI_diff_pos_eos_value",
+  "NDVI_diff_pos_eos_doy", "SAVI_diff_pos_eos_doy",
+  # Growing season duration
+  "NDVI_gsd", "SAVI_gsd",
+  # Canopy height
+  "canopy_height")
+```
+
+### Months method
+
+```{r}
+vars_RF_months <- c(
+  # Min values of all indices
+  "NDVI_min", "EVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, EVI and SAVI between march and oct
+  "NDVI_auc_mar_oct", "EVI_auc_mar_oct", "SAVI_auc_mar_oct",
+  # Values of NDVI, EVI and SAVI at march, pos and oct
+  "NDVI_avg_value_03", "NDVI_pos_value", "NDVI_avg_value_10",
+  "EVI_avg_value_03", "EVI_pos_value", "EVI_avg_value_10", 
+  "SAVI_avg_value_03", "SAVI_pos_value", "SAVI_avg_value_10",
+  # Differences pos-march in value and doy
+  "NDVI_diff_pos_march_value", "EVI_diff_pos_march_value",
+  "SAVI_diff_pos_march_value","NDVI_diff_pos_march_doy", 
+  "EVI_diff_pos_march_doy", "SAVI_diff_pos_march_doy",
+  # Differences pos-oct in value and doy
+  "NDVI_diff_pos_oct_value", "EVI_diff_pos_oct_value",
+  "SAVI_diff_pos_oct_value", "NDVI_diff_pos_oct_doy", 
+  "EVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy",
+  # Canopy height
+  "canopy_height")
+```
+
+```{r}
+# Excluding EVI because many values outside of range -1, 1
+vars_RF_months_Landsat <- c(
+  # Min values of all indices
+  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, and SAVI between march and oct
+  "NDVI_auc_mar_oct", "SAVI_auc_mar_oct",
+  # Values of NDVI and SAVI at march, pos and oct
+  "NDVI_avg_value_03", "NDVI_pos_value", "NDVI_avg_value_10",
+  "SAVI_avg_value_03", "SAVI_pos_value", "SAVI_avg_value_10",
+  # Differences pos-march in value and doy
+  "NDVI_diff_pos_march_value", "SAVI_diff_pos_march_value",
+  "NDVI_diff_pos_march_doy", "SAVI_diff_pos_march_doy",
+  # Differences pos-oct in value and doy
+  "NDVI_diff_pos_oct_value", "SAVI_diff_pos_oct_value",
+  "NDVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy",
+  # Canopy height
+  "canopy_height")
+```
+
+### POS-2 and POS+2 method
+
+```{r}
+vars_RF_2 <- c(
+  # Min values of all indices
+  "NDVI_min", "EVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, EVI and SAVI between pos_minus60 and pos_plus_60
+  "NDVI_auc_pos2", "EVI_auc_pos2", "SAVI_auc_pos2",
+  # Values of NDVI, EVI and SAVI at pos_minus60, pos and pos_plus_60
+  "NDVI_pos_minus60_value", "NDVI_pos_value", "NDVI_pos_plus60_value",
+  "EVI_pos_minus60_value", "EVI_pos_value", "EVI_pos_plus60_value", 
+  "SAVI_pos_minus60_value", "SAVI_pos_value", "SAVI_pos_plus60_value",
+  # Differences pos-pos_minus60 in value
+  "NDVI_diff_pos_minus60_value", "EVI_diff_pos_minus60_value",
+  "SAVI_diff_pos_minus60_value",
+  # Differences pos-pos_plus_60 in value
+  "NDVI_diff_pos_plus60_value", "EVI_diff_pos_plus60_value",
+  "SAVI_diff_pos_plus60_value",
+  # Canopy height
+  "canopy_height")
+```
+
+```{r}
+vars_RF_2_Landsat <- c(
+  # Min values of all indices
+  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI and SAVI between pos_minus60 and pos_plus_60
+  "NDVI_auc_pos2", "SAVI_auc_pos2",
+  # Values of NDVI and SAVI at pos_minus60, pos and pos_plus_60
+  "NDVI_pos_minus60_value", "NDVI_pos_value", "NDVI_pos_plus60_value",
+  "SAVI_pos_minus60_value", "SAVI_pos_value", "SAVI_pos_plus60_value",
+  # Differences pos-pos_minus60 in value
+  "NDVI_diff_pos_minus60_value", "SAVI_diff_pos_minus60_value",
+  # Differences pos-pos_plus_60 in value
+  "NDVI_diff_pos_plus60_value", "SAVI_diff_pos_plus60_value",
+  # Canopy height
+  "canopy_height")
+```
+
+## SatEmb
+
+```{r}
+vars_RF_SatEmb <- colnames(
+  data_validation_SatEmb)[startsWith(colnames(data_validation_SatEmb), "A")]
+vars_RF_SatEmb_CH <- c(vars_RF_SatEmb, "canopy_height")
+```
+
+# Get filtered data
+
+## Functions
+
+```{r}
+filter_data_S2 <- function(data, variables) {
+  data %>%
+    mutate(EUNIS1 = as.factor(EUNIS1)) %>%
+    # Remove rows with missing values in predictors
+    dplyr::filter(if_all(all_of(variables), ~ !is.na(.))) %>%
+    # Remove all rows with wrong values of indices (not between -1 and 1)
+    dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+    dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+    dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+    dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+    dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+    # Select only variables needed
+    dplyr::select(PlotObservationID, EUNIS1, all_of(variables), Lctnmth,
+           valid_1) %>%
+    # Keep only rows with differences > 0 in variables
+    filter(if_all(any_of(variables[grepl("diff", variables)]), 
+                  ~ .x > 0)) %>%
+    # Select only GPS points
+    dplyr::filter(Lctnmth == "Location with GPS" | 
+                    Lctnmth == "Location with differential GPS")
+}
+```
+
+```{r}
+filter_data_Landsat <- function(data, variables) {
+  data %>%
+    mutate(EUNIS1 = as.factor(EUNIS1)) %>%
+    # Remove rows with missing values in predictors
+    dplyr::filter(if_all(all_of(variables), ~ !is.na(.))) %>%
+    # Remove all rows with wrong values of indices (not between -1 and 1)
+    dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+    # With Landsat data, many observations removed because of high/low EVI values
+    # In Landsat_extraction, values of EVI outside of expected range were set as NA,
+    # so better not to use EVI here
+    # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+    dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+    dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+    dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+    # Select only variables needed
+    dplyr::select(PlotObservationID, EUNIS1, all_of(variables), Lctnmth,
+           valid_1) %>%
+    # Keep only rows with differences > 0 in variables
+    filter(if_all(any_of(variables[grepl("diff", variables)]), 
+                  ~ .x > 0)) %>%
+    # Select only GPS points
+    dplyr::filter(Lctnmth == "Location with GPS" | 
+                    Lctnmth == "Location with differential GPS")
+}
+```
+
+```{r}
+filter_data_SatEmb <- function(data, variables) {
+  data %>%
+    mutate(EUNIS1 = as.factor(EUNIS1)) %>%
+    # Remove rows with missing values in predictors
+    dplyr::filter(if_all(all_of(variables), ~ !is.na(.))) %>%
+    # Select only variables needed
+    dplyr::select(PlotObservationID, EUNIS1, all_of(variables), 
+           Lctnmth, valid_1) %>%
+    # Select only GPS points
+    dplyr::filter(Lctnmth == "Location with GPS" |
+                    Lctnmth == "Location with differential GPS")
+  }
+```
+
+## Filtered data
+
+```{r}
+# S2
+filtered_data_slope_S2 <- data_validation_S2 %>%
+  # Rough validation based on CH and NDWI
+  rough_validation_S2()  %>%
+  # Join ReSurvey data to get Location method
+  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
+  # Data filtering
+  filter_data_S2(vars_RF_slope) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value")
+
+filtered_data_months_S2 <- data_validation_S2 %>%
+  # Rough validation based on CH and NDWI
+  rough_validation_S2() %>% 
+  # Join ReSurvey data to get Location method
+  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
+  # Data filtering
+  filter_data_S2(vars_RF_months) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value")
+
+filtered_data_2_S2 <- data_validation_S2 %>%
+  # Rough validation based on CH and NDWI
+  rough_validation_S2() %>% 
+  # Join ReSurvey data to get Location method
+  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
+  # Data filtering
+  filter_data_S2(vars_RF_2) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value")
+
+# Landsat
+filtered_data_slope_Landsat <- data_validation_Landsat %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>% 
+  # Join ReSurvey data to get Location method
+  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
+  # Data filtering
+  filter_data_Landsat(vars_RF_slope_Landsat) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value")
+
+filtered_data_months_Landsat <- data_validation_Landsat %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>% 
+  # Join ReSurvey data to get Location method
+  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
+  # Data filtering
+  filter_data_Landsat(vars_RF_months_Landsat) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value")
+
+filtered_data_2_Landsat <- data_validation_Landsat %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>% 
+  # Join ReSurvey data to get Location method
+  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
+  # Data filtering
+  filter_data_Landsat(vars_RF_2_Landsat) %>% 
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value")
+
+# SatEmb
+filtered_data_SatEmb <- data_validation_SatEmb %>%
+  # Join ReSurvey data to get EUNIS1, EUNIS2 and Location method
+  left_join(ReSurvey_data) %>%
+  # Rough validation based on CH
+  rough_validation_SatEmb() %>% 
+  # Join with S2 data to get NDWI_max info
+  left_join(
+    data_validation_S2 %>% select(PlotObservationID, NDWI_max)
+  ) %>%
+  # Rough validation based on NDWI (from S2)
+  # Remove those with NDWI_max > 0.3, keep if NDWI_max is NA
+  filter(NDWI_max <= 0.3 | is.na(NDWI_max)) %>%
+  # Remove unneeded var
+  select(-NDWI_max) %>%
+  # Data filtering
+  filter_data_SatEmb(vars_RF_SatEmb) %>% 
+  # Join with S2 data to get NDVI_pos_value info
+  left_join(
+    data_validation_S2 %>% select(PlotObservationID, NDVI_pos_value)
+  ) %>%
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value") %>%
+  # Remove unneeded var
+  select(-NDVI_pos_value) 
+
+filtered_data_SatEmb_CH <- data_validation_SatEmb %>%
+  # Join ReSurvey data to get EUNIS1, EUNIS2 and Location method
+  left_join(ReSurvey_data) %>%
+  # Rough validation based on CH
+  rough_validation_SatEmb() %>% 
+  # Join with S2 data to get NDWI_max info
+  left_join(
+    data_validation_S2 %>% select(PlotObservationID, NDWI_max)
+  ) %>%
+  # Rough validation based on NDWI (from S2)
+  # Remove those with NDWI_max > 0.3, keep if NDWI_max is NA
+  filter(NDWI_max <= 0.3 | is.na(NDWI_max)) %>%
+  # Remove unneeded var
+  select(-NDWI_max) %>%
+  # Data filtering
+  filter_data_SatEmb(vars_RF_SatEmb_CH) %>% 
+  # Join with S2 data to get NDVI_pos_value info
+  left_join(
+    data_validation_S2 %>% select(PlotObservationID, NDVI_pos_value)
+  ) %>%
+  # From GPS points, filter based on NDVI percentiles
+  filter_by_group_percentiles("NDVI_pos_value") %>%
+  # Remove unneeded vars
+  select(-NDVI_pos_value) 
+```
+
+# k-fold cross-validation 
+
+Using 4 folds.
+
+```{r}
+set.seed(123)
+ctrl <- trainControl(
+  method = "cv",
+  number = 4, # Creates stratified folds when y is a factor, preserving class proportions
+  allowParallel = FALSE,
+  savePredictions = "final",
+  classProbs = TRUE,     # set TRUE if you also want probabilities (for ROC)
+  summaryFunction = multiClassSummary,  # optional, for multi-class summaries
+  verboseIter = TRUE      # <--- this gives progress output
+)
+```
+
+## Without refinement
+
+### Run CV
+
+#### S2
+
+```{r eval=FALSE, include=FALSE}
+set.seed(123)
+cv_slope_S2 <- caret::train(
+  x = filtered_data_slope_S2[, vars_RF_slope],
+  y = filtered_data_slope_S2 $EUNIS1,
+  # Using cforest, not fastcforest
+  method = "cforest",
+  trControl = ctrl,
+  tuneGrid = expand.grid(
+    mtry = round(sqrt(length(vars_RF_slope)))
+  ),
+  controls = party::cforest_control(
+    ntree = 1500,
+    teststat = "quad" # Faster (not used here when run!)
+  )
+)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(cv_slope_S2, file = "objects/RF_1500_cv/cv_slope_S2.Rdata") # DONE
+```
+
+```{r eval=FALSE, include=FALSE}
+set.seed(123)
+cv_months_S2 <- caret::train(
+  x = filtered_data_months_S2[, vars_RF_months],
+  y = filtered_data_months_S2 $EUNIS1,
+  # Using cforest, not fastcforest
+  method = "cforest",
+  trControl = ctrl,
+  tuneGrid = expand.grid(
+    mtry = round(sqrt(length(vars_RF_months)))
+  ),
+  controls = party::cforest_control(
+    ntree = 1500,
+    teststat = "quad" # Faster
+  )
+)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(cv_months_S2, file = "objects/RF_1500_cv/cv_months_S2.Rdata") # DONE
+```
+
+```{r eval=FALSE, include=FALSE}
+# set.seed(123)
+# cv_2_S2 <- caret::train(
+#   x = filtered_data_2_S2[, vars_RF_2],
+#   y = filtered_data_2_S2 $EUNIS1,
+#   # Using cforest, not fastcforest
+#   method = "cforest",
+#   trControl = ctrl,
+#   tuneGrid = expand.grid(
+#     mtry = round(sqrt(length(vars_RF_2)))
+#   ),
+#   controls = party::cforest_control(
+#     ntree = 1500,
+#     teststat = "quad" # Faster
+#   )
+# )
+```
+
+```{r eval=FALSE, include=FALSE}
+# save(cv_2_S2, file = "objects/RF_1500_cv/cv_2_S2.Rdata")
+```
+
+#### Landsat
+
+```{r eval=FALSE, include=FALSE}
+set.seed(123)
+cv_slope_Landsat <- caret::train(
+  x = filtered_data_slope_Landsat[, vars_RF_slope_Landsat],
+  y = filtered_data_slope_Landsat $EUNIS1,
+  # Using cforest, not fastcforest
+  method = "cforest",
+  trControl = ctrl,
+  tuneGrid = expand.grid(
+    mtry = round(sqrt(length(vars_RF_slope_Landsat)))
+  ),
+  controls = party::cforest_control(
+    ntree = 1500,
+    teststat = "quad" # Faster
+  )
+)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(cv_slope_Landsat, file = "objects/RF_1500_cv/cv_slope_Landsat.Rdata") # RUNNING
+```
+
+```{r eval=FALSE, include=FALSE}
+set.seed(123)
+cv_months_Landsat <- caret::train(
+  x = filtered_data_months_Landsat[, vars_RF_months_Landsat],
+  y = filtered_data_months_Landsat $EUNIS1,
+  # Using cforest, not fastcforest
+  method = "cforest",
+  trControl = ctrl,
+  tuneGrid = expand.grid(
+    mtry = round(sqrt(length(vars_RF_months_Landsat)))
+  ),
+  controls = party::cforest_control(
+    ntree = 1500,
+    teststat = "quad" # Faster
+  )
+)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(cv_months_Landsat, file = "objects/RF_1500_cv/cv_months_Landsat.Rdata") # RUNNING
+```
+
+```{r eval=FALSE, include=FALSE}
+# set.seed(123)
+# cv_2_Landsat <- caret::train(
+#   x = filtered_data_2_Landsat[, vars_RF_2_Landsat],
+#   y = filtered_data_2_Landsat $EUNIS1,
+#   # Using cforest, not fastcforest
+#   method = "cforest",
+#   trControl = ctrl,
+#   tuneGrid = expand.grid(
+#     mtry = round(sqrt(length(vars_RF_2_Landsat)))
+#   ),
+#   controls = party::cforest_control(
+#     ntree = 1500,
+#     teststat = "quad" # Faster
+#   )
+# )
+```
+
+```{r eval=FALSE, include=FALSE}
+# save(cv_2_Landsat, file = "objects/RF_1500_cv/cv_2_Landsat.Rdata")
+```
+
+#### SatEmb
+
+```{r eval=FALSE, include=FALSE}
+set.seed(123)
+cv_SatEmb <- caret::train(
+  x = filtered_data_SatEmb[, vars_RF_SatEmb],
+  y = filtered_data_SatEmb $EUNIS1,
+  # Using cforest, not fastcforest
+  method = "cforest",
+  trControl = ctrl,
+  tuneGrid = expand.grid(
+    mtry = round(sqrt(length(vars_RF_SatEmb)))
+  ),
+  controls = party::cforest_control(
+    ntree = 1500,
+    teststat = "quad" # Faster
+  )
+)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(cv_SatEmb, file = "objects/RF_1500_cv/cv_SatEmb.Rdata")
+```
+
+### Results
+
+#### Global Accuracy and Kappa
+
+```{r}
+cv_slope_S2$results[, c("Accuracy", "Kappa", "AccuracySD", "KappaSD")]
+cv_months_S2$results[, c("Accuracy", "Kappa", "AccuracySD", "KappaSD")]
+cv_2_S2$results[, c("Accuracy", "Kappa", "AccuracySD", "KappaSD")]
+cv_slope_Landsat$results[, c("Accuracy", "Kappa", "AccuracySD", "KappaSD")]
+cv_months_Landsat$results[, c("Accuracy", "Kappa", "AccuracySD", "KappaSD")]
+cv_2_Landsat$results[, c("Accuracy", "Kappa", "AccuracySD", "KappaSD")]
+cv_SatEmb$results[, c("Accuracy", "Kappa", "AccuracySD", "KappaSD")]
+```
+
+#### Balanced accuracy per class (one-vs-all)
+
+```{r}
+pred_df_slope_S2 <- cv_slope_S2$pred
+pred_df_months_S2 <- cv_months_S2$pred
+pred_df_2_S2 <- cv_2_S2$pred
+pred_df_slope_Landsat <- cv_slope_Landsat$pred
+pred_df_months_Landsat <- cv_months_Landsat$pred
+pred_df_2_Landsat <- cv_2_Landsat$pred
+pred_df_SatEmb <- cv_SatEmb$pred
+
+cm_slope_S2 <- confusionMatrix(pred_df_slope_S2$pred, 
+                               pred_df_slope_S2$obs)
+cm_months_S2 <- confusionMatrix(pred_df_months_S2$pred,
+                                pred_df_months_S2$obs)
+cm_2_S2 <- confusionMatrix(pred_df_2_S2$pred, 
+                           pred_df_2_S2$obs)
+cm_slope_Landsat <- confusionMatrix(pred_df_slope_Landsat$pred, 
+                                    pred_df_slope_Landsat$obs)
+cm_months_Landsat <- confusionMatrix(pred_df_months_Landsat$pred, 
+                                     pred_df_months_Landsat$obs)
+cm_2_Landsat <- confusionMatrix(pred_df_2_Landsat$pred, 
+                                pred_df_2_Landsat$obs)
+cm_SatEmb <- confusionMatrix(pred_df_SatEmb$pred, 
+                             pred_df_SatEmb$obs)
+
+by_class_slope_S2 <- as.data.frame(cm_slope_S2$byClass)
+by_class_months_s2 <- as.data.frame(cm_months_S2$byClass)
+by_class_2_S2 <- as.data.frame(cm_2_S2$byClass)
+by_class_slope_Landsat <- as.data.frame(cm_slope_Landsat$byClass)
+by_class_months_Landsat <- as.data.frame(cm_months_Landsat$byClass)
+by_class_2_Landsat <- as.data.frame(cm_2_Landsat$byClass)
+by_class_SatEmb <- as.data.frame(cm_SatEmb$byClass)
+
+balanced_acc_slope_S2 <- by_class_slope_S2 %>%
+  mutate(Balanced_Accuracy = (Sensitivity + Specificity)/2) %>%
+  select(Sensitivity, Specificity, Balanced_Accuracy)
+balanced_acc_months_S2 <- by_class_months_S2 %>%
+  mutate(Balanced_Accuracy = (Sensitivity + Specificity)/2) %>%
+  select(Sensitivity, Specificity, Balanced_Accuracy)
+balanced_acc_2_S2 <- by_class_2_S2 %>%
+  mutate(Balanced_Accuracy = (Sensitivity + Specificity)/2) %>%
+  select(Sensitivity, Specificity, Balanced_Accuracy)
+balanced_acc_slope_Landsat <- by_class_slope_Landsat %>%
+  mutate(Balanced_Accuracy = (Sensitivity + Specificity)/2) %>%
+  select(Sensitivity, Specificity, Balanced_Accuracy)
+balanced_acc_months_Landsat <- by_class_months_Landsat %>%
+  mutate(Balanced_Accuracy = (Sensitivity + Specificity)/2) %>%
+  select(Sensitivity, Specificity, Balanced_Accuracy)
+balanced_acc_2_Landsat <- by_class_2_Landsat %>%
+  mutate(Balanced_Accuracy = (Sensitivity + Specificity)/2) %>%
+  select(Sensitivity, Specificity, Balanced_Accuracy)
+balanced_acc_SatEmb <- by_class_SatEmb %>%
+  mutate(Balanced_Accuracy = (Sensitivity + Specificity)/2) %>%
+  select(Sensitivity, Specificity, Balanced_Accuracy)
+
+balanced_acc_slope_S2$Class <- rownames(by_class_slope_S2)
+balanced_acc_slope_S2 <- balanced_acc_slope_S2 %>% select(Class, everything())
+balanced_acc_months_S2$Class <- rownames(by_class_months_s2)
+balanced_acc_months_S2 <- balanced_acc_months_S2 %>% select(Class, everything())
+balanced_acc_2_S2$Class <- rownames(by_class_2_S2)
+balanced_acc_2_S2 <- balanced_acc_2_S2 %>% select(Class, everything())
+balanced_acc_slope_Landsat$Class <- rownames(by_class_slope_Landsat)
+balanced_acc_slope_Landsat <- balanced_acc_slope_Landsat %>% select(Class, everything())
+balanced_acc_months_Landsat$Class <- rownames(by_class_months_Landsat)
+balanced_acc_months_Landsat <- balanced_acc_months_Landsat %>% select(Class, everything())
+balanced_acc_2_Landsat$Class <- rownames(by_class_2_Landsat)
+balanced_acc_2_Landsat <- balanced_acc_2_Landsat %>% select(Class, everything())
+balanced_acc_SatEmb$Class <- rownames(by_class_SatEmb)
+balanced_acc_SatEmb <- balanced_acc_SatEmb %>% select(Class, everything())
+balanced_acc_slope_S2
+balanced_acc_months_S2
+balanced_acc_2_S2
+balanced_acc_slope_Landsat
+balanced_acc_months_Landsat
+balanced_acc_2_Landsat
+balanced_acc_SatEmb
+```
+
+#### Balanced accuracy macro (average over classes)
+
+```{r}
+balanced_acc_macro_slope_S2 <- mean(balanced_acc_slope_S2$Balanced_Accuracy)
+balanced_acc_macro_months_S2 <- mean(balanced_acc_months_S2$Balanced_Accuracy)
+balanced_acc_macro_2_S2 <- mean(balanced_acc_2_S2$Balanced_Accuracy)
+balanced_acc_macro_slope_Landsat <- mean(balanced_acc_slope_Landsat$Balanced_Accuracy)
+balanced_acc_macro_months_Landsat <- mean(balanced_acc_months_Landsat$Balanced_Accuracy)
+balanced_acc_macro_2_Landsat <- mean(balanced_acc_2_Landsat$Balanced_Accuracy)
+balanced_acc_macro_SatEmb <- mean(balanced_acc_SatEmb$Balanced_Accuracy)
+balanced_acc_macro_slope_S2
+balanced_acc_macro_months_S2
+balanced_acc_macro_2_S2
+balanced_acc_macro_slope_Landsat
+balanced_acc_macro_months_Landsat
+balanced_acc_macro_2_Landsat
+balanced_acc_macro_SatEmb
+```
+
+#### AUC one-vs-all per class + AUC macro
+
+```{r}
+classes_slope_S2 <- levels(pred_df_slope_S2$obs)
+classes_months_S2 <- levels(pred_df_months_S2$obs)
+classes_2_S2 <- levels(pred_df_2_S2$obs)
+classes_slope_Landsat <- levels(pred_df_slope_Landsat$obs)
+classes_months_Landsat <- levels(pred_df_months_Landsat$obs)
+classes_2_Landsat <- levels(pred_df_2_Landsat$obs)
+classes_SatEmb <- levels(pred_df_SatEmb$obs)
+
+
+auc_one_vs_all <- function(df, cls) {
+  bin_obs <- as.integer(df$obs == cls)
+  prob_cls <- df[[cls]]
+  roc_obj <- roc(bin_obs, prob_cls, quiet = TRUE)
+  auc(roc_obj)
+}
+
+auc_by_class_slope_S2 <- sapply(classes_slope_S2, 
+                              function(cls) auc_one_vs_all(pred_df_slope_S2, cls))
+auc_by_class_months_s2 <- sapply(classes_months_S2, 
+                              function(cls) auc_one_vs_all(pred_df_months_S2, cls))
+auc_by_class_2_S2 <- sapply(classes_2_S2, 
+                              function(cls) auc_one_vs_all(pred_df_2_S2, cls))
+auc_by_class_slope_Landsat <- sapply(classes_slope_Landsat, 
+                              function(cls) auc_one_vs_all(pred_df_slope_Landsat, cls))
+auc_by_class_months_Landsat <- sapply(classes_months_Landsat, 
+                              function(cls) auc_one_vs_all(pred_df_months_Landsat, cls))
+auc_by_class_2_Landsat <- sapply(classes_2_Landsat, 
+                              function(cls) auc_one_vs_all(pred_df_2_Landsat, cls))
+auc_by_class_SatEmb <- sapply(classes_SatEmb, 
+                              function(cls) auc_one_vs_all(pred_df_SatEmb, cls))
+auc_by_class_slope_S2
+auc_by_class_months_s2
+auc_by_class_2_S2
+auc_by_class_slope_Landsat
+auc_by_class_months_Landsat
+auc_by_class_2_Landsat
+auc_by_class_SatEmb
+
+auc_macro_slope_S2 <- mean(auc_by_class_slope_S2)
+auc_macro_months_S2 <- mean(auc_by_class_months_s2)
+auc_macro_2_S2 <- mean(auc_by_class_2_S2)
+auc_macro_slope_Landsat <- mean(auc_by_class_slope_Landsat)
+auc_macro_months_Landsat <- mean(auc_by_class_months_Landsat)
+auc_macro_2_Landsat <- mean(auc_by_class_2_Landsat)
+auc_macro_SatEmb <- mean(auc_by_class_SatEmb)
+auc_macro_slope_S2
+auc_macro_months_S2
+auc_macro_2_S2
+auc_macro_slope_Landsat
+auc_macro_months_Landsat
+auc_macro_2_Landsat
+auc_macro_SatEmb
+```
+
+#### Average confusion matrix
+
+```{r}
+cm_slope_S2$table
+cm_months_S2$table
+cm_2_S2$table
+cm_slope_Landsat$table
+cm_months_Landsat$table
+cm_2_Landsat$table
+cm_SatEmb$table
+```
+
+#### F1-score per class
+
+```{r}
+as.data.frame(cm_slope_S2$byClass)[, c("Precision", "Recall", "F1")]
+as.data.frame(cm_months_S2$byClass)[, c("Precision", "Recall", "F1")]
+as.data.frame(cm_2_S2$byClass)[, c("Precision", "Recall", "F1")]
+as.data.frame(cm_slope_Landsat$byClass)[, c("Precision", "Recall", "F1")]
+as.data.frame(cm_months_Landsat$byClass)[, c("Precision", "Recall", "F1")]
+as.data.frame(cm_2_Landsat$byClass)[, c("Precision", "Recall", "F1")]
+as.data.frame(cm_SatEmb$byClass)[, c("Precision", "Recall", "F1")]
+```
+
+#### Variable importance
+
+```{r eval=FALSE, include=FALSE}
+varimp_slope_S2 <- varImp(cv_slope_S2)
+varimp_months_S2 <- varImp(cv_months_S2)
+varimp_2_S2 <- varImp(cv_2_S2)
+varimp_slope_Landsat <- varImp(cv_slope_Landsat)
+varimp_months_Landsat <- varImp(cv_months_Landsat)
+varimp_2_Landsat <- varImp(cv_2_Landsat)
+varimp_SatEmb <- varImp(cv_SatEmb)
+```
+
+```{r}
+print(varimp_slope_S2, top = 64)
+print(varimp_months_S2, top = 64)
+print(varimp_2_S2, top = 64)
+print(varimp_slope_Landsat, top = 64)
+print(varimp_months_Landsat, top = 64)
+print(varimp_2_Landsat, top = 64)
+print(varimp_SatEmb, top = 64)
+```
+
+##### Save
+
+```{r eval=FALSE, include=FALSE}
+save(varimp_slope_S2, file = "objects/RF_1500_cv/cv_slope_S2_varimp.Rdata")
+save(varimp_months_S2, file = "objects/RF_1500_cv/cv_months_S2_varimp.Rdata")
+save(varimp_2_S2, file = "objects/RF_1500_cv/cv_2_S2_varimp.Rdata")
+save(varimp_slope_Landsat, file = "objects/RF_1500_cv/cv_slope_Landsat_varimp.Rdata")
+save(varimp_months_Landsat, file = "objects/RF_1500_cv/cv_months_Landsat_varimp.Rdata")
+save(varimp_2_Landsat, file = "objects/RF_1500_cv/cv_2_Landsat_varimp.Rdata")
+save(varimp_SatEmb, file = "objects/RF_1500_cv/cv_SatEmb_varimp.Rdata")
+```
+
+#### ROC one-vs-all for each class (aggregated over folds)
+
+```{r}
+# Compute a ROC object for each class (one-vs-all)
+roc_list_slope_S2 <- lapply(classes_slope_S2, function(cls) {
+  # Binary labels: 1 for cls, 0 for others
+  bin_obs <- as.integer(pred_df_slope_S2$obs == cls)
+  # Probability for the class
+  prob_cls <- pred_df_slope_S2[[cls]]
+  # Compute ROC; set direction = "<" if needed depending on your scores
+  pROC::roc(response = bin_obs, predictor = prob_cls, quiet = TRUE)
+})
+names(roc_list_slope_S2) <- classes_slope_S2
+# Compute a ROC object for each class (one-vs-all)
+roc_list_months_S2 <- lapply(classes_months_S2, function(cls) {
+  # Binary labels: 1 for cls, 0 for others
+  bin_obs <- as.integer(pred_df_months_S2$obs == cls)
+  # Probability for the class
+  prob_cls <- pred_df_months_S2[[cls]]
+  # Compute ROC; set direction = "<" if needed depending on your scores
+  pROC::roc(response = bin_obs, predictor = prob_cls, quiet = TRUE)
+})
+names(roc_list_months_S2) <- classes_months_S2
+# Compute a ROC object for each class (one-vs-all)
+roc_list_2_S2 <- lapply(classes_2_S2, function(cls) {
+  # Binary labels: 1 for cls, 0 for others
+  bin_obs <- as.integer(pred_df_2_S2$obs == cls)
+  # Probability for the class
+  prob_cls <- pred_df_2_S2[[cls]]
+  # Compute ROC; set direction = "<" if needed depending on your scores
+  pROC::roc(response = bin_obs, predictor = prob_cls, quiet = TRUE)
+})
+names(roc_list_2_S2) <- classes_2_S2
+# Compute a ROC object for each class (one-vs-all)
+roc_list_slope_Landsat <- lapply(classes_slope_Landsat, function(cls) {
+  # Binary labels: 1 for cls, 0 for others
+  bin_obs <- as.integer(pred_df_slope_Landsat$obs == cls)
+  # Probability for the class
+  prob_cls <- pred_df_slope_Landsat[[cls]]
+  # Compute ROC; set direction = "<" if needed depending on your scores
+  pROC::roc(response = bin_obs, predictor = prob_cls, quiet = TRUE)
+})
+names(roc_list_slope_Landsat) <- classes_slope_Landsat
+# Compute a ROC object for each class (one-vs-all)
+roc_list_months_Landsat <- lapply(classes_months_Landsat, function(cls) {
+  # Binary labels: 1 for cls, 0 for others
+  bin_obs <- as.integer(pred_df_months_Landsat$obs == cls)
+  # Probability for the class
+  prob_cls <- pred_df_months_Landsat[[cls]]
+  # Compute ROC; set direction = "<" if needed depending on your scores
+  pROC::roc(response = bin_obs, predictor = prob_cls, quiet = TRUE)
+})
+names(roc_list_months_Landsat) <- classes_months_Landsat
+# Compute a ROC object for each class (one-vs-all)
+roc_list_2_Landsat <- lapply(classes_2_Landsat, function(cls) {
+  # Binary labels: 1 for cls, 0 for others
+  bin_obs <- as.integer(pred_df_2_Landsat$obs == cls)
+  # Probability for the class
+  prob_cls <- pred_df_2_Landsat[[cls]]
+  # Compute ROC; set direction = "<" if needed depending on your scores
+  pROC::roc(response = bin_obs, predictor = prob_cls, quiet = TRUE)
+})
+names(roc_list_2_Landsat) <- classes_2_Landsat
+# Compute a ROC object for each class (one-vs-all)
+roc_list_SatEmb <- lapply(classes_SatEmb, function(cls) {
+  # Binary labels: 1 for cls, 0 for others
+  bin_obs <- as.integer(pred_df_SatEmb$obs == cls)
+  # Probability for the class
+  prob_cls <- pred_df_SatEmb[[cls]]
+  # Compute ROC; set direction = "<" if needed depending on your scores
+  pROC::roc(response = bin_obs, predictor = prob_cls, quiet = TRUE)
+})
+names(roc_list_SatEmb) <- classes_SatEmb
+```
+
+```{r}
+# Extract ROC curve data (TPR vs FPR) per class
+roc_df_slope_S2 <- lapply(names(roc_list_slope_S2), function(cls) {
+  coords <- pROC::coords(roc_list_slope_S2[[cls]], 
+                         ret = c("specificity", "sensitivity"), 
+                         transpose = FALSE)
+  data.frame(Class = cls,
+             FPR = 1 - coords$specificity,
+             TPR = coords$sensitivity)
+}) %>% bind_rows()
+# Extract ROC curve data (TPR vs FPR) per class
+roc_df_months_S2 <- lapply(names(roc_list_months_S2), function(cls) {
+  coords <- pROC::coords(roc_list_months_S2[[cls]], 
+                         ret = c("specificity", "sensitivity"),
+                         transpose = FALSE)
+  data.frame(Class = cls,
+             FPR = 1 - coords$specificity,
+             TPR = coords$sensitivity)
+}) %>% bind_rows()
+# Extract ROC curve data (TPR vs FPR) per class
+roc_df_2_S2 <- lapply(names(roc_list_2_S2), function(cls) {
+  coords <- pROC::coords(roc_list_2_S2[[cls]], 
+                         ret = c("specificity", "sensitivity"), 
+                         transpose = FALSE)
+  data.frame(Class = cls,
+             FPR = 1 - coords$specificity,
+             TPR = coords$sensitivity)
+}) %>% bind_rows()
+# Extract ROC curve data (TPR vs FPR) per class
+roc_df_slope_Landsat <- lapply(names(roc_list_slope_Landsat), function(cls) {
+  coords <- pROC::coords(roc_list_slope_Landsat[[cls]], 
+                         ret = c("specificity", "sensitivity"), 
+                         transpose = FALSE)
+  data.frame(Class = cls,
+             FPR = 1 - coords$specificity,
+             TPR = coords$sensitivity)
+}) %>% bind_rows()
+# Extract ROC curve data (TPR vs FPR) per class
+roc_df_months_Landsat <- lapply(names(roc_list_months_Landsat), function(cls) {
+  coords <- pROC::coords(roc_list_months_Landsat[[cls]], 
+                         ret = c("specificity", "sensitivity"), 
+                         transpose = FALSE)
+  data.frame(Class = cls,
+             FPR = 1 - coords$specificity,
+             TPR = coords$sensitivity)
+}) %>% bind_rows()
+# Extract ROC curve data (TPR vs FPR) per class
+roc_df_2_Landsat <- lapply(names(roc_list_2_Landsat), function(cls) {
+  coords <- pROC::coords(roc_list_2_Landsat[[cls]],
+                         ret = c("specificity", "sensitivity"),
+                         transpose = FALSE)
+  data.frame(Class = cls,
+             FPR = 1 - coords$specificity,
+             TPR = coords$sensitivity)
+}) %>% bind_rows()
+# Extract ROC curve data (TPR vs FPR) per class
+roc_df_SatEmb <- lapply(names(roc_list_SatEmb), function(cls) {
+  coords <- pROC::coords(roc_list_SatEmb[[cls]], ret = c("specificity", "sensitivity"), transpose = FALSE)
+  data.frame(Class = cls,
+             FPR = 1 - coords$specificity,
+             TPR = coords$sensitivity)
+}) %>% bind_rows()
+
+roc_plot_slope_S2 <- ggplot(roc_df_slope_S2, 
+                            aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(linewidth = 0.75) +
+  #scale_color_manual(values = cols) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  labs(# title = "ROC curves (one-vs-all) by class",
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)") +
+  theme_minimal(base_size = 12)
+roc_plot_months_S2 <- ggplot(roc_df_months_S2, 
+                          aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(linewidth = 0.75) +
+  #scale_color_manual(values = cols) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  labs(# title = "ROC curves (one-vs-all) by class",
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)") +
+  theme_minimal(base_size = 12)
+roc_plot_2_S2 <- ggplot(roc_df_2_S2, 
+                          aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(linewidth = 0.75) +
+  #scale_color_manual(values = cols) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  labs(# title = "ROC curves (one-vs-all) by class",
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)") +
+  theme_minimal(base_size = 12)
+roc_plot_slope_Landsat <- ggplot(roc_df_slope_Landsat, 
+                          aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(linewidth = 0.75) +
+  #scale_color_manual(values = cols) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  labs(# title = "ROC curves (one-vs-all) by class",
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)") +
+  theme_minimal(base_size = 12)
+roc_plot_months_Landsat <- ggplot(roc_df_months_Landsat, 
+                          aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(linewidth = 0.75) +
+  #scale_color_manual(values = cols) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  labs(# title = "ROC curves (one-vs-all) by class",
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)") +
+  theme_minimal(base_size = 12)
+roc_plot_2_Landsat <- ggplot(roc_df_2_Landsat, 
+                          aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(linewidth = 0.75) +
+  #scale_color_manual(values = cols) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  labs(# title = "ROC curves (one-vs-all) by class",
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)") +
+  theme_minimal(base_size = 12)
+roc_plot_SatEmb <- ggplot(roc_df_SatEmb, 
+                          aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(linewidth = 0.75) +
+  #scale_color_manual(values = cols) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  labs(# title = "ROC curves (one-vs-all) by class",
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)") +
+  theme_minimal(base_size = 12)
+roc_plot_slope_S2
+roc_plot_months_S2
+roc_plot_2_S2
+roc_plot_slope_Landsat
+roc_plot_months_Landsat
+roc_plot_2_Landsat
+roc_plot_SatEmb
+```
+
+# Plots ROC curves
+
+## CHANGE (Appendix 5) ROC curves Landsat
+
+```{r}
+roc_plot_monhts_Landsat + roc_plot_SatEmb +
+  plot_annotation(tag_levels = "A", tag_suffix = ")") +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom", legend.title = element_blank())
+ggsave(here("output", "figures", "manuscript", "appendix4.jpeg"), 
+       dpi = 300, width = 9, height = 4)
+```
+
+# Plots variable importance 
+
+## CHANGE (Appendix 6) Best model Landsat
+
+```{r}
+vi_Landsat_caret_df <- as.data.frame(varimp_months_Landsat$importance)
+vi_Landsat_caret_df$Variable <- rownames(vi_Landsat_caret_df)
+colnames(vi_Landsat_caret_df)[1] <- "ScaledImportance"
+vi_Landsat_caret_df <- vi_Landsat_caret_df %>% arrange(desc(ScaledImportance))
+ggplot(vi_Landsat_caret_df, 
+       aes(x = reorder(Variable, ScaledImportance), y = ScaledImportance)) +
+  geom_col(fill = "#2c7fb8") +
+  coord_flip() +
+  labs(x = "Predictor", y = "Importance (scaled)") +
+  theme_minimal()
+ggsave(here("output", "figures", "manuscript", "appendix6.jpeg"), 
+       dpi = 300, width = 6, height = 10)
+```
+
+## CHANGE (Appendix 7) Best model SatEmb / S2
+
+```{r}
+vi_SatEmb_caret_df <- as.data.frame(varimp_SatEmb$importance)
+vi_SatEmb_caret_df$Variable <- rownames(vi_SatEmb_caret_df)
+colnames(vi_SatEmb_caret_df)[1] <- "ScaledImportance"
+vi_SatEmb_caret_df <- vi_SatEmb_caret_df %>% arrange(desc(ScaledImportance))
+ggplot(vi_SatEmb_caret_df, 
+       aes(x = reorder(Variable, ScaledImportance), y = ScaledImportance)) +
+  geom_col(fill = "#2c7fb8") +
+  coord_flip() +
+  labs(x = "Predictor", y = "Importance (scaled)") +
+  theme_minimal()
+ggsave(here("output", "figures", "manuscript", "appendix7.jpeg"), 
+       dpi = 300, width = 6, height = 10)
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
+

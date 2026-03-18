@@ -1348,7 +1348,7 @@ nrow(final_RS_data %>%
        dplyr::filter(EVI_diff_pos_eos_value <= 0))
 ```
 
-# HERE: Add some columns needed
+# Add some columns needed
 
 ```{r}
 final_RS_data <- final_RS_data %>%

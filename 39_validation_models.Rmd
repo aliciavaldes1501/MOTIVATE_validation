@@ -141,6 +141,30 @@ vars_RF_slope_Landsat <- c(
   "canopy_height")
 ```
 
+```{r}
+# Excluding EVI because many values outside of range -1, 1
+vars_RF_slope_Landsat <- c(
+  # Min values of all indices
+  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI and SAVI
+  "NDVI_auc", "SAVI_auc",
+  # Values of NDVI and SAVI at sos, pos and eos
+  "NDVI_sos_value", "NDVI_pos_value", "NDVI_eos_value",
+  "SAVI_sos_value", "SAVI_pos_value", "SAVI_eos_value",
+  # Differences pos-sos in value and doy
+  "NDVI_diff_pos_sos_value","SAVI_diff_pos_sos_value",
+  "NDVI_diff_pos_sos_doy", "SAVI_diff_pos_sos_doy",
+  # Differences pos-eos in value and doy
+  "NDVI_diff_pos_eos_value", "SAVI_diff_pos_eos_value",
+  "NDVI_diff_pos_eos_doy", "SAVI_diff_pos_eos_doy",
+  # Growing season duration
+  "NDVI_gsd", "SAVI_gsd",
+  # Canopy height
+  "canopy_height")
+```
+
 ### Months method
 
 ```{r}

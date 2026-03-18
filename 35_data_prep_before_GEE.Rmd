@@ -972,23 +972,24 @@ Number of observations:
 
 ```{r}
 cat("If using all plots:", 
-    data_V2025.2_clean %>% nrow(), "\n")
+    data_V2025.2_clean %>% filter(year >= 1984) %>% nrow(), "\n")
 cat("If using plots where all obs have same coords:", 
-    data_V2025.2_clean %>% dplyr::filter(multi_coords == F) %>% nrow(), "\n")
+    data_V2025.2_clean %>% filter(year < 1984) %>% 
+      dplyr::filter(multi_coords == F) %>% nrow(), "\n")
 ```
 
 Number of plots (i.e. unique combinations of RS_CODE, ReSurvey site and ReSurvey plot):
 
 ```{r}
 cat("All plots:", 
-    data_V2025.2_clean %>% distinct(plot_id) %>% 
-      nrow(), "\n")
+    data_V2025.2_clean %>% filter(year >= 1984) %>% 
+      distinct(plot_id) %>% nrow(), "\n")
 cat("Plots where all obs  have same coords:", 
-    data_V2025.2_clean %>% dplyr::filter(multi_coords == F) %>% distinct(plot_id) %>% 
-      nrow(), "\n")
+    data_V2025.2_clean %>% filter(year >= 1984) %>% 
+      dplyr::filter(multi_coords == F) %>% distinct(plot_id) %>% nrow(), "\n")
 cat("Plots where obs have different coords:", 
-    data_V2025.2_clean %>% dplyr::filter(multi_coords == T) %>% distinct(plot_id) %>% 
-      nrow(), "\n")
+    data_V2025.2_clean %>% filter(year >= 1984) %>% 
+      dplyr::filter(multi_coords == T) %>% distinct(plot_id) %>% nrow(), "\n")
 ```
 
 # Save to clean datafiles and shapefiles

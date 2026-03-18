@@ -1,0 +1,1106 @@
+---
+title: "Script to get validated points from the ReSurvey database using best RF models"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This R script is used get validated points from the ReSurvey database using the best RF models.
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(rnaturalearth)
+library(sf)
+library(patchwork)
+library(scales)
+```
+
+# Load functions
+
+```{r}
+knitr::purl("functions_20260225.Rmd", output = "functions_20260225.R")
+source("functions_20260225.R")
+```
+
+# Load previously created objects
+
+```{r}
+# Define the folder path
+folder_path <- here("objects", "validated_points")
+
+# List all .RData or .rda files in the folder
+rdata_files <- list.files(folder_path, full.names = TRUE)
+
+# Load each file
+lapply(rdata_files, load, envir = .GlobalEnv)
+```
+
+# Load best models
+
+Model with SatEmb for predicting where there is SatEmb data:
+
+```{r}
+# Load best model S2 or SatEmb (and prediction) - Accuracy = 0.837 (without k-fold)
+rf_SatEmb <- get(load(here("objects", "RF_1500_20260309",
+                           "rf_SatEmb_refin_20_10_2x_model.Rdata")))$model
+```
+
+Model with months, Landsat for predicting where there is no SatEmb data:
+
+```{r}
+# Load best model Landsat (and prediction) - Accuracy = 0.872 (without k-fold)
+rf_months_Landsat <- get(load(here("objects", "RF_1500_20260309",
+                               "rf_months_Landsat_refin_20_10_2x_model.Rdata")))$model
+```
+
+# Read data
+
+Read data validation SatEmb and Landsat:
+
+```{r}
+data_validation_SatEmb <- read_tsv(here(
+  "data", "clean","final_RS_data_SatEmb_20260309.csv"))
+data_validation_Landsat <- read_tsv(here(
+  "data", "clean","final_RS_data_bands_Landsat_all_20260309.csv"))
+```
+
+No parsing issues!
+
+```{r}
+nrow(data_validation_Landsat)
+nrow(data_validation_SatEmb)
+```
+
+Read original db:
+
+```{r}
+data_V2025.2 <- read_tsv(
+  "C:/Data/MOTIVATE/MOTIVATE_data/Data/EVA and ReSurvey Data/2025 data - V2025.2/Core data/200_Motivate20250415_notJUICE_header_with_precise_coordinates.csv")
+```
+
+# Define lists of predictor variables
+
+```{r}
+# Excluding EVI because many values outside of range -1, 1
+vars_RF_months_Landsat <- c(
+  # Min values of all indices
+  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, and SAVI between march and oct
+  "NDVI_auc_mar_oct", "SAVI_auc_mar_oct",
+  # Values of NDVI and SAVI at march, pos and oct
+  "NDVI_avg_value_03", "NDVI_pos_value", "NDVI_avg_value_10",
+  "SAVI_avg_value_03", "SAVI_pos_value", "SAVI_avg_value_10",
+  # Differences pos-march in value and doy
+  "NDVI_diff_pos_march_value", "SAVI_diff_pos_march_value",
+  "NDVI_diff_pos_march_doy", "SAVI_diff_pos_march_doy",
+  # Differences pos-oct in value and doy
+  "NDVI_diff_pos_oct_value", "SAVI_diff_pos_oct_value",
+  "NDVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy",
+  # Canopy height
+  "canopy_height")
+vars_RF_SatEmb <- colnames(
+  data_validation_SatEmb)[startsWith(colnames(data_validation_SatEmb), "A")]
+```
+
+# Merge both datasets
+
+```{r}
+data_validation <- data_validation_Landsat %>% 
+  full_join(data_validation_SatEmb) %>%
+  # Add SatEmb T/F
+  mutate(SatEmb = ifelse(is.na(A00), FALSE, TRUE))
+```
+
+```{r}
+data_validation %>% count(SatEmb)
+```
+
+# Apply similar filtering as to prepare data for models
+
+First, we were predicting in all data, even with missing values in predictors and values out ot the expected ranges!
+
+```{r}
+nrow(data_validation)
+```
+
+```{r}
+data_validation_filtered <- data_validation %>%
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_months_Landsat), ~ !is.na(.))) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+  # With Landsat data, many observations removed because of high/low EVI values
+  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
+  # so better not to use EVI here
+  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+  # Keep only rows with differences > 0 in variables
+  filter(if_all(any_of(vars_RF_months_Landsat[grepl("diff", 
+                                                   vars_RF_months_Landsat)]), 
+                ~ .x > 0))
+```
+
+```{r}
+nrow(data_validation_filtered)
+```
+
+```{r}
+# No missing values in SatEmb variables
+data_validation_filtered %>%
+  filter(if_any(starts_with("A"), ~ is.na(.x)) & SatEmb == T)
+```
+
+# Predictions from best models 
+
+Predict in data without NAs! 
+
+Model with SatEmb for predicting where there is SatEmb data:
+
+```{r eval=FALSE, include=FALSE}
+prediction_SatEmb_resp <- predict(rf_SatEmb,
+                                  newdata = data_validation %>%
+                                    filter(SatEmb == T) %>%
+                                    filter(if_all(all_of(vars_RF_SatEmb), ~ !is.na(.))), 
+                                  type = "response")
+```
+
+```{r eval=FALSE, include=FALSE}
+prediction_SatEmb_prob <- predict(rf_SatEmb,
+                                  newdata = data_validation %>%
+                                    filter(SatEmb == T) %>%
+                                    filter(if_all(all_of(vars_RF_SatEmb), ~ !is.na(.))), 
+                                  type = "prob")
+```
+
+Model with months, Landsat for predicting where there is no SatEmb data:
+
+```{r eval=FALSE, include=FALSE}
+prediction_Landsat_resp <- predict(rf_months_Landsat,
+                                   newdata = data_validation_filtered, 
+                                   type = "response")
+```
+
+```{r eval=FALSE, include=FALSE}
+prediction_Landsat_prob <- predict(rf_months_Landsat,
+                                   newdata = data_validation_filtered, 
+                                   type = "prob")
+```
+
+```{r}
+predictions <- c("prediction_SatEmb_resp", "prediction_SatEmb_prob",
+                 "prediction_Landsat_resp", "prediction_Landsat_prob")
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (prediction_name in predictions) {
+  file_path <- paste0("objects/validated_points/", prediction_name, ".Rdata")
+  save(list = prediction_name, file = file_path)
+}
+```
+
+Add predictions:
+
+```{r}
+data_validated <- data_validation %>%
+  left_join(
+    # Predictions from model with SatEmb
+    cbind(
+      data.frame(
+        # PlotObservationIDs
+        PlotObservationID = data_validation %>% 
+          filter(SatEmb == T)  %>%
+          filter(if_all(all_of(vars_RF_SatEmb), ~ !is.na(.))) %>% 
+          pull(PlotObservationID),
+        # Prediction response
+        pred_SatEmb_resp = prediction_SatEmb_resp
+        ),
+      # Prediction probabilities
+      do.call(rbind, prediction_SatEmb_prob) %>% as.data.frame() %>%
+        rename(pred_SatEmb_Q = EUNIS1.Q, pred_SatEmb_R = EUNIS1.R,
+               pred_SatEmb_S = EUNIS1.S, pred_SatEmb_T = EUNIS1.T)
+      )
+  ) %>%
+  left_join(
+    # Predictions from model with months, Landsat
+    cbind(
+      data.frame(
+        # PlotObservationIDs
+        PlotObservationID = data_validation_filtered %>% 
+          pull(PlotObservationID),
+        # Prediction response
+        pred_Landsat_resp = prediction_Landsat_resp
+        ),
+      # Prediction probabilities
+      do.call(rbind, prediction_Landsat_prob) %>% as.data.frame() %>%
+        rename(pred_Landsat_Q = EUNIS1.Q, pred_Landsat_R = EUNIS1.R,
+               pred_Landsat_S = EUNIS1.S, pred_Landsat_T = EUNIS1.T)
+      )
+  ) %>%
+  # Validated or not (SatEmb)
+  mutate(valid_SatEmb = ifelse(pred_SatEmb_resp == EUNIS1, TRUE, 
+                               ifelse(is.na(pred_SatEmb_resp), NA, FALSE))) %>%
+  # Validated or not (Landsat)
+  mutate(valid_Landsat = ifelse(pred_Landsat_resp == EUNIS1, TRUE, 
+                                ifelse(is.na(pred_Landsat_resp), NA, FALSE)))
+```
+
+# Counts
+
+```{r}
+data_validated %>% count(valid_SatEmb)
+data_validated %>% count(valid_Landsat)
+```
+
+# HERE: Data cleaning
+
+```{r}
+data_validated_clean <- data_validated %>%
+  # Keep only needed cols
+  select(
+    # These three cols are supposed to uniquely define each resurvey plot
+    RS_CODE, RSrvyst, RSrvypl,
+    # The three previous cols + this one are supposed to uniquely define
+    # each resurvey observation
+    RSrvyob,
+    # Unique identifier for each observation
+    PlotObservationID,
+    Dtofrcr, year,
+    biogeo, unit,
+    Lctnmth,
+    EUNIS1, EUNIS2,
+    SatEmb, 
+    pred_SatEmb_resp, pred_SatEmb_Q, pred_SatEmb_R, pred_SatEmb_S, pred_SatEmb_T,
+    pred_Landsat_resp, pred_Landsat_Q, pred_Landsat_R, pred_Landsat_S, pred_Landsat_T,
+    valid_SatEmb, valid_Landsat, 
+    ) %>%
+  # Rename some cols as in original db
+  rename(`ReSurvey site` = RSrvyst, `ReSurvey plot` = RSrvypl, 
+         `ReSurvey observation` = RSrvyob, `Date of recording` = Dtofrcr,
+         `Location method` = Lctnmth ) %>%
+  # Create new valid col
+  mutate(valid = case_when(
+    # If there is no SatEmb info, use Landsat validation
+    SatEmb == F ~ valid_Landsat,
+    # If there is SatEmb info, use SatEmb validation
+    SatEmb == T ~ valid_SatEmb
+    )) %>%
+  # Create new cols with predictions for each habitat type
+  mutate(
+    pred_Q = case_when(
+      # If there is no SatEmb info, use Landsat prediction
+      SatEmb == F ~ pred_Landsat_Q,
+      # If there is SatEmb info, use SatEmb prediction
+      SatEmb == T ~ pred_SatEmb_Q),
+    pred_R = case_when(
+      # If there is no SatEmb info, use Landsat prediction
+      SatEmb == F ~ pred_Landsat_R,
+      # If there is SatEmb info, use SatEmb prediction
+      SatEmb == T ~ pred_SatEmb_R),
+    pred_S = case_when(
+      # If there is no SatEmb info, use Landsat prediction
+      SatEmb == F ~ pred_Landsat_S,
+      # If there is SatEmb info, use SatEmb prediction
+      SatEmb == T ~ pred_SatEmb_S),
+    pred_T = case_when(
+      # If there is no SatEmb info, use Landsat prediction
+      SatEmb == F ~ pred_Landsat_T,
+      # If there is SatEmb info, use SatEmb prediction
+      SatEmb == T ~ pred_SatEmb_T)
+    )
+```
+
+```{r}
+data_validated_clean %>% count(valid)
+```
+
+
+How many NAs for each row?
+
+```{r}
+data_validated_clean %>% 
+  summarise(across(everything(), ~ sum(is.na(.))))
+```
+
+# Get info from original db
+
+## Read original db
+
+```{r}
+data_V2025.2 <- read_tsv(
+  "C:/Data/MOTIVATE/MOTIVATE_data/Data/EVA and ReSurvey Data/2025 data - V2025.2/Core data/200_Motivate20250415_notJUICE_header_with_precise_coordinates.csv")
+```
+
+## Get info for cols where there were NAs
+
+```{r}
+data_validated_clean <- rows_patch( # Updates only the NAs
+  data_validated_clean,
+  data_V2025.2 %>%
+    # Select cols where there were NAs
+    select(RS_CODE, `ReSurvey site`, `ReSurvey plot`, `ReSurvey observation`, 
+           PlotObservationID, `Date of recording`, `Location method`),
+  by = "PlotObservationID",
+  unmatched = "ignore" # Only patches matching rows and ignores the rest
+  )
+```
+
+## Add coordinates
+
+```{r}
+data_validated_clean <- data_validated_clean %>%
+  left_join(
+    data_V2025.2 %>% 
+      # Update coordinates
+      mutate(Lon_updated = ifelse(is.na(Lon_prec), Longitude, Lon_prec),
+             Lat_updated = ifelse(is.na(Lat_prec), Latitude, Lat_prec)) %>%
+      # Select columns needed
+      select(PlotObservationID, Lon_updated, Lat_updated)
+    )
+```
+
+How many NAs for each row?
+
+```{r}
+data_validated_clean %>% 
+  summarise(across(everything(), ~ sum(is.na(.))))
+```
+
+# More data cleaning
+
+```{r}
+data_validated_clean <- data_validated_clean %>%
+  # Convert to date
+  mutate(`Date of recording` = dmy(`Date of recording`))
+```
+
+# CHECK: Obs with more than one row
+
+```{r}
+data_validated_clean %>%
+  # These 4 cols uniquely identify each obs
+  group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`, `ReSurvey observation`) %>%
+  # Filter obs with more than 1 row
+  filter(n() > 1) %>%
+  arrange(RS_CODE, `ReSurvey site`, `ReSurvey plot`, `ReSurvey observation`)
+```
+
+For each unique combination of RS_CODE, ReSurvey site, ReSurvey plot and ReSurvey observation, check whether any of the other columns (except PlotObservationID) differ across the rows in that group:
+
+```{r}
+data_validated_clean %>%
+  group_by(
+    RS_CODE, `ReSurvey site`, `ReSurvey plot`, `ReSurvey observation`
+  ) %>%
+  filter(n() > 1) %>%
+  group_modify(~ {
+    
+    # Exclude columns that should NOT be checked
+    cols_to_check <- setdiff(names(.x), "PlotObservationID")
+    
+    # Identify columns where at least one value differs
+    diffs <- map_lgl(.x[cols_to_check], ~ n_distinct(.x, na.rm = FALSE) > 1)
+    
+    tibble(
+      differing_columns = paste(names(diffs)[diffs], collapse = ", ")
+      )
+    }) %>%
+  ungroup() %>%
+  # Keep only groups where at least one difference exists
+  filter(differing_columns != "")
+```
+
+# Add info on nr resurveys (n different years)
+
+Some have only 1 year, either because the first year(s) were prior to Landsat, or because they were still not resurveyed. 
+
+```{r}
+data_validated_clean <- data_validated_clean %>%
+  group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`) %>%
+  mutate(
+    n_resurveys = n_distinct(year, na.rm = TRUE),   # count unique years
+    first_year  = min(year, na.rm = TRUE),          # earliest year
+    last_year   = max(year, na.rm = TRUE)           # latest year
+  ) %>%
+  ungroup()
+```
+
+# Get only latest obs for each plot
+
+```{r}
+data_validated_clean_latest <- data_validated_clean %>%
+  # Keep only rows from the last year
+  filter(year == last_year) %>%
+  # These 3 cols are supposed to uniquely identify each plot
+  group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`) %>%
+  # If more than one row in the same year, keep the latest date
+  #slice_max(`Date of recording`, n = 1, with_ties = FALSE) %>%
+  ungroup()
+```
+
+## Obs with more than one row
+
+```{r}
+data_validated_clean_latest %>%
+  # These 3 cols are supposed to uniquely identify each plot
+  group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`) %>%
+  # Filter obs with more than 1 row
+  filter(n() > 1) %>%
+  ungroup() %>%
+  arrange(RS_CODE, `ReSurvey site`, `ReSurvey plot`)
+```
+
+# Write csvs
+
+```{r}
+write_csv(data_validated_clean,
+          here("data", "clean","data_validated_clean_20260316.csv"))
+write_csv(data_validated_clean_latest,
+          here("data", "clean","data_validated_clean_latest_20260316.csv"))
+```
+
+# Counts of validated / not-validated obs
+
+## General
+
+```{r}
+data_validated_clean %>%
+  count(valid) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_clean %>%
+  filter(!is.na(valid)) %>%
+  count(valid) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+## By habitat
+
+```{r}
+data_validated_clean %>%
+  filter(EUNIS1 == "Q") %>%
+  filter(!is.na(valid)) %>%
+  count(valid) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_clean %>%
+  filter(EUNIS1 == "R") %>%
+  filter(!is.na(valid)) %>%
+  count(valid) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_clean %>%
+  filter(EUNIS1 == "S") %>%
+  filter(!is.na(valid)) %>%
+  count(valid) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_clean %>%
+  filter(EUNIS1 == "T") %>%
+  filter(!is.na(valid)) %>%
+  count(valid) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+# HERE: Validation of plots
+
+Extract EUNIS assignations for each plot (sometimes different among different observations of the same plot):
+
+```{r}
+eunis_wide <- data_validated_clean %>%
+  group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`, n_resurveys) %>%
+  reframe(
+    EUNISa_vals = unique(EUNIS1)) %>%
+  unnest(EUNISa_vals) %>%
+  group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`, n_resurveys) %>%
+  mutate(EUNIS_idx = row_number()) %>%
+  pivot_wider(
+    names_from = EUNIS_idx,
+    values_from = EUNISa_vals,
+    names_prefix = "EUNIS1_"
+  ) %>%
+  # Categorize as "Habitat change" if there was more than one EUNIS assigned
+  # to different observations within a plot --> HERE
+  mutate(EUNIS = case_when(
+    is.na(EUNISa_1_2) & is.na(EUNISa_1_3) & is.na(EUNISa_1_4) ~ EUNISa_1_1,
+    TRUE ~ "Change"
+    )) %>%
+  ungroup() %>%
+  # Remove unneeded cols
+  select(-EUNISa_1_1, -EUNISa_1_2, -EUNISa_1_3, -EUNISa_1_4)
+```
+
+Extract the latest coordinate pair per plot (sometimes coordinates are different among different observations of the same plot):
+
+```{r}
+coords_latest <- data_validated_clean %>%
+  group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`, n_resurveys) %>%
+  slice_max(order_by = year, n = 1, with_ties = FALSE) %>%
+  select(
+    RS_CODE, `ReSurvey site`, `ReSurvey plot`, n_resurveys,
+    Lon_updated, Lat_updated
+  ) %>%
+  ungroup()
+```
+
+
+```{r}
+data_validated_plots <- data_validated_clean %>%
+  left_join(
+    eunis_wide,
+    by = c("RS_CODE", "ReSurvey site", "ReSurvey plot", "n_resurveys")
+  ) %>%
+  group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`, n_resurveys, EUNIS) %>%
+  summarise(
+    n_obs = n(),
+    n_true = sum(valid == TRUE, na.rm = TRUE),
+    n_false = sum(valid == FALSE, na.rm = TRUE),
+    n_na = sum(is.na(valid)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    share_true = ifelse((n_true + n_false) > 0,
+                        n_true / (n_true + n_false), NA_real_),
+    share_false = ifelse((n_true + n_false) > 0,
+                         n_false / (n_true + n_false), NA_real_)
+  ) %>%
+  mutate(
+    valid_status = case_when(
+      # --- ALL cases (keep first so they never get overridden) ---
+      # All observations validated
+      n_true  == n_obs ~ "all_TRUE",
+      # All observations not validated
+      n_false == n_obs ~ "all_FALSE",
+      # All observations NA
+      n_na    == n_obs ~ "all_NA",
+      
+      # Equal number of observations validated and not validated
+      n_true == n_false & n_na == 0 ~ "TRUE_FALSE",
+
+      # All three present --> keep as some observations validated and some not validated
+      # --- TRUE + FALSE + NA -> treat as TRUE_FALSE
+      n_true == n_false & n_na > 0 ~ "TRUE_FALSE",
+      
+      # --- More cases (dominance) ---
+      # TRUE dominates FALSE
+      share_true > share_false & n_false > 0 ~ "more_TRUE",
+      # FALSE dominates TRUE
+      share_false > share_true & n_true > 0 ~ "more_FALSE",
+
+      # Some observations validated and some NA --> keep as all validated
+      # TRUE + NA  --> treat as all_TRUE
+      n_true  > 0 & n_na > 0 & n_false == 0 ~ "all_TRUE",
+
+      # Some observations not validated and some NA --> keep as all not validated
+      # FALSE + NA --> treat as all_FALSE
+      n_false > 0 & n_na > 0 & n_true  == 0 ~ "all_FALSE",
+      
+      # Fallback (shouldn’t happen, but safe to keep)
+      TRUE ~ "mixed"
+    ),
+    n_resurveys_equal_n_obs = n_resurveys == n_obs
+  ) %>%
+  # Less restrictive validity status
+  mutate(valid_status_new = case_when(
+    valid_status == "TRUE_FALSE" ~ "tie",
+    valid_status %in% c("all_FALSE", "more_FALSE") ~ "not_valid",
+    valid_status %in% c("all_TRUE", "more_TRUE") ~ "valid",
+    valid_status == "all_NA" ~ NA,
+    TRUE ~ "other"
+  )) %>%
+  # Add coordinates (if coordinates are different among different observations 
+  # of the same plot, extract the latest coordinate pair per plot, i.e. from
+  # the last observation year)
+  left_join(
+    coords_latest,
+    by = c("RS_CODE", "ReSurvey site", "ReSurvey plot", "n_resurveys")
+  )
+```
+
+```{r}
+data_validated_plots %>% count(valid_status)
+data_validated_plots %>% count(valid_status_new)
+```
+
+# Counts of validated / not-validated plots
+
+## General
+
+```{r}
+data_validated_plots %>%
+  count(valid_status_new) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_plots %>%
+  filter(!is.na(valid_status_new)) %>%
+  count(valid_status_new) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+## By habitat
+
+```{r}
+data_validated_plots %>%
+  filter(EUNIS == "Q") %>%
+  filter(!is.na(valid_status_new)) %>%
+  count(valid_status_new) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_plots %>%
+  filter(EUNIS == "R") %>%
+  filter(!is.na(valid_status_new)) %>%
+  count(valid_status_new) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_plots %>%
+  filter(EUNIS == "S") %>%
+  filter(!is.na(valid_status_new)) %>%
+  count(valid_status_new) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_plots %>%
+  filter(EUNIS == "T") %>%
+  filter(!is.na(valid_status_new)) %>%
+  count(valid_status_new) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_plots %>%
+  filter(EUNIS == "Change") %>%
+  filter(!is.na(valid_status_new)) %>%
+  count(valid_status_new) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+# Plots
+
+## Obs level
+
+```{r}
+plot1 <- data_validated_clean %>%
+  count(EUNIS1, valid, name = "n") %>% 
+  ggplot(aes(x = EUNIS1, y = n, fill = valid)) +
+  geom_col(position = position_stack()) +
+  xlab(NULL) + ylab("Number of observations") +
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k")) +
+  scale_fill_manual(values = c("FALSE" = "#D55E00", "TRUE" = "#0072B2",
+                               "NA" = "#828282"),
+                     name = "Validated") +
+  theme_minimal() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+plot1
+plot1_noNAs <- data_validated_clean %>%
+  filter(!is.na(valid)) %>%
+  count(EUNIS1, valid, name = "n") %>% 
+  ggplot(aes(x = EUNIS1, y = n, fill = valid)) +
+  geom_col(position = position_stack()) +
+  xlab(NULL) + ylab("Number of observations") +
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k")) +
+  scale_fill_manual(values = c("FALSE" = "#D55E00", "TRUE" = "#0072B2"),
+                     name = "Validated") +
+  theme_minimal() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+plot1_noNAs
+```
+
+## Plot level
+
+```{r}
+plot2 <- data_validated_plots %>%
+  count(EUNIS, valid_status_new, name = "n") %>% 
+  ggplot(aes(x = EUNIS, y = n, fill = valid_status_new)) +
+  geom_col(position = position_stack()) +
+  xlab(NULL) + ylab("Number of plots") +
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k")) +
+  scale_fill_manual(values = c("valid" = "#D55E00", "not_valid" = "#0072B2",
+                               "NA" = "#828282", tie = "#009E73"),
+                     name = "Validated") +
+  theme_minimal() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+plot2
+plot2_noNAs <- data_validated_plots %>%
+  filter(!is.na(valid_status_new)) %>%
+  count(EUNIS, valid_status_new, name = "n") %>% 
+  ggplot(aes(x = EUNIS, y = n, fill = valid_status_new)) +
+  geom_col(position = position_stack()) +
+  xlab(NULL) + ylab("Number of plots") +
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k")) +
+  scale_fill_manual(values = c("valid" = "#D55E00", "not_valid" = "#0072B2",
+                               "NA" = "#828282", tie = "#009E73"),
+                     name = "Validated") +
+  theme_minimal() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+plot2_noNAs
+```
+
+# Map
+
+## Obs level
+
+```{r}
+world <- ne_countries(scale = "medium", returnclass = "sf")
+world_3035 <- st_transform(world, 3035)
+points_3035 <- st_as_sf(
+  data_validated_clean,
+  coords = c("Lon_updated", "Lat_updated"),
+  crs = 4326
+) |>
+  st_transform(3035)
+
+europe_bbox_3035 <- st_bbox(
+  c(
+    xmin = 2500000,
+    ymin = 1400000,
+    xmax = 6500000,
+    ymax = 5500000
+  ),
+  crs = st_crs(3035)
+)
+world_3035_crop <- st_crop(world_3035, europe_bbox_3035)
+points_3035_crop <- st_crop(points_3035, europe_bbox_3035)
+```
+
+```{r}
+map1 <- ggplot() +
+  geom_sf(data = world_3035_crop, fill = "lightgrey", color = "gray") +
+  geom_sf(
+    data = points_3035_crop,
+    aes(color = valid),
+    size = 0.05
+  ) +
+  facet_wrap(~ EUNIS1) +
+  scale_color_manual(values = c("FALSE" = "#D55E00", "TRUE"  = "#0072B2",
+                                "NA" = "#828282"),
+                     name = "Validated") +
+  theme_minimal() +
+  theme(legend.position = "none")
+map1
+map1_noNAs <- ggplot() +
+  geom_sf(data = world_3035_crop, fill = "lightgrey", color = "gray") +
+  geom_sf(
+    data = points_3035_crop %>% filter(!is.na(valid)),
+    aes(color = valid),
+    size = 0.05
+  ) +
+  facet_wrap(~ EUNIS1) +
+  scale_color_manual(values = c("FALSE" = "#D55E00", "TRUE"  = "#0072B2"),
+                     name = "Validated") +
+  theme_minimal() +
+  theme(legend.position = "none")
+map1_noNAs
+```
+
+## Plot level
+
+```{r}
+plots_3035 <- st_as_sf(
+  data_validated_plots,
+  coords = c("Lon_updated", "Lat_updated"),
+  crs = 4326
+) |>
+  st_transform(3035)
+plots_3035_crop <- st_crop(plots_3035, europe_bbox_3035)
+```
+
+```{r}
+map2 <- ggplot() +
+  geom_sf(data = world_3035_crop, fill = "lightgrey", color = "gray") +
+  geom_sf(
+    data = plots_3035_crop,
+    aes(color = valid_status_new),
+    size = 0.05
+  ) +
+  facet_wrap(~ EUNIS) +
+  scale_color_manual(values = c("valid" = "#D55E00", "not_valid"  = "#0072B2",
+                     "NA" = "#828282", tie = "#009E73"), name = "Validated") +
+  theme_minimal() +
+  theme(legend.position = "none")
+map2
+map2_noNAs <- ggplot() +
+  geom_sf(data = world_3035_crop, fill = "lightgrey", color = "gray") +
+  geom_sf(
+    data = plots_3035_crop %>% filter(!is.na(valid_status_new)),
+    aes(color = valid_status_new),
+    size = 0.05
+  ) +
+  facet_wrap(~ EUNIS) +
+  scale_color_manual(values = c("valid" = "#D55E00", "not_valid"  = "#0072B2",
+                                "NA" = "#828282", tie = "#009E73"),
+                     name = "Validated") +
+  theme_minimal() +
+  theme(legend.position = "none")
+map2_noNAs
+```
+
+# (Fig 2) Combined (obs level)
+
+```{r}
+map1 + plot1  +
+  plot_layout(widths = c(4, 1)) +
+  plot_annotation(tag_levels = "A", tag_suffix = ")") +
+  theme(plot.margin = margin(1, 1, 1, 1))
+ggsave(here("output", "figures", "manuscript", "fig2.jpeg"), 
+       dpi = 300, width = 5, height = 4)
+map1_noNAs + plot1_noNAs +
+  plot_layout(widths = c(4, 1)) +
+  plot_annotation(tag_levels = "A", tag_suffix = ")") +
+  theme(plot.margin = margin(1, 1, 1, 1))
+ggsave(here("output", "figures", "manuscript", "fig2_noNAs.jpeg"), 
+       dpi = 300, width = 5, height = 4)
+```
+
+# (Fig 3) Combined (plot level)
+
+```{r}
+plot2_inset <- plot2 +
+  theme(
+    aspect.ratio = 3/2,        # height / width  → tall & thin (try 3/1, 4/1, 5/1)
+    plot.margin  = margin(0, 0 , 0, 0),
+    axis.text.x  = element_text(angle = 45, size = 6, vjust = 1, hjust = 1),
+    legend.position = "none"
+  ) +
+  coord_cartesian(clip = "off", expand = FALSE) +
+  scale_x_discrete(expand = expansion(mult = c(0.02, 0.05)))
+
+map2_with_inset <- map2 +
+  inset_element(
+    plot2_inset,
+    left   = 0.65,  # move a bit right → narrower
+    right  = 0.965, # reduce width
+    bottom = -0.2,  # keep low
+    top    = 0.62,  # increase height
+    align_to = "panel"
+  )
+
+map2_with_inset +
+  plot_annotation(tag_levels = "A", tag_suffix = ")") +
+  theme(plot.margin = margin(1, 1, 1, 1))
+
+ggsave(here("output", "figures", "manuscript", "fig3.jpeg"), 
+       dpi = 300, width = 5, height = 4)
+```
+
+
+```{r}
+plot2_noNAs_inset <- plot2_noNAs +
+  theme(
+    aspect.ratio = 3/2,        # height / width  → tall & thin (try 3/1, 4/1, 5/1)
+    plot.margin  = margin(0, 0 , 0, 0),
+    axis.text.x  = element_text(angle = 45, size = 6, vjust = 1, hjust = 1),
+    legend.position = "none"
+  ) +
+  coord_cartesian(clip = "off", expand = FALSE) +
+  scale_x_discrete(expand = expansion(mult = c(0.02, 0.05)))
+
+map2_noNAs_with_inset <- map2_noNAs +
+  inset_element(
+    plot2_noNAs_inset,
+    left   = 0.65,  # move a bit right → narrower
+    right  = 0.965, # reduce width
+    bottom = -0.2,  # keep low
+    top    = 0.62,  # increase height
+    align_to = "panel"
+  )
+
+map2_noNAs_with_inset +
+  plot_annotation(tag_levels = "A", tag_suffix = ")") +
+  theme(plot.margin = margin(1, 1, 1, 1))
+
+ggsave(here("output", "figures", "manuscript", "fig3_noNAs.jpeg"), 
+       dpi = 300, width = 5, height = 4)
+```
+
+# (Fig 1) Plots most influential variables
+
+In these plots, include only obs where valid == T or valid == F, not obs where valid is NA. I.e. include obs where we had data from all predictors, and where able to get a prediction from the RF models. 
+
+```{r}
+# Landsat
+plot1_Landsat <- data_validated_clean %>%
+  filter(!is.na(valid)) %>%
+  left_join(data_validation %>% 
+              select(PlotObservationID, canopy_height)) %>%
+  distr_plot("canopy_height", "Canopy height (m)", grey = F)
+plot2_Landsat <- data_validated_clean %>%
+  filter(!is.na(valid)) %>%
+  left_join(data_validation %>% 
+              select(PlotObservationID, SAVI_diff_pos_oct_doy)) %>%
+  distr_plot("SAVI_diff_pos_oct_doy", 
+             "Difference in SAVI DOY between POS and October", grey = F)
+plot3_Landsat <- data_validated_clean %>%
+  filter(!is.na(valid)) %>%
+  left_join(data_validation %>% 
+              select(PlotObservationID, SAVI_diff_pos_march_value)) %>%
+  distr_plot("SAVI_diff_pos_march_value", 
+             "Difference in SAVI value between POS and March", grey = F)
+plot4_Landsat <- data_validated_clean %>%
+  filter(!is.na(valid)) %>%
+  left_join(data_validation %>% 
+              select(PlotObservationID, NDVI_min)) %>%
+  distr_plot("NDVI_min", 
+             "Minimum value of NDVI", grey = F)
+# SatEmb
+plot1_SatEmb <- data_validated_clean %>%
+  filter(SatEmb == T) %>%
+  filter(!is.na(valid)) %>%
+  left_join(data_validation %>% 
+              select(PlotObservationID, A24)) %>%
+  distr_plot("A24", "Band A24", grey = F)
+plot2_SatEmb <- data_validated_clean %>%
+  filter(SatEmb == T) %>%
+  filter(!is.na(valid)) %>%
+  left_join(data_validation %>% 
+              select(PlotObservationID, A33)) %>%
+  distr_plot("A33", "Band A33", grey = F)
+plot3_SatEmb <- data_validated_clean %>%
+  filter(SatEmb == T) %>%
+  filter(!is.na(valid)) %>%
+  left_join(data_validation %>% 
+              select(PlotObservationID, A07)) %>%
+  distr_plot("A07", "Band A07", grey = F)
+plot4_SatEmb <- data_validated_clean %>%
+  filter(SatEmb == T) %>%
+  filter(!is.na(valid)) %>%
+  left_join(data_validation %>% 
+              select(PlotObservationID, A58)) %>%
+  distr_plot("A58", "Band A58", grey = F)
+plot1_Landsat + plot2_Landsat + plot3_Landsat + plot4_Landsat +
+  plot1_SatEmb + plot2_SatEmb + plot3_SatEmb + plot4_SatEmb +
+  plot_layout(ncol = 2, nrow = 4) +
+  plot_annotation(tag_levels = "A", tag_suffix = ")")
+ggsave(here("output", "figures", "manuscript", "fig1.jpeg"), 
+       dpi = 300, width = 8, height = 12)
+```
+
+# (Appendix 1) Plot GPS observations used for models
+
+```{r}
+# Excluding EVI because many values outside of range -1, 1
+vars_RF_months_Landsat <- c(
+  # Min values of all indices
+  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, and SAVI between march and oct
+  "NDVI_auc_mar_oct", "SAVI_auc_mar_oct",
+  # Values of NDVI and SAVI at march, pos and oct
+  "NDVI_avg_value_03", "NDVI_pos_value", "NDVI_avg_value_10",
+  "SAVI_avg_value_03", "SAVI_pos_value", "SAVI_avg_value_10",
+  # Differences pos-march in value and doy
+  "NDVI_diff_pos_march_value", "SAVI_diff_pos_march_value",
+  "NDVI_diff_pos_march_doy", "SAVI_diff_pos_march_doy",
+  # Differences pos-oct in value and doy
+  "NDVI_diff_pos_oct_value", "SAVI_diff_pos_oct_value",
+  "NDVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy",
+  # Canopy height
+  "canopy_height")
+```
+
+```{r}
+filter_data_Landsat <- function(data, variables) {
+  data %>%
+    mutate(EUNIS1 = as.factor(EUNIS1)) %>%
+    # Remove rows with missing values in predictors
+    dplyr::filter(if_all(all_of(variables), ~ !is.na(.))) %>%
+    # Remove all rows with wrong values of indices (not between -1 and 1)
+    dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+    # With Landsat data, many observations removed because of high/low EVI values
+    # In Landsat_extraction, values of EVI outside of expected range were set as NA,
+    # so better not to use EVI here
+    # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+    dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+    dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+    dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+    # Select only variables needed
+    dplyr::select(PlotObservationID, EUNIS1, all_of(variables), Lctnmth,
+           valid_1) %>%
+    # Keep only rows with differences > 0 in variables
+    filter(if_all(any_of(variables[grepl("diff", variables)]), 
+                  ~ .x > 0))
+}
+```
+
+```{r}
+data_models <- filter_data_Landsat(
+  data_validation_Landsat %>%
+    rough_validation_Landsat(), # Rough validation based on NDWI
+  vars_RF_months_Landsat) %>%
+  left_join(data_V2025.2 %>%
+              # Update coordinates
+              mutate(Lon_updated = ifelse(is.na(Lon_prec), Longitude, Lon_prec),
+                     Lat_updated = ifelse(is.na(Lat_prec), Latitude, Lat_prec)) %>%
+              select(PlotObservationID, `Location method`, Lon_updated, Lat_updated)) %>%
+  mutate(GPS = case_when(`Location method` %in% 
+                           c("Location with GPS", 
+                             "Location with differential GPS") ~ TRUE,
+                         !`Location method` %in% 
+                           c("Location with GPS", 
+                             "Location with differential GPS") ~ FALSE,
+                         is.na(`Location method`) ~ FALSE))
+```
+
+```{r}
+points_3035 <- st_as_sf(data_models,
+                        coords = c("Lon_updated", "Lat_updated"),
+                        crs = 4326
+                        ) |>
+  st_transform(3035)
+
+points_3035_crop <- st_crop(points_3035, europe_bbox_3035)
+```
+
+```{r}
+map2 <- ggplot() +
+  geom_sf(data = world_3035_crop, fill = "lightgrey", color = "gray") +
+  geom_sf(
+    data = points_3035_crop,
+    aes(color = GPS),
+    size = 0.1
+  ) +
+  facet_wrap(~ EUNIS1) +
+  scale_color_manual(values = c("FALSE" = "#D55E00", "TRUE"  = "#0072B2"),
+                     name = "Recorded with GPS") +
+  theme_minimal() + theme(legend.position = "none")
+map2
+ggsave(here("output", "figures", "manuscript", "appendix1.jpeg"), 
+       dpi = 300, width = 6, height = 6)
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
