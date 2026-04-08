@@ -58,3 +58,57 @@ plotC <- ggplot() +
 
 plotC
 
+plot_phen <- ggplot() +
+  geom_point(data = plot_data,
+             aes(x = DOY, y = value_orig), color = "grey", size = 1, alpha = 0.75) +
+  annotate("rect",
+           xmin = 60, xmax = 90, ymin = -Inf, ymax = Inf,
+           fill = "darkgreen", alpha = 0.5) +
+  annotate("text",
+           x = 75, y = 0.15, label = "March",
+           vjust = 1.4, size = 4) +
+  annotate("rect",
+           xmin = 274, xmax = 304, ymin = -Inf, ymax = Inf,
+           fill = "sienna", alpha = 0.5) +
+  annotate("text",
+           x = 289, y = 0.15, label = "October",
+           vjust = 1.4, size = 4) +
+  geom_line(data = plot_data,
+            aes(x = DOY, y = value), color = "#0072B2", size = 1) +
+  geom_point(data = plot_data %>%
+               dplyr::filter(DOY == pos),
+             aes(x = pos, y = value),
+             shape = 18, size = 5, color = "#D55E00") +
+  geom_text(data = plot_data %>%
+              dplyr::filter(DOY == pos),
+            aes(x = pos, y = value, label = "Peak"),
+            vjust = -0.25, hjust = 1.25, size = 4, color = "black") +
+  geom_point(data = plot_data %>%
+               dplyr::filter(DOY == sos_slope),
+             aes(x = sos_slope, y = value),
+             shape = 18, size = 5, color = "darkgreen") +
+  geom_text(data = plot_data %>%
+              dplyr::filter(DOY == sos_slope),
+            aes(x = sos_slope, y = value, label = "Start"),
+            vjust = -1, hjust = 1, size = 4, color = "black") +
+  geom_point(data = plot_data %>%
+               dplyr::filter(DOY == eos_slope),
+             aes(x = eos_slope, y = value),
+             shape = 18, size = 5, color = "sienna") +
+  geom_text(data = plot_data %>%
+              dplyr::filter(DOY == eos_slope),
+            aes(x = eos_slope, y = value, label = "End"),
+            vjust = -1.5, hjust = 0.31, size = 4, color = "black") +
+  theme_classic() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank()
+  ) +
+  theme(legend.position = "none") +
+  labs(x = "DOY", y = "Index value", color = "EUNIS level II") +
+  scale_color_manual(values = c("darkgreen")) +
+  theme(legend.title = element_blank())
+
+plot_phen
+

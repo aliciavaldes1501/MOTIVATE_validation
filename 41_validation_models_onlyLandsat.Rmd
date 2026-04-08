@@ -1,5 +1,5 @@
 ---
-title: "Script to validate points in ReSurvey database using RS data (S2 + SatEmb + Landsat)"
+title: "Script to validate points in ReSurvey database using RS data (Landsat)"
 subtitle: "Fitting Random Forest models with ntree = 1500"
 author: "Alicia Valdés"
 date: "`r format(Sys.time(), '%d %B %Y')`"
@@ -12,7 +12,7 @@ output:
 knitr::opts_chunk$set(warning = FALSE)
 ```
 
-This R script is used to validate the points in the ReSurvey database using either RS indicators from S2 or Landsat (indices + phenology + canopy height), or bands from the Google Satellite Embedding dataset: https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_SATELLITE_EMBEDDING_V1_ANNUAL#description
+This R script is used to validate the points in the ReSurvey database using RS indicators from Landsat (indices + phenology).
 
 # Load libraries
 
@@ -53,6 +53,18 @@ rdata_files <- list.files(folder_path, full.names = TRUE)
 
 # Load each file
 lapply(rdata_files, load, envir = .GlobalEnv)
+```
+
+```{r}
+# Load varimp objects
+lapply(list.files(here("objects", "RF_1500_varimp"), full.names = TRUE), load,
+       envir = .GlobalEnv)
+```
+
+```{r}
+# Load ROC objects
+lapply(list.files(here("objects", "RF_1500_ROC"), full.names = TRUE), load,
+       envir = .GlobalEnv)
 ```
 
 # Read data
@@ -224,9 +236,17 @@ plot_perc_Landsat <- data_validation_Landsat %>%
   rough_validation_Landsat() %>% 
   # Data filtering
   filter_data_Landsat(vars_RF_months_Landsat) %>%
-  distr_plot("NDVI_pos_value", "Maximum NDVI", grey = T)
+  mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
+  distr_plot("NDVI_pos_value", "Maximum NDVI", grey = T) +
+  scale_x_discrete(labels = c(
+    "Q" = "Q - Wetlands",
+    "R" = "R - Grasslands",
+    "S" = "S - Scrub",
+    "T" = "T - Forests"
+  ))
+plot_perc_Landsat
 ggsave(here("output", "figures", "manuscript", "appendix2.jpeg"), 
-       dpi = 300, width = 4, height = 5)
+       dpi = 300, width = 5, height = 4)
 ```
 
 # Fit RF models (level 1)
@@ -479,24 +499,9 @@ filtered_data_2_Landsat_with_probs <- bind_cols(
          prob_R = EUNIS1.R, prob_S = EUNIS1.S, prob_T = EUNIS1.T)
 ```
 
-```{r}
-filtered_data_with_probs <- c("filtered_data_slope_Landsat_with_probs", 
-                              "filtered_data_months_Landsat_with_probs",
-                              "filtered_data_2_Landsat_with_probs")
-```
-
-Save:
-
-```{r eval=FALSE, include=FALSE}
-for (filtered_data_name in filtered_data_with_probs) {
-  file_path <- paste0("objects/RF_1500_20260318/", filtered_data_name, ".Rdata")
-  save(list = filtered_data_name, file = file_path)
-}
-```
-
 ### Detect probability columns
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 prob_cols_slope_Landsat <- names(filtered_data_slope_Landsat_with_probs)[grepl("^prob_", names(filtered_data_slope_Landsat_with_probs))]
 prob_cols_months_Landsat <- names(filtered_data_months_Landsat_with_probs)[grepl("^prob_", names(filtered_data_months_Landsat_with_probs))]
 prob_cols_2_Landsat <- names(filtered_data_2_Landsat_with_probs)[grepl("^prob_", names(filtered_data_2_Landsat_with_probs))]
@@ -504,7 +509,7 @@ prob_cols_2_Landsat <- names(filtered_data_2_Landsat_with_probs)[grepl("^prob_",
 
 ### Calculate auxiliary metrics
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 df_aux_slope_Landsat <- calculate_df_aux(filtered_data_slope_Landsat_with_probs,
                                      prob_cols_slope_Landsat)
 df_aux_months_Landsat <- calculate_df_aux(filtered_data_months_Landsat_with_probs,
@@ -517,7 +522,7 @@ df_aux_2_Landsat <- calculate_df_aux(filtered_data_2_Landsat_with_probs,
 
 Applying "Morralla" protocol once, removing negatives until 20% of the class and, if there is room, uncertain positives until 10% of the rest.
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 df_final_20_10_slope_Landsat <- df_aux_slope_Landsat %>%
   group_split(original_EUNIS) %>%
   map_dfr(filter_probs_neg20_pos10)
@@ -529,13 +534,30 @@ df_final_20_10_2_Landsat <- df_aux_2_Landsat %>%
   map_dfr(filter_probs_neg20_pos10)
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 filtered_data_20_10_slope_Landsat_probs <- filtered_data_slope_Landsat %>%
   dplyr::filter(PlotObservationID %in% df_final_20_10_slope_Landsat$PlotObservationID)
 filtered_data_20_10_months_Landsat_probs <- filtered_data_months_Landsat %>%
   dplyr::filter(PlotObservationID %in% df_final_20_10_months_Landsat$PlotObservationID)
 filtered_data_20_10_2_Landsat_probs <- filtered_data_2_Landsat %>%
   dplyr::filter(PlotObservationID %in% df_final_20_10_2_Landsat$PlotObservationID)
+```
+
+### Save
+
+```{r}
+filtered_data_with_probs <- c("filtered_data_20_10_slope_Landsat_probs", 
+                              "filtered_data_20_10_months_Landsat_probs",
+                              "filtered_data_20_10_2_Landsat_probs")
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (filtered_data_name in filtered_data_with_probs) {
+  file_path <- paste0("objects/RF_1500_20260318/", filtered_data_name, ".Rdata")
+  save(list = filtered_data_name, file = file_path)
+}
 ```
 
 ### Compare classes before and after
@@ -747,24 +769,9 @@ filtered_data_2_Landsat_with_probs_2x <- bind_cols(
          prob_R = EUNIS1.R, prob_S = EUNIS1.S, prob_T = EUNIS1.T)
 ```
 
-```{r}
-filtered_data_with_probs_2x <- c("filtered_data_slope_Landsat_with_probs_2x", 
-                              "filtered_data_months_Landsat_with_probs_2x",
-                              "filtered_data_2_Landsat_with_probs_2x")
-```
-
-Save:
-
-```{r eval=FALSE, include=FALSE}
-for (filtered_data_name in filtered_data_with_probs_2x) {
-  file_path <- paste0("objects/RF_1500_20260318/", filtered_data_name, ".Rdata")
-  save(list = filtered_data_name, file = file_path)
-}
-```
-
 #### Calculate auxiliary metrics
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 df_aux_slope_Landsat_2x <- calculate_df_aux(filtered_data_slope_Landsat_with_probs_2x,
                                      prob_cols_slope_Landsat)
 df_aux_months_Landsat_2x <- calculate_df_aux(filtered_data_months_Landsat_with_probs_2x,
@@ -775,7 +782,7 @@ df_aux_2_Landsat_2x <- calculate_df_aux(filtered_data_2_Landsat_with_probs_2x,
 
 #### Apply filtering function
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 df_final_20_10_slope_Landsat_2x <- df_aux_slope_Landsat_2x %>%
   group_split(original_EUNIS) %>%
   map_dfr(filter_probs_neg20)
@@ -787,7 +794,7 @@ df_final_20_10_2_Landsat_2x <- df_aux_2_Landsat_2x %>%
   map_dfr(filter_probs_neg20)
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 filtered_data_20_10_slope_Landsat_probs_2x <- filtered_data_slope_Landsat %>%
   dplyr::filter(PlotObservationID %in% df_final_20_10_slope_Landsat_2x$PlotObservationID)
 filtered_data_20_10_months_Landsat_probs_2x <- filtered_data_months_Landsat %>%
@@ -796,7 +803,24 @@ filtered_data_20_10_2_Landsat_probs_2x <- filtered_data_2_Landsat %>%
   dplyr::filter(PlotObservationID %in% df_final_20_10_2_Landsat_2x$PlotObservationID)
 ```
 
-#### SEE IF ADDING METHOD 2: (Appendix 3) Compare classes before and after
+### Save
+
+```{r}
+filtered_data_with_probs_2x <- c("filtered_data_20_10_slope_Landsat_probs_2x", 
+                              "filtered_data_20_10_months_Landsat_probs_2x",
+                              "filtered_data_20_10_2_Landsat_probs_2x")
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (filtered_data_name in filtered_data_with_probs_2x) {
+  file_path <- paste0("objects/RF_1500_20260318/", filtered_data_name, ".Rdata")
+  save(list = filtered_data_name, file = file_path)
+}
+```
+
+#### Compare classes before and after
 
 ```{r}
 compare_classes(filtered_data_slope_Landsat,
@@ -810,11 +834,19 @@ compare_classes(filtered_data_2_Landsat,
                 filtered_data_20_10_2_Landsat_probs_2x)
 ```
 
+##### (Appendix 3)
+
 ```{r}
-compare_classes(filtered_data_months_Landsat, 
+(compare_classes(filtered_data_slope_Landsat, 
+                  filtered_data_20_10_slope_Landsat_probs,
+                  filtered_data_20_10_slope_Landsat_probs_2x,
+                  return = "plot") +
+  compare_classes(filtered_data_months_Landsat, 
                   filtered_data_20_10_months_Landsat_probs,
                   filtered_data_20_10_months_Landsat_probs_2x,
-                  return = "plot") +
+                  return = "plot")
+ ) +
+  plot_annotation(tag_levels = "A", tag_suffix = ")") +
   plot_layout(guides = "collect") &
   scale_fill_manual(
     breaks = c("before", "step1", "step2"),
@@ -825,10 +857,13 @@ compare_classes(filtered_data_months_Landsat,
       "step2"  = "#2c7fb8"
     )
   ) &
-  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k")) &
-  theme(legend.position = "bottom", legend.title = element_blank())
+  scale_y_continuous(limits = c(0, 45000),
+                  labels = label_number(scale = 1e-3, suffix = "k")) &
+  theme(legend.position = "bottom", legend.title = element_blank()) +
+  theme(panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank())
 ggsave(here("output", "figures", "manuscript", "appendix3.jpeg"), 
-       dpi = 300, width = 5, height = 4)
+       dpi = 300, width = 6, height = 4.5)
 ```
 
 #### Split into training and testing
@@ -975,6 +1010,117 @@ for (prediction_name in predictions_refin_20_10_2x) {
   print(plot_confusion_matrix(prediction, test_data$EUNIS1, title))
 }
 ```
+
+#### (Appendix 6) Variable importance
+
+```{r eval=FALSE, include=FALSE}
+varimp_months_Landsat_step2 <-
+  compute_varimp(rf_months_Landsat_refin_20_10_2x$model, nperm = 100)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(varimp_months_Landsat_step2,
+     file = "objects/varimp_months_Landsat_step2.Rdata")
+```
+
+```{r}
+enframe(
+  varimp_months_Landsat_step2$varimp$values,
+  name  = "variable",
+  value = "importance"
+) %>%
+  mutate(
+    importance100 = 100 * importance / max(importance)
+  ) %>%
+  arrange(desc(importance100)) %>%
+  mutate(variable_long = case_when(
+    variable == "NDMI_max" ~ "Maximum NDMI",
+    variable == "NDWI_max" ~ "Maximum NDWI",
+    variable == "NDVI_max" ~ "Maximum NDVI",
+    variable == "SAVI_max" ~ "Maximum SAVI",
+    variable == "NDMI_min" ~ "Minimum NDMI",
+    variable == "NDWI_min" ~ "Minimum NDWI",
+    variable == "NDVI_min" ~ "Minimum NDVI",
+    variable == "SAVI_min" ~ "Minimum SAVI",
+    variable == "NDVI_avg_value_03" ~ "NDVI value at greening",
+    variable == "NDVI_pos_value" ~ "NDVI value at peak",
+    variable == "NDVI_avg_value_10" ~ "NDVI value at browning",
+    variable == "SAVI_avg_value_03" ~ "SAVI value at greening",
+    variable == "SAVI_pos_value" ~ "SAVI value at peak",
+    variable == "SAVI_avg_value_10" ~ "SAVI value at browning",
+    variable == "NDVI_auc_mar_oct" ~ "NDVI AUC greening - browning",
+    variable == "SAVI_auc_mar_oct" ~ "SAVI AUC greening - browning",
+    variable == "NDVI_diff_pos_march_value" ~ 
+      "NDVI difference in value peak - greening",
+    variable == "SAVI_diff_pos_march_value" ~
+      "SAVI difference in value peak - greening",
+    variable == "NDVI_diff_pos_march_doy" ~
+      "NDVI difference in DOY peak - greening",
+    variable == "SAVI_diff_pos_march_doy" ~
+      "SAVI difference in DOY peak - greening",
+    variable == "NDVI_diff_pos_oct_value" ~
+      "NDVI difference in value peak - browning",
+    variable == "SAVI_diff_pos_oct_value" ~
+      "SAVI difference in value peak - browning",
+    variable == "NDVI_diff_pos_oct_doy" ~
+      "NDVI difference in DOY peak - browning",
+    variable == "SAVI_diff_pos_oct_doy" ~
+      "SAVI difference in DOY peak - browning",
+    TRUE ~ variable
+  )) %>%
+ggplot(aes(x = reorder(variable_long, importance100), y = importance100)) +
+  geom_col(fill = "#2c7fb8") +
+  coord_flip() +
+  labs(x = "Predictor", y = "Importance (scaled)") +
+  theme_minimal()
+ggsave(here("output", "figures", "manuscript", "appendix6.jpeg"), 
+       dpi = 300, width = 6, height = 4)
+```
+
+### (Appendix 5) ROC curves
+
+```{r eval=FALSE, include=FALSE}
+rocdata_months_Landsat_step2 <-
+  compute_roc_level1(rf_months_Landsat_refin_20_10_2x$model,
+                     test_data_20_10_2x_months_Landsat)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(rocdata_months_Landsat_step2,
+     file = "objects/RF_1500_ROC/rocdata_months_Landsat_step2.Rdata")
+```
+
+```{r}
+ggplot(rocdata_months_Landsat_step2$roc, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(linewidth = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(title = paste("Multiclass ROC Curve -", model_name),
+       x = "False Positive Rate (1-Specificity",
+       y = "True Positive Rate (Sensitivity)",
+       color = "Class (AUC)") +
+  scale_color_manual(
+    values = c(
+      "Q (AUC = 0.923)" = "#0072B2",
+      "R (AUC = 0.98)" = "#D55E00",
+      "S (AUC = 0.968)" = "#009E73",
+      "T (AUC = 0.997)" = "#CC79A7"
+    ),
+    labels = c(
+      "Q (AUC = 0.923)" = "Q – Wetlands (AUC = 0.923)",
+      "R (AUC = 0.98)" = "R – Grasslands (AUC = 0.980)",
+      "S (AUC = 0.968)" = "S – Scrub (AUC = 0.968)",
+      "T (AUC = 0.997)" = "T – Forests (AUC = 0.997)"
+    )
+  ) +
+  theme_minimal() + ggtitle(NULL) +
+  theme(legend.position = "right")
+ggsave(here("output", "figures", "manuscript", "appendix5.jpeg"), 
+       dpi = 300, width = 7, height = 4)
+```
+
+
+
+
 
 # N obs
 
@@ -1152,7 +1298,7 @@ data_validation_Landsat %>%
   nrow()
 ```
 
-## N obs GPS-lcoated
+## N obs GPS-located
 
 ```{r}
 # Landsat slope

@@ -527,21 +527,21 @@ distr_plot <- function(data,
               data = df_flag %>% filter(!grey_flag),
               aes(y = !!sym(y_var), color = EUNIS1),
               position = position_jitter(width = 0.15),
-              size = 0.25, alpha = 0.25
+              size = 0.05, alpha = 0.25
             ),
             geom_point(
               data = df_flag %>% filter(grey_flag),
               aes(y = !!sym(y_var)),
               color = grey_color,
               position = position_jitter(width = 0.15),
-              size = 0.25, alpha = 0.6
+              size = 0.05, alpha = 0.6
             )
           )
         } else {
           geom_point(
             aes(y = !!sym(y_var), color = EUNIS1),
             position = position_jitter(width = 0.15),
-            size = 0.25, alpha = 0.25
+            size = 0.05, alpha = 0.25
           )
         }
       } +
@@ -552,8 +552,20 @@ distr_plot <- function(data,
       labs(y = y_label, x = "EUNIS level 1") +
       scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
       guides(fill = "none", color = "none") +
-      theme_bw() + coord_flip()
-
+      theme_bw() + coord_flip()  +
+      scale_color_manual(values = c(
+        "#0072B2", # blue
+        "#D55E00", # vermillion
+        "#009E73", # bluish green
+        "#CC79A7"  # reddish purple
+        )) +
+      scale_fill_manual(values = c(
+        "#0072B2", # blue
+        "#D55E00", # vermillion
+        "#009E73", # bluish green
+        "#CC79A7"  # reddish purple
+        ))
+    
     if (print_plots) print(p)
     plots[[i]] <- p
   }
@@ -749,8 +761,8 @@ compute_roc_level1 <- function(model, test_data) {
       roc_obj <- roc(actual_bin[, class], prob_df[[class]])
       auc_val <- round(auc(roc_obj), 3)
       data.frame(
-        FPR = rev(roc_obj$specificities),
-        TPR = rev(roc_obj$sensitivities),
+        FPR = 1 - roc_obj$specificities,
+        TPR = roc_obj$sensitivities,
         Class = paste0(class, " (AUC = ", auc_val, ")")
       )
     }) %>% bind_rows()
@@ -1187,7 +1199,19 @@ compare_classes <- function(
     theme(
       axis.text.x = element_text(angle = 0, hjust = 1),
       panel.grid.minor = element_blank()
-    )
+    ) +
+    scale_x_discrete(
+    breaks = c("Q", "R", "S", "T"),
+    
+    labels = function(x) {
+      x <- ifelse(x == "Q", "Q - Wetlands", x)
+      x <- ifelse(x == "R", "R - Grasslands", x)
+      x <- ifelse(x == "S", "S - Scrub", x)
+      x <- ifelse(x == "T", "T - Forests", x)
+      x
+      }
+    ) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
   # Optionally attach counts to the plot as an attribute for quick retrieval
   attr(p, "counts") <- counts
