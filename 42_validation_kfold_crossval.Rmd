@@ -362,6 +362,14 @@ save(cv_slope_Landsat,
      file = "objects/RF_1500_cv/cv_slope_Landsat.Rdata") 
 ```
 
+#### Results
+
+```{r}
+cv_slope_Landsat_results <-
+  compute_rf_cv_metrics(cv_slope_Landsat)
+cv_slope_Landsat_results
+```
+
 ### Landsat, months
 
 ```{r eval=FALSE, include=FALSE}
@@ -377,6 +385,14 @@ cv_months_Landsat <- run_fastcforest_cv(
 ```{r eval=FALSE, include=FALSE}
 save(cv_months_Landsat,
      file = "objects/RF_1500_cv/cv_months_Landsat.Rdata") 
+```
+
+#### Results
+
+```{r}
+cv_months_Landsat_results <-
+  compute_rf_cv_metrics(cv_months_Landsat)
+cv_months_Landsat_results
 ```
 
 ## Refinement step 1
@@ -398,6 +414,14 @@ save(cv_slope_Landsat_step1,
      file = "objects/RF_1500_cv/cv_slope_Landsat_step1.Rdata") 
 ```
 
+#### Results
+
+```{r}
+cv_slope_Landsat_step1_results <-
+  compute_rf_cv_metrics(cv_slope_Landsat_step1)
+cv_slope_Landsat_step1_results
+```
+
 ### Landsat, months
 
 ```{r eval=FALSE, include=FALSE}
@@ -413,6 +437,14 @@ cv_months_Landsat_step1 <- run_fastcforest_cv(
 ```{r eval=FALSE, include=FALSE}
 save(cv_months_Landsat_step1, 
      file = "objects/RF_1500_cv/cv_months_Landsat_step1.Rdata") 
+```
+
+#### Results
+
+```{r}
+cv_months_Landsat_step1_results <-
+  compute_rf_cv_metrics(cv_months_Landsat_step1)
+cv_months_Landsat_step1_results
 ```
 
 ## Refinement step 2
@@ -432,6 +464,14 @@ cv_slope_Landsat_step2 <- run_fastcforest_cv(
 ```{r eval=FALSE, include=FALSE}
 save(cv_slope_Landsat_step2, 
      file = "objects/RF_1500_cv/cv_slope_Landsat_step2.Rdata") 
+```
+
+#### Results
+
+```{r}
+cv_slope_Landsat_step2_results <-
+  compute_rf_cv_metrics(cv_slope_Landsat_step2)
+cv_slope_Landsat_step2_results
 ```
 
 ### Landsat, months
