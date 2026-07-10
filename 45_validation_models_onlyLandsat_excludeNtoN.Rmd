@@ -46,7 +46,7 @@ source("functions_20260225.R")
 
 ```{r}
 # Define the folder path
-folder_path <- here("objects", "RF_1500_20260318")
+folder_path <- here("objects", "RF_1500_20260608")
 
 # List all .RData or .rda files in the folder
 rdata_files <- list.files(folder_path, full.names = TRUE)
@@ -57,13 +57,13 @@ lapply(rdata_files, load, envir = .GlobalEnv)
 
 ```{r}
 # Load varimp objects
-lapply(list.files(here("objects", "RF_1500_varimp"), full.names = TRUE), load,
+lapply(list.files(here("objects", "RF_1500_varimp_20260608"), full.names = TRUE), load,
        envir = .GlobalEnv)
 ```
 
 ```{r}
 # Load ROC objects
-lapply(list.files(here("objects", "RF_1500_ROC"), full.names = TRUE), load,
+lapply(list.files(here("objects", "RF_1500_ROC_20260608"), full.names = TRUE), load,
        envir = .GlobalEnv)
 ```
 
@@ -85,7 +85,8 @@ nrow(data_validation_Landsat)
 ```{r}
 ReSurvey_data <- read_csv(
   here("data", "clean", "ReSurvey_QRST_data_V2025.2_20260304.csv")) %>%
-  select(PlotObservationID, EUNIS1, EUNIS2, `Location method`) %>%
+  select(PlotObservationID, EUNIS1, EUNIS2, `Location method`, RS_CODE, 
+         `ReSurvey site`, `ReSurvey plot`) %>%
   rename(Lctnmth = `Location method`)
 ```
 
@@ -139,28 +140,23 @@ vars_RF_months_Landsat <- c(
   "NDVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy")
 ```
 
-## POS-2 and POS+2 method
+# Filter data to use in RF models
+
+## Define plots with N-to-N relationships
 
 ```{r}
-# Excluding EVI because many values outside of range -1, 1
-# Not using canopy height!
-vars_RF_2_Landsat <- c(
-  # Min values of all indices
-  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
-  # Max values of NDMI and NDWI
-  "NDMI_max", "NDWI_max",
-  # AUC of NDVI and SAVI between pos_minus60 and pos_plus_60
-  "NDVI_auc_pos2", "SAVI_auc_pos2",
-  # Values of NDVI and SAVI at pos_minus60, pos and pos_plus_60
-  "NDVI_pos_minus60_value", "NDVI_pos_value", "NDVI_pos_plus60_value",
-  "SAVI_pos_minus60_value", "SAVI_pos_value", "SAVI_pos_plus60_value",
-  # Differences pos-pos_minus60 in value
-  "NDVI_diff_pos_minus60_value", "SAVI_diff_pos_minus60_value",
-  # Differences pos-pos_plus_60 in value
-  "NDVI_diff_pos_plus60_value", "SAVI_diff_pos_plus60_value")
+n_to_n <- data_validation_Landsat %>%
+  left_join(ReSurvey_data) %>%
+  mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_")) %>%
+  # Calculate number of observations for each plot and year
+  group_by(plotID_AV, year) %>% 
+  mutate(n_obs_year = n()) %>%
+  ungroup() %>%
+  group_by(plotID_AV) %>%
+  filter(any(n_obs_year > 1)) %>%
+  distinct(plotID_AV) %>%
+  pull(plotID_AV)
 ```
-
-# Filter data to use in RF models
 
 ## Function
 
@@ -197,32 +193,30 @@ Select only GPS points that have passed the rough validation in each case.
 
 ```{r}
 filtered_data_slope_Landsat <- data_validation_Landsat %>%
+  left_join(ReSurvey_data) %>%
+  mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_")) %>%
+  # Add if N-to-N
+  mutate(n_to_n = plotID_AV %in% n_to_n) %>%
+  # Exclude N-to-N
+  filter(n_to_n == FALSE) %>%
   # Rough validation based on NDWI
   rough_validation_Landsat() %>% 
-  # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
   # Data filtering
   filter_data_Landsat(vars_RF_slope_Landsat) %>% 
   # From GPS points, filter based on NDVI percentiles
   filter_by_group_percentiles("NDVI_pos_value")
 
-filtered_data_months_Landsat <- data_validation_Landsat %>%
+filtered_data_months_Landsat <- data_validation_Landsat %>% 
+  left_join(ReSurvey_data) %>%
+  mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_")) %>%
+  # Add if N-to-N
+  mutate(n_to_n = plotID_AV %in% n_to_n) %>%
+  # Exclude N-to-N
+  filter(n_to_n == FALSE) %>%
   # Rough validation based on NDWI
   rough_validation_Landsat() %>% 
-  # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
   # Data filtering
   filter_data_Landsat(vars_RF_months_Landsat) %>% 
-  # From GPS points, filter based on NDVI percentiles
-  filter_by_group_percentiles("NDVI_pos_value")
-
-filtered_data_2_Landsat <- data_validation_Landsat %>%
-  # Rough validation based on NDWI
-  rough_validation_Landsat() %>% 
-  # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
-  # Data filtering
-  filter_data_Landsat(vars_RF_2_Landsat) %>% 
   # From GPS points, filter based on NDVI percentiles
   filter_by_group_percentiles("NDVI_pos_value")
 ```
@@ -261,10 +255,7 @@ bind_rows(
   filtered_data_months_Landsat %>% count(EUNIS1) %>%
     pivot_wider(names_from = EUNIS1, values_from = n) %>%
     mutate(sensor = "Landsat", method = "months") %>% 
-    select(sensor, method, Q, R, S, T),
-  filtered_data_2_Landsat %>% count(EUNIS1) %>%
-    pivot_wider(names_from = EUNIS1, values_from = n) %>%
-    mutate(sensor = "S2", method = "2")
+    select(sensor, method, Q, R, S, T)
 )
 ```
 
@@ -277,10 +268,6 @@ bind_rows(
   filtered_data_months_Landsat %>% count(EUNIS1) %>%
     pivot_wider(names_from = EUNIS1, values_from = n) %>%
     mutate(sensor = "Landsat", method = "months") %>% 
-    select(sensor, method, Q, R, S, T),
-  filtered_data_2_Landsat %>% count(EUNIS1) %>%
-    pivot_wider(names_from = EUNIS1, values_from = n) %>% 
-    mutate(sensor = "Landsat", method = "2") %>% 
     select(sensor, method, Q, R, S, T)
 ) %>%
   pivot_longer(cols = 3:6, names_to = "EUNIS", values_to = "Count") %>%
@@ -314,16 +301,6 @@ test_data_months_Landsat <- split_data_months_Landsat$test
 
 # Check overlap between training and testing datasets
 sum(train_data_months_Landsat$PlotObservationID %in% test_data_months_Landsat$PlotObservationID)
-
-# 2
-set.seed(123)
-split_data_2_Landsat <- split_train_test(filtered_data_2_Landsat)
-
-train_data_2_Landsat <- split_data_2_Landsat$train
-test_data_2_Landsat <- split_data_2_Landsat$test
-
-# Check overlap between training and testing datasets
-sum(train_data_2_Landsat$PlotObservationID %in% test_data_2_Landsat$PlotObservationID)
 ```
 
 ### Fit models
@@ -333,12 +310,10 @@ rf_slope_Landsat <- run_rf_parallel(vars_RF_slope_Landsat, train_data_slope_Land
                            "EUNIS1", ntree = 1500)
 rf_months_Landsat <- run_rf_parallel(vars_RF_months_Landsat, train_data_months_Landsat,
                             "EUNIS1", ntree = 1500)
-rf_2_Landsat <- run_rf_parallel(vars_RF_2_Landsat, train_data_2_Landsat,
-                            "EUNIS1", ntree = 1500)
 ```
 
 ```{r}
-models_no_refin <- c("rf_slope_Landsat", "rf_months_Landsat", "rf_2_Landsat")
+models_no_refin <- c("rf_slope_Landsat", "rf_months_Landsat")
 ```
 
 Print the time:
@@ -355,7 +330,7 @@ Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (model_name in models_no_refin) {
-  file_path <- paste0("objects/RF_1500_20260318/", model_name, "_model.Rdata")
+  file_path <- paste0("objects/RF_1500_20260608/", model_name, "_model.Rdata")
   save(list = model_name, file = file_path)
 }
 ```
@@ -385,15 +360,14 @@ for (model_name in models_no_refin) {
 
 ```{r}
 predictions_no_refin <- c("rf_slope_Landsat_prediction", 
-                          "rf_months_Landsat_prediction", 
-                          "rf_2_Landsat_prediction")
+                          "rf_months_Landsat_prediction")
 ```
 
 Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (prediction_name in predictions_no_refin) {
-  file_path <- paste0("objects/RF_1500_20260318/", prediction_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260608/", prediction_name, ".Rdata")
   save(list = prediction_name, file = file_path)
 }
 ```
@@ -478,22 +452,6 @@ filtered_data_months_Landsat_with_probs <- bind_cols(
   ) %>%
   rename(original_EUNIS = EUNIS1, prob_Q = EUNIS1.Q,
          prob_R = EUNIS1.R, prob_S = EUNIS1.S, prob_T = EUNIS1.T)
-
-# Landsat, 2
-filtered_data_2_Landsat_with_probs <- bind_cols(
-  filtered_data_2_Landsat %>% select(PlotObservationID, EUNIS1),
-  as.data.frame(predict(rf_2_Landsat$model, 
-                        # Predicting in all data (training + testing)
-                                          newdata = filtered_data_2_Landsat,
-                      type = "response")) %>%
-    rename(predicted_EUNIS = 1),
-  do.call(rbind, predict(rf_2_Landsat$model, 
-                         # Predicting in all data (training + testing)
-                         newdata = filtered_data_2_Landsat,
-                      type = "prob")) %>% as.data.frame()
-  ) %>%
-  rename(original_EUNIS = EUNIS1, prob_Q = EUNIS1.Q,
-         prob_R = EUNIS1.R, prob_S = EUNIS1.S, prob_T = EUNIS1.T)
 ```
 
 ### Detect probability columns
@@ -501,7 +459,6 @@ filtered_data_2_Landsat_with_probs <- bind_cols(
 ```{r eval=FALSE, include=FALSE}
 prob_cols_slope_Landsat <- names(filtered_data_slope_Landsat_with_probs)[grepl("^prob_", names(filtered_data_slope_Landsat_with_probs))]
 prob_cols_months_Landsat <- names(filtered_data_months_Landsat_with_probs)[grepl("^prob_", names(filtered_data_months_Landsat_with_probs))]
-prob_cols_2_Landsat <- names(filtered_data_2_Landsat_with_probs)[grepl("^prob_", names(filtered_data_2_Landsat_with_probs))]
 ```
 
 ### Calculate auxiliary metrics
@@ -511,8 +468,6 @@ df_aux_slope_Landsat <- calculate_df_aux(filtered_data_slope_Landsat_with_probs,
                                      prob_cols_slope_Landsat)
 df_aux_months_Landsat <- calculate_df_aux(filtered_data_months_Landsat_with_probs,
                                      prob_cols_months_Landsat)
-df_aux_2_Landsat <- calculate_df_aux(filtered_data_2_Landsat_with_probs,
-                                     prob_cols_2_Landsat)
 ```
 
 ### Apply filtering function
@@ -526,9 +481,6 @@ df_final_20_10_slope_Landsat <- df_aux_slope_Landsat %>%
 df_final_20_10_months_Landsat <- df_aux_months_Landsat %>%
   group_split(original_EUNIS) %>%
   map_dfr(filter_probs_neg20_pos10)
-df_final_20_10_2_Landsat <- df_aux_2_Landsat %>%
-  group_split(original_EUNIS) %>%
-  map_dfr(filter_probs_neg20_pos10)
 ```
 
 ```{r eval=FALSE, include=FALSE}
@@ -536,23 +488,20 @@ filtered_data_20_10_slope_Landsat_probs <- filtered_data_slope_Landsat %>%
   dplyr::filter(PlotObservationID %in% df_final_20_10_slope_Landsat$PlotObservationID)
 filtered_data_20_10_months_Landsat_probs <- filtered_data_months_Landsat %>%
   dplyr::filter(PlotObservationID %in% df_final_20_10_months_Landsat$PlotObservationID)
-filtered_data_20_10_2_Landsat_probs <- filtered_data_2_Landsat %>%
-  dplyr::filter(PlotObservationID %in% df_final_20_10_2_Landsat$PlotObservationID)
 ```
 
 ### Save
 
 ```{r}
 filtered_data_with_probs <- c("filtered_data_20_10_slope_Landsat_probs", 
-                              "filtered_data_20_10_months_Landsat_probs",
-                              "filtered_data_20_10_2_Landsat_probs")
+                              "filtered_data_20_10_months_Landsat_probs")
 ```
 
 Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (filtered_data_name in filtered_data_with_probs) {
-  file_path <- paste0("objects/RF_1500_20260318/", filtered_data_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260608/", filtered_data_name, ".Rdata")
   save(list = filtered_data_name, file = file_path)
 }
 ```
@@ -562,7 +511,6 @@ for (filtered_data_name in filtered_data_with_probs) {
 ```{r}
 compare_classes(filtered_data_slope_Landsat, filtered_data_20_10_slope_Landsat_probs)
 compare_classes(filtered_data_months_Landsat, filtered_data_20_10_months_Landsat_probs)
-compare_classes(filtered_data_2_Landsat, filtered_data_20_10_2_Landsat_probs)
 ```
 
 ### Split into training and testing
@@ -588,16 +536,6 @@ test_data_20_10_months_Landsat <- split_data_20_10_months_Landsat$test
 
 # Check overlap between training and testing datasets
 sum(train_data_20_10_months_Landsat$PlotObservationID %in% test_data_20_10_months_Landsat$PlotObservationID)
-
-# 2
-set.seed(123)
-split_data_20_10_2_Landsat <- split_train_test(filtered_data_20_10_2_Landsat_probs)
-
-train_data_20_10_2_Landsat <- split_data_20_10_2_Landsat$train
-test_data_20_10_2_Landsat <- split_data_20_10_2_Landsat$test
-
-# Check overlap between training and testing datasets
-sum(train_data_20_10_2_Landsat$PlotObservationID %in% test_data_20_10_2_Landsat$PlotObservationID)
 ```
 
 ### Fit models
@@ -609,22 +547,18 @@ rf_slope_Landsat_refin_20_10 <- run_rf_parallel(vars_RF_slope_Landsat,
 rf_months_Landsat_refin_20_10 <- run_rf_parallel(vars_RF_months_Landsat,
                                         train_data_20_10_months_Landsat, 
                                         "EUNIS1", ntree = 1500)
-rf_2_Landsat_refin_20_10 <- run_rf_parallel(vars_RF_2_Landsat,
-                                        train_data_20_10_2_Landsat, 
-                                        "EUNIS1", ntree = 1500)
 ```
 
 ```{r}
 models_refin_20_10 <- c("rf_slope_Landsat_refin_20_10", 
-                        "rf_months_Landsat_refin_20_10",
-                        "rf_2_Landsat_refin_20_10")
+                        "rf_months_Landsat_refin_20_10")
 ```
 
 Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (model_name in models_refin_20_10) {
-  file_path <- paste0("objects/RF_1500_20260318/", model_name, "_model.Rdata")
+  file_path <- paste0("objects/RF_1500_20260608/", model_name, "_model.Rdata")
   save(list = model_name, file = file_path)
 }
 ```
@@ -655,15 +589,14 @@ for (model_name in models_refin_20_10) {
 
 ```{r}
 predictions_refin_20_10 <- c("rf_slope_Landsat_refin_20_10_prediction",
-                        "rf_months_Landsat_refin_20_10_prediction",
-                        "rf_2_Landsat_refin_20_10_prediction")
+                        "rf_months_Landsat_refin_20_10_prediction")
 ```
 
 Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (prediction_name in predictions_refin_20_10) {
-  file_path <- paste0("objects/RF_1500_20260318/", prediction_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260608/", prediction_name, ".Rdata")
   save(list = prediction_name, file = file_path)
   }
 ```
@@ -748,22 +681,6 @@ filtered_data_months_Landsat_with_probs_2x <- bind_cols(
   ) %>%
   rename(original_EUNIS = EUNIS1, prob_Q = EUNIS1.Q,
          prob_R = EUNIS1.R, prob_S = EUNIS1.S, prob_T = EUNIS1.T)
-
-# Landsat, 2
-filtered_data_2_Landsat_with_probs_2x <- bind_cols(
-  filtered_data_20_10_2_Landsat_probs %>% select(PlotObservationID, EUNIS1),
-  as.data.frame(predict(rf_2_Landsat_refin_20_10$model, 
-                        # Predicting in all data (training + testing)
-                                          newdata = filtered_data_20_10_2_Landsat_probs,
-                      type = "response")) %>%
-    rename(predicted_EUNIS = 1),
-  do.call(rbind, predict(rf_2_Landsat_refin_20_10$model, 
-                         # Predicting in all data (training + testing)
-                         newdata = filtered_data_20_10_2_Landsat_probs,
-                      type = "prob")) %>% as.data.frame()
-  ) %>%
-  rename(original_EUNIS = EUNIS1, prob_Q = EUNIS1.Q,
-         prob_R = EUNIS1.R, prob_S = EUNIS1.S, prob_T = EUNIS1.T)
 ```
 
 #### Calculate auxiliary metrics
@@ -773,8 +690,6 @@ df_aux_slope_Landsat_2x <- calculate_df_aux(filtered_data_slope_Landsat_with_pro
                                      prob_cols_slope_Landsat)
 df_aux_months_Landsat_2x <- calculate_df_aux(filtered_data_months_Landsat_with_probs_2x,
                                      prob_cols_months_Landsat)
-df_aux_2_Landsat_2x <- calculate_df_aux(filtered_data_2_Landsat_with_probs_2x,
-                                     prob_cols_2_Landsat)
 ```
 
 #### Apply filtering function
@@ -786,9 +701,6 @@ df_final_20_10_slope_Landsat_2x <- df_aux_slope_Landsat_2x %>%
 df_final_20_10_months_Landsat_2x <- df_aux_months_Landsat_2x %>%
   group_split(original_EUNIS) %>%
   map_dfr(filter_probs_neg20)
-df_final_20_10_2_Landsat_2x <- df_aux_2_Landsat_2x %>%
-  group_split(original_EUNIS) %>%
-  map_dfr(filter_probs_neg20)
 ```
 
 ```{r eval=FALSE, include=FALSE}
@@ -796,23 +708,20 @@ filtered_data_20_10_slope_Landsat_probs_2x <- filtered_data_slope_Landsat %>%
   dplyr::filter(PlotObservationID %in% df_final_20_10_slope_Landsat_2x$PlotObservationID)
 filtered_data_20_10_months_Landsat_probs_2x <- filtered_data_months_Landsat %>%
   dplyr::filter(PlotObservationID %in% df_final_20_10_months_Landsat_2x$PlotObservationID)
-filtered_data_20_10_2_Landsat_probs_2x <- filtered_data_2_Landsat %>%
-  dplyr::filter(PlotObservationID %in% df_final_20_10_2_Landsat_2x$PlotObservationID)
 ```
 
 ### Save
 
 ```{r}
 filtered_data_with_probs_2x <- c("filtered_data_20_10_slope_Landsat_probs_2x", 
-                              "filtered_data_20_10_months_Landsat_probs_2x",
-                              "filtered_data_20_10_2_Landsat_probs_2x")
+                              "filtered_data_20_10_months_Landsat_probs_2x")
 ```
 
 Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (filtered_data_name in filtered_data_with_probs_2x) {
-  file_path <- paste0("objects/RF_1500_20260318/", filtered_data_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260608/", filtered_data_name, ".Rdata")
   save(list = filtered_data_name, file = file_path)
 }
 ```
@@ -826,9 +735,6 @@ compare_classes(filtered_data_slope_Landsat,
 compare_classes(filtered_data_months_Landsat, 
                 filtered_data_20_10_months_Landsat_probs,
                 filtered_data_20_10_months_Landsat_probs_2x)
-compare_classes(filtered_data_2_Landsat, 
-                filtered_data_20_10_2_Landsat_probs,
-                filtered_data_20_10_2_Landsat_probs_2x)
 ```
 
 ##### (Appendix 6)
@@ -886,16 +792,6 @@ test_data_20_10_2x_months_Landsat <- split_data_20_10_2x_months_Landsat$test
 
 # Check overlap between training and testing datasets
 sum(train_data_20_10_2x_months_Landsat$PlotObservationID %in% test_data_20_10_2x_months_Landsat$PlotObservationID)
-
-# 2
-set.seed(123)
-split_data_20_10_2x_2_Landsat <- split_train_test(filtered_data_20_10_2_Landsat_probs_2x)
-
-train_data_20_10_2x_2_Landsat <- split_data_20_10_2x_2_Landsat$train
-test_data_20_10_2x_2_Landsat <- split_data_20_10_2x_2_Landsat$test
-
-# Check overlap between training and testing datasets
-sum(train_data_20_10_2x_2_Landsat$PlotObservationID %in% test_data_20_10_2x_2_Landsat$PlotObservationID)
 ```
 
 #### Fit models
@@ -907,22 +803,18 @@ rf_slope_Landsat_refin_20_10_2x <- run_rf_parallel(vars_RF_slope_Landsat,
 rf_months_Landsat_refin_20_10_2x <- run_rf_parallel(vars_RF_months_Landsat,
                                         train_data_20_10_2x_months_Landsat, 
                                         "EUNIS1", ntree = 1500)
-rf_2_Landsat_refin_20_10_2x <- run_rf_parallel(vars_RF_2_Landsat,
-                                        train_data_20_10_2x_2_Landsat, 
-                                        "EUNIS1", ntree = 1500)
 ```
 
 ```{r}
 models_refin_20_10_2x <- c("rf_slope_Landsat_refin_20_10_2x", 
-                           "rf_months_Landsat_refin_20_10_2x",
-                           "rf_2_Landsat_refin_20_10_2x")
+                           "rf_months_Landsat_refin_20_10_2x")
 ```
 
 Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (model_name in models_refin_20_10_2x) {
-  file_path <- paste0("objects/RF_1500_20260318/", model_name, "_model.Rdata")
+  file_path <- paste0("objects/RF_1500_20260608/", model_name, "_model.Rdata")
   save(list = model_name, file = file_path)
 }
 ```
@@ -953,15 +845,14 @@ for (model_name in models_refin_20_10_2x) {
 
 ```{r}
 predictions_refin_20_10_2x <- c("rf_slope_Landsat_refin_20_10_2x_prediction",
-                                "rf_months_Landsat_refin_20_10_2x_prediction",
-                                "rf_2_Landsat_refin_20_10_2x_prediction")
+                                "rf_months_Landsat_refin_20_10_2x_prediction")
 ```
 
 Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (prediction_name in predictions_refin_20_10_2x) {
-  file_path <- paste0("objects/RF_1500_20260318/", prediction_name, ".Rdata")
+  file_path <- paste0("objects/RF_1500_20260608/", prediction_name, ".Rdata")
   save(list = prediction_name, file = file_path)
   }
 ```
@@ -1017,7 +908,7 @@ varimp_months_Landsat_step2 <-
 
 ```{r eval=FALSE, include=FALSE}
 save(varimp_months_Landsat_step2,
-     file = "objects/varimp_months_Landsat_step2.Rdata")
+     file = "objects/RF_1500_20260608/varimp_months_Landsat_step2.Rdata")
 ```
 
 ```{r}
@@ -1084,7 +975,7 @@ rocdata_months_Landsat_step2 <-
 
 ```{r eval=FALSE, include=FALSE}
 save(rocdata_months_Landsat_step2,
-     file = "objects/RF_1500_ROC/rocdata_months_Landsat_step2.Rdata")
+     file = "objects/RF_1500_20260608/rocdata_months_Landsat_step2.Rdata")
 ```
 
 ```{r}
@@ -1097,15 +988,15 @@ ggplot(rocdata_months_Landsat_step2$roc, aes(x = FPR, y = TPR, color = Class)) +
        color = "Class (AUC)") +
   scale_color_manual(
     values = c(
-      "Q (AUC = 0.923)" = "#0072B2",
-      "R (AUC = 0.98)" = "#D55E00",
-      "S (AUC = 0.968)" = "#009E73",
+      "Q (AUC = 0.915)" = "#0072B2",
+      "R (AUC = 0.978)" = "#D55E00",
+      "S (AUC = 0.967)" = "#009E73",
       "T (AUC = 0.997)" = "#CC79A7"
     ),
     labels = c(
-      "Q (AUC = 0.923)" = "Q – Wetlands (AUC = 0.923)",
-      "R (AUC = 0.98)" = "R – Grasslands (AUC = 0.980)",
-      "S (AUC = 0.968)" = "S – Scrublands (AUC = 0.968)",
+      "Q (AUC = 0.915)" = "Q – Wetlands (AUC = 0.915)",
+      "R (AUC = 0.978)" = "R – Grasslands (AUC = 0.978)",
+      "S (AUC = 0.967)" = "S – Scrublands (AUC = 0.967)",
       "T (AUC = 0.997)" = "T – Forests (AUC = 0.997)"
     )
   ) +
@@ -1116,25 +1007,38 @@ ggsave(here("output", "figures", "manuscript", "appendix8.jpeg"),
 ```
 
 
-
-
-
 # N obs
 
-## N obs with metrics extracted
+## N obs with RS metrics extracted
 
 ```{r}
-data_validation_Landsat %>%
-  filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
+data_validation_Landsat %>% 
+  dplyr::filter(year >= 1984) %>% 
+  left_join(
+    ReSurvey_data %>% mutate(PlotObservationID = as.numeric(PlotObservationID))
+    ) %>%
+  mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_")) %>%
+  # Add if N-to-N
+  mutate(n_to_n = plotID_AV %in% n_to_n) %>%
+  # Exclude N-to-N
+  dplyr::filter(n_to_n == FALSE) %>%
+  dplyr::filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
   nrow()
 ```
 
-## N obs after data filtering
+## N obs after data cleaning - FULL DATASETS
 
 ```{r}
 # Landsat slope
 data_validation_Landsat %>%
-  filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
+  dplyr::filter(year >= 1984) %>% 
+  left_join(ReSurvey_data) %>%
+  mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_")) %>%
+  # Add if N-to-N
+  mutate(n_to_n = plotID_AV %in% n_to_n) %>%
+  # Exclude N-to-N
+  dplyr::filter(n_to_n == FALSE) %>%
+  dplyr::filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
   # Data filtering
   # Remove rows with missing values in predictors
   dplyr::filter(if_all(all_of(vars_RF_slope_Landsat), ~ !is.na(.))) %>%
@@ -1147,19 +1051,26 @@ data_validation_Landsat %>%
   dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
   dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
   dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
-   # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
   # Select only variables needed
   dplyr::select(PlotObservationID, EUNIS1, all_of(vars_RF_slope_Landsat), 
                 Lctnmth) %>%
   # Keep only rows with differences > 0 in variables
-  filter(if_all(any_of(vars_RF_slope_Landsat[grepl("diff", 
+  dplyr::filter(if_all(any_of(vars_RF_slope_Landsat[grepl("diff", 
                                                    vars_RF_slope_Landsat)]), 
                 ~ .x > 0)) %>%
+  # Rough validation based on NDWI
+  rough_validation_Landsat() %>%
   nrow()
 # Landsat months
 data_validation_Landsat %>%
-  filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
+  dplyr::filter(year >= 1984) %>% 
+  left_join(ReSurvey_data) %>%
+  mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_")) %>%
+  # Add if N-to-N
+  mutate(n_to_n = plotID_AV %in% n_to_n) %>%
+  # Exclude N-to-N
+  dplyr::filter(n_to_n == FALSE) %>%
+  dplyr::filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
   # Data filtering
   # Remove rows with missing values in predictors
   dplyr::filter(if_all(all_of(vars_RF_months_Landsat), ~ !is.na(.))) %>%
@@ -1172,123 +1083,12 @@ data_validation_Landsat %>%
   dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
   dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
   dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
-   # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
   # Select only variables needed
   dplyr::select(PlotObservationID, EUNIS1, all_of(vars_RF_months_Landsat), 
                 Lctnmth) %>%
   # Keep only rows with differences > 0 in variables
-  filter(if_all(any_of(vars_RF_months_Landsat[grepl("diff", 
+  dplyr::filter(if_all(any_of(vars_RF_months_Landsat[grepl("diff", 
                                                    vars_RF_months_Landsat)]), 
-                ~ .x > 0)) %>%
-  nrow()
-# Landsat 2
-data_validation_Landsat %>%
-  filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
-  # Data filtering
-  # Remove rows with missing values in predictors
-  dplyr::filter(if_all(all_of(vars_RF_2_Landsat), ~ !is.na(.))) %>%
-  # Remove all rows with wrong values of indices (not between -1 and 1)
-  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
-  # With Landsat data, many observations removed because of high/low EVI values
-  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
-  # so better not to use EVI here
-  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
-  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
-  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
-  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
-   # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
-  # Select only variables needed
-  dplyr::select(PlotObservationID, EUNIS1, all_of(vars_RF_2_Landsat), 
-                Lctnmth) %>%
-  # Keep only rows with differences > 0 in variables
-  filter(if_all(any_of(vars_RF_2_Landsat[grepl("diff", 
-                                                   vars_RF_2_Landsat)]), 
-                ~ .x > 0)) %>%
-  nrow()
-```
-
-## N obs after rough validation
-
-```{r}
-# Landsat slope
-data_validation_Landsat %>%
-  filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
-  # Data filtering
-  # Remove rows with missing values in predictors
-  dplyr::filter(if_all(all_of(vars_RF_slope_Landsat), ~ !is.na(.))) %>%
-  # Remove all rows with wrong values of indices (not between -1 and 1)
-  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
-  # With Landsat data, many observations removed because of high/low EVI values
-  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
-  # so better not to use EVI here
-  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
-  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
-  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
-  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
-  # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
-  # Select only variables needed
-  dplyr::select(PlotObservationID, EUNIS1, all_of(vars_RF_slope_Landsat), 
-                Lctnmth) %>%
-  # Keep only rows with differences > 0 in variables
-  filter(if_all(any_of(vars_RF_slope_Landsat[grepl("diff", 
-                                                   vars_RF_slope_Landsat)]), 
-                ~ .x > 0)) %>%
-  # Rough validation based on NDWI
-  rough_validation_Landsat() %>%
-  nrow()
-# Landsat months
-data_validation_Landsat %>%
-  filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
-  # Data filtering
-  # Remove rows with missing values in predictors
-  dplyr::filter(if_all(all_of(vars_RF_months_Landsat), ~ !is.na(.))) %>%
-  # Remove all rows with wrong values of indices (not between -1 and 1)
-  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
-  # With Landsat data, many observations removed because of high/low EVI values
-  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
-  # so better not to use EVI here
-  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
-  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
-  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
-  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
-   # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
-  # Select only variables needed
-  dplyr::select(PlotObservationID, EUNIS1, all_of(vars_RF_months_Landsat), 
-                Lctnmth) %>%
-  # Keep only rows with differences > 0 in variables
-  filter(if_all(any_of(vars_RF_months_Landsat[grepl("diff", 
-                                                   vars_RF_months_Landsat)]), 
-                ~ .x > 0)) %>%
-  # Rough validation based on NDWI
-  rough_validation_Landsat() %>%
-  nrow()
-# Landsat 2
-data_validation_Landsat %>%
-  filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
-  # Data filtering
-  # Remove rows with missing values in predictors
-  dplyr::filter(if_all(all_of(vars_RF_2_Landsat), ~ !is.na(.))) %>%
-  # Remove all rows with wrong values of indices (not between -1 and 1)
-  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
-  # With Landsat data, many observations removed because of high/low EVI values
-  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
-  # so better not to use EVI here
-  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
-  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
-  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
-  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
-   # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
-  # Select only variables needed
-  dplyr::select(PlotObservationID, EUNIS1, all_of(vars_RF_2_Landsat), 
-                Lctnmth) %>%
-  # Keep only rows with differences > 0 in variables
-  filter(if_all(any_of(vars_RF_2_Landsat[grepl("diff", 
-                                                   vars_RF_2_Landsat)]), 
                 ~ .x > 0)) %>%
   # Rough validation based on NDWI
   rough_validation_Landsat() %>%
@@ -1300,66 +1100,150 @@ data_validation_Landsat %>%
 ```{r}
 # Landsat slope
 data_validation_Landsat %>%
-  filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
-  # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
+  dplyr::filter(year >= 1984) %>% 
+  left_join(ReSurvey_data) %>%
+  mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_")) %>%
+  # Add if N-to-N
+  mutate(n_to_n = plotID_AV %in% n_to_n) %>%
+  # Exclude N-to-N
+  dplyr::filter(n_to_n == FALSE) %>%
+  dplyr::filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_slope_Landsat), ~ !is.na(.))) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+  # With Landsat data, many observations removed because of high/low EVI values
+  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
+  # so better not to use EVI here
+  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNIS1, all_of(vars_RF_slope_Landsat), 
+                Lctnmth) %>%
+  # Keep only rows with differences > 0 in variables
+  dplyr::filter(if_all(any_of(vars_RF_slope_Landsat[grepl("diff", 
+                                                   vars_RF_slope_Landsat)]), 
+                ~ .x > 0)) %>%
   # Rough validation based on NDWI
-  rough_validation_Landsat() %>% 
-  filter_data_Landsat(vars_RF_slope_Landsat) %>% 
+  rough_validation_Landsat() %>%
+  # Select only GPS points
+  dplyr::filter(Lctnmth == "Location with GPS" | 
+                  Lctnmth == "Location with differential GPS") %>%
   nrow()
 # Landsat months
 data_validation_Landsat %>%
-  filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
-  # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
+  dplyr::filter(year >= 1984) %>% 
+  left_join(ReSurvey_data) %>%
+  mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_")) %>%
+  # Add if N-to-N
+  mutate(n_to_n = plotID_AV %in% n_to_n) %>%
+  # Exclude N-to-N
+  dplyr::filter(n_to_n == FALSE) %>%
+  dplyr::filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_months_Landsat), ~ !is.na(.))) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+  # With Landsat data, many observations removed because of high/low EVI values
+  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
+  # so better not to use EVI here
+  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNIS1, all_of(vars_RF_months_Landsat), 
+                Lctnmth) %>%
+  # Keep only rows with differences > 0 in variables
+  dplyr::filter(if_all(any_of(vars_RF_months_Landsat[grepl("diff", 
+                                                   vars_RF_months_Landsat)]), 
+                ~ .x > 0)) %>%
   # Rough validation based on NDWI
-  rough_validation_Landsat() %>% 
-  filter_data_Landsat(vars_RF_months_Landsat) %>% 
-  nrow()
-# Landsat 2
-data_validation_Landsat %>%
-  filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
-  # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
-  # Rough validation based on NDWI
-  rough_validation_Landsat() %>% 
-  filter_data_Landsat(vars_RF_2_Landsat) %>% 
+  rough_validation_Landsat() %>%
+  # Select only GPS points
+  dplyr::filter(Lctnmth == "Location with GPS" | 
+                  Lctnmth == "Location with differential GPS") %>%
   nrow()
 ```
 
-## N obs after NDVI-filtering
+## N obs after NDVI-filtering - TRAINING DATASETS
 
 ```{r}
 # Landsat slope
 data_validation_Landsat %>%
-  filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
-  # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
+  dplyr::filter(year >= 1984) %>% 
+  left_join(ReSurvey_data) %>%
+  mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_")) %>%
+  # Add if N-to-N
+  mutate(n_to_n = plotID_AV %in% n_to_n) %>%
+  # Exclude N-to-N
+  dplyr::filter(n_to_n == FALSE) %>%
+  dplyr::filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_slope_Landsat), ~ !is.na(.))) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+  # With Landsat data, many observations removed because of high/low EVI values
+  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
+  # so better not to use EVI here
+  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNIS1, all_of(vars_RF_slope_Landsat), 
+                Lctnmth) %>%
+  # Keep only rows with differences > 0 in variables
+  dplyr::filter(if_all(any_of(vars_RF_slope_Landsat[grepl("diff", 
+                                                   vars_RF_slope_Landsat)]), 
+                ~ .x > 0)) %>%
   # Rough validation based on NDWI
-  rough_validation_Landsat() %>% 
-  filter_data_Landsat(vars_RF_slope_Landsat) %>% 
+  rough_validation_Landsat() %>%
+  # Select only GPS points
+  dplyr::filter(Lctnmth == "Location with GPS" | 
+                  Lctnmth == "Location with differential GPS") %>%
   # From GPS points, filter based on NDVI percentiles
   filter_by_group_percentiles("NDVI_pos_value") %>% 
   nrow()
 # Landsat months
 data_validation_Landsat %>%
-  filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
-  # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
+  dplyr::filter(year >= 1984) %>% 
+  left_join(ReSurvey_data) %>%
+  mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_")) %>%
+  # Add if N-to-N
+  mutate(n_to_n = plotID_AV %in% n_to_n) %>%
+  # Exclude N-to-N
+  dplyr::filter(n_to_n == FALSE) %>%
+  dplyr::filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
+  # Data filtering
+  # Remove rows with missing values in predictors
+  dplyr::filter(if_all(all_of(vars_RF_months_Landsat), ~ !is.na(.))) %>%
+  # Remove all rows with wrong values of indices (not between -1 and 1)
+  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+  # With Landsat data, many observations removed because of high/low EVI values
+  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
+  # so better not to use EVI here
+  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
+  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+  # Select only variables needed
+  dplyr::select(PlotObservationID, EUNIS1, all_of(vars_RF_months_Landsat), 
+                Lctnmth) %>%
+  # Keep only rows with differences > 0 in variables
+  dplyr::filter(if_all(any_of(vars_RF_months_Landsat[grepl("diff", 
+                                                   vars_RF_months_Landsat)]), 
+                ~ .x > 0)) %>%
   # Rough validation based on NDWI
-  rough_validation_Landsat() %>% 
-  filter_data_Landsat(vars_RF_months_Landsat) %>% 
-  # From GPS points, filter based on NDVI percentiles
-  filter_by_group_percentiles("NDVI_pos_value") %>% 
-  nrow()
-# Landsat 2
-data_validation_Landsat %>%
-  filter(if_any(c(2:80, 84:116), ~ !is.na(.))) %>%
-  # Join ReSurvey data to get Location method
-  left_join(ReSurvey_data %>% select(PlotObservationID, Lctnmth)) %>%
-  # Rough validation based on NDWI
-  rough_validation_Landsat() %>% 
-  filter_data_Landsat(vars_RF_2_Landsat) %>% 
+  rough_validation_Landsat() %>%
+  # Select only GPS points
+  dplyr::filter(Lctnmth == "Location with GPS" | 
+                  Lctnmth == "Location with differential GPS") %>%
   # From GPS points, filter based on NDVI percentiles
   filter_by_group_percentiles("NDVI_pos_value") %>% 
   nrow()

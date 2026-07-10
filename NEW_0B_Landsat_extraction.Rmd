@@ -1,6 +1,5 @@
 ---
 title: "Script to work with Landsat bands derived from GEE"
-subtitle: "Read and manipulation data, calculate indices"
 author: "Alicia Valdés"
 date: "`r format(Sys.time(), '%d %B %Y')`"
 output:
@@ -32,8 +31,8 @@ library(pracma)
 # Load functions
 
 ```{r}
-knitr::purl("functions_20260225.Rmd", output = "functions_20260225.R")
-source("functions_20260225.R")
+knitr::purl("functions_20260611.Rmd", output = "functions_20260611.R")
+source("functions_20260611.R")
 ```
 
 # Supress package messages
@@ -58,8 +57,10 @@ load(file = "objects/monthly_avg_indices_Landsat.Rdata")
 
 ```{r}
 ReSurvey_data <- read_csv(
-  here("data", "clean", "ReSurvey_QRST_data_V2025.2_20260304.csv")) %>%
-  select(PlotObservationID, EUNIS1, EUNIS2) %>%
+   here("data", "clean","ReSurvey_QRST_data_V2025.2_20260618.csv")) %>%
+  select(PlotObservationID, RS_CODE, `ReSurvey site`, `ReSurvey plot`, EUNIS1, 
+         EUNIS2, `Location method`,  year, Lon_updated, Lat_updated,
+         EUNIS_assignation, PB_method) %>%
   mutate(PlotObservationID = factor(PlotObservationID),
          EUNIS1 = factor(EUNIS1), EUNIS2 = factor(EUNIS2))
 ```
@@ -441,7 +442,11 @@ plan(sequential)
 ## Number of plot observations with less than 10 DOYs
 
 ```{r}
-data_RS_Landsat_bands_indices %>% 
+data_RS_Landsat_bands_indices %>%
+  dplyr::filter(PlotObservationID %in% 
+                  (ReSurvey_data %>%
+                     distinct(PlotObservationID) %>%
+                     pull(PlotObservationID))) %>%
   count(PlotObservationID) %>% 
   dplyr::filter(n < 10) %>% 
   nrow()
@@ -483,273 +488,6 @@ Save as an object:
 
 ```{r eval=FALSE, include=FALSE}
 save(monthly_avg_indices, file = "objects/monthly_avg_indices_Landsat.Rdata")
-```
-
-## Assess time series quality
-
-For the time series to be acceptable, it should have a reasonable number of time points, and these points should be distributed along almost all months (could be ok to miss the winter months).
-
-In GAM data, check how many time points are there for each PlotObservationID, how many months, and which months are missing.
-
-```{r}
-ts_quality <- GAM_data %>%
-  # Filter only NDVI (all indices will have the same time points)
-  dplyr::filter(index == "NDVI") %>%
-  # Get month from DOY
-  mutate(month = month(ymd("2020-01-01") + days(DOY - 1))) %>%
-  # For each PlotObservationID
-  group_by(PlotObservationID) %>%
-  # Get the number of time points (days) and the number of months
-  summarise(
-    n_days = n_distinct(DOY),
-    n_months = n_distinct(month),
-    .groups = "drop"
-  ) %>%
-  left_join(GAM_data %>%
-              # Filter only NDVI
-              dplyr::filter(index == "NDVI") %>%
-              # Get month from DOY
-              mutate(month = month(ymd("2020-01-01") + days(DOY - 1))) %>%
-              # Get unique values of PlotObservationID and month
-              distinct(PlotObservationID, month) %>%
-              # Add 1 as value
-              mutate(value = 1) %>%
-              # Reshape to wide format and add zeros when month is missing
-              pivot_wider(
-                names_from = month,
-                names_prefix = "month",
-                values_from = value,
-                values_fill = 0),
-            by = "PlotObservationID")
-```
-
-Histograms time points and n months:
-
-```{r}
-ggplot(ts_quality, aes(x = n_days)) +
-  geom_histogram(color = "black", fill = "white") +
-  xlab("Number of time points (days) in the Landsat time series") +
-  theme_minimal()
-ggplot(ts_quality, aes(x = n_months)) +
-  geom_histogram(color = "black", fill = "white") +
-  xlab("Number of months in the Landsat time series") +
-  theme_minimal()
-```
-
-Count how many PlotObservationIDs have missing data (value 0) for each month:
-
-```{r}
-obs_missing_month <- ts_quality %>%
-  summarise(across(starts_with("month"), ~ sum(.x == 0))) %>%
-  pivot_longer(cols = everything(), names_to = "month", values_to = "nobs_missing")
-
-ggplot(obs_missing_month %>%
-         mutate(month = factor(month, levels = paste0("month", 1:12))), 
-       aes(x = month, y = nobs_missing)) + geom_bar(stat = "identity") +
-  ylab("Number of PlotObservationID with missing data") +
-  ggtitle("Missing data in Landsat time series") +
-  theme_minimal()
-```
-
-Add quality flag:
-
-```{r}
-ts_quality_flag <- ts_quality %>%
-  rowwise() %>%
-  mutate(
-    #  If 2 consecutive months of the period March-October are missing
-    # quality_flag = 0
-    quality_flag = {
-      months <- c_across(month3:month10)
-      if (any(months[-length(months)] == 0 & months[-1] == 0)) 0 else 1
-    }
-  ) %>%
-  ungroup()
-```
-
-```{r}
-ts_quality_flag %>% count(quality_flag)
-```
-
-## Boxplot comparing moments for different indices
-
-```{r}
-GAM_data %>% 
-  select(PlotObservationID, index, sos_slope, pos, eos_slope) %>% 
-  distinct() %>%
-  pivot_longer(cols = c(sos_slope, pos, eos_slope),
-               names_to = "moment", values_to = "value") %>%
-  ggplot(aes(x = moment, y = value, fill = index)) + geom_boxplot() +
-  theme_minimal()
-```
-
-## Plot fit and moments for each PlotObservationID
-
-### Quality = 1
-
-```{r}
-# Get unique IDs with quality_flag == 1
-ids_q1 <- ts_quality_flag %>%
-  dplyr::filter(quality_flag == 1) %>%
-  mutate(PlotObservationID = droplevels(PlotObservationID)) %>%
-  pull(PlotObservationID)
-GAM_data_ids_q1 <- GAM_data %>%
-  # Join to get biogeo and unit
-  left_join(data_RS_Landsat_bands_indices %>%
-              select(PlotObservationID, biogeo, unit) %>%
-              distinct()) %>%
-  # Join to get EUNIS info
-   left_join(ReSurvey_data %>%
-               select(PlotObservationID, EUNIS1, EUNIS2)) %>%
-  # Join to get original values of indices
-  left_join(data_RS_Landsat_bands_indices %>%
-              select(PlotObservationID, DOY, NDVI, EVI, SAVI) %>%
-              pivot_longer(cols = c(NDVI, EVI, SAVI), names_to = "index", 
-                           values_to = "value_orig")) %>%
-  # Join to get ts_quality data
-  left_join(ts_quality_flag %>% select(PlotObservationID, quality_flag)) %>%
-  # Keep only those with quality_flag == 1
-  dplyr::filter(quality_flag == 1)
-```
-
-```{r eval=FALSE, include=FALSE}
-# Get unique PlotObservationIDs
-unique_ids1 <- ids_q1[1:10]
-
-# Create and store plots in a list
-ts_plots_q1 <- map(unique_ids1, function(id) {
-  plot_data <- GAM_data_ids_q1 %>%
-    mutate(PlotObservationID = as.character(PlotObservationID)) %>%
-    dplyr::filter(PlotObservationID == id) 
-  
-  # Extract metadata for title
-  metadata <- plot_data %>%
-    select(biogeo, unit, EUNIS1, EUNIS2, quality_flag) %>%
-    distinct()
-  
-  ggplot() +
-    # Raw data points
-    geom_point(data = plot_data,aes(x = DOY, y = value_orig), alpha = 0.5) +
-    geom_line(data = plot_data, aes(x = DOY, y = value), 
-              size = 0.5, color = "blue") +
-    geom_vline(data = plot_data %>% distinct(index, sos_slope),
-               aes(xintercept = sos_slope, group = index),
-               linetype = "dashed", size = 0.5, color = "red") +
-    geom_vline(data = plot_data %>% distinct(index, pos),
-               aes(xintercept = pos, group = index),
-               linetype = "dotted", size = 0.5, color = "blue") +
-    geom_vline(data = plot_data %>% distinct(index, eos_slope),
-               aes(xintercept = eos_slope, group = index),
-               linetype = "dashed", size = 0.5, color = "red") +
-    facet_grid(cols = vars(index)) +
-    labs(
-      title = glue::glue("{id} | {metadata$biogeo}{metadata$unit} | {metadata$EUNIS1} | {metadata$EUNIS2} | Quality: {metadata$quality_flag}"),
-      x = "Day of Year",
-      y = "Index Value"
-    ) +
-    theme_minimal() + theme(legend.position = "top")
-})
-
-# Name the list by PlotObservationID
-names(ts_plots_q1) <- unique_ids1
-
-# Display the first plot
-ts_plots_q1[1]
-```
-
-Save each plot to a file:
-
-```{r eval=FALSE, include=FALSE}
-walk2(ts_plots_q1, seq_along(ts_plots_q1), ~ ggsave(
-  filename = paste0("C:/Analyses/MOTIVATE_validation/output/figures/phenology/ts_q1_Landsat/ts_plots_q1", .y, ".jpeg"),
-  plot = .x,
-  width = 8,
-  height = 5
-))
-```
-
-### Quality = 0
-
-```{r}
-# Get unique IDs with quality_flag == 0
-ids_q0 <- ts_quality_flag %>%
-  dplyr::filter(quality_flag == 0) %>%
-  mutate(PlotObservationID = droplevels(PlotObservationID)) %>%
-  pull(PlotObservationID)
-GAM_data_ids_q0 <- GAM_data %>%
-  # Join to get biogeo and unit
-  left_join(data_RS_Landsat_bands_indices %>%
-              select(PlotObservationID, biogeo, unit) %>%
-              distinct()) %>%
-  # Join to get EUNIS info
-   left_join(ReSurvey_data %>%
-               select(PlotObservationID, EUNIS1, EUNIS2)) %>%
-  # Join to get original values of indices
-  left_join(data_RS_Landsat_bands_indices %>%
-              select(PlotObservationID, DOY, NDVI, EVI, SAVI) %>%
-              pivot_longer(cols = c(NDVI, EVI, SAVI), names_to = "index", 
-                           values_to = "value_orig")) %>%
-  # Join to get ts_quality data
-  left_join(ts_quality_flag %>%
-              select(PlotObservationID, n_months, quality_flag)) %>%
-  # Keep only those with quality_flag == 0
-  dplyr::filter(quality_flag == 0)
-```
-
-```{r eval=FALSE, include=FALSE}
-# Get unique PlotObservationIDs
-unique_ids0 <- ids_q0[1:10]
-
-# Create and store plots in a list
-ts_plots_q0 <- map(unique_ids0, function(id) {
-  plot_data <- GAM_data_ids_q0 %>%
-    mutate(PlotObservationID = as.character(PlotObservationID)) %>%
-    dplyr::filter(PlotObservationID == id) 
-  
-  # Extract metadata for title
-  metadata <- plot_data %>%
-    select(biogeo, unit, EUNIS1, EUNIS2, quality_flag) %>%
-    distinct()
-  
-  ggplot() +
-    # Raw data points
-    geom_point(data = plot_data,aes(x = DOY, y = value_orig), alpha = 0.5) +
-    geom_line(data = plot_data, aes(x = DOY, y = value), 
-              size = 0.5, color = "blue") +
-    geom_vline(data = plot_data %>% distinct(index, sos_slope),
-               aes(xintercept = sos_slope, group = index),
-               linetype = "dashed", size = 0.5, color = "red") +
-    geom_vline(data = plot_data %>% distinct(index, pos),
-               aes(xintercept = pos, group = index),
-               linetype = "dotted", size = 0.5, color = "blue") +
-    geom_vline(data = plot_data %>% distinct(index, eos_slope),
-               aes(xintercept = eos_slope, group = index),
-               linetype = "dashed", size = 0.5, color = "red") +
-    facet_grid(cols = vars(index)) +
-    labs(
-      title = glue::glue("{id} | {metadata$biogeo}{metadata$unit} | {metadata$EUNIS1} | {metadata$EUNIS2} | Quality: {metadata$quality_flag}"),
-      x = "Day of Year",
-      y = "Index Value"
-    ) +
-    theme_minimal() + theme(legend.position = "top")
-})
-
-# Name the list by PlotObservationID
-names(ts_plots_q0) <- unique_ids0
-
-# Display the first plot
-ts_plots_q0[1]
-```
-
-Save each plot to a file:
-
-```{r eval=FALSE, include=FALSE}
-walk2(ts_plots_q0, seq_along(ts_plots_q0), ~ ggsave(
-  filename = paste0("C:/Analyses/MOTIVATE_validation/output/figures/phenology/ts_q0_Landsat/ts_plots_q0", .y, ".jpeg"),
-  plot = .x,
-  width = 8,
-  height = 5
-))
 ```
 
 # Smooth the time series of NDMI and NDWI
@@ -820,72 +558,6 @@ Save as an object:
 
 ```{r eval=FALSE, include=FALSE}
 save(smoothed_data, file = "objects/smoothed_data_Landsat.Rdata")
-```
-
-## TBD if needed: Plot fit and moments for each PlotObservationID
-
-```{r}
-smoothed_data_ids <- smoothed_data %>%
-  # Join to get biogeo and unit
-  left_join(data_RS_Landsat_bands_indices %>%
-              select(PlotObservationID, biogeo, unit) %>%
-              distinct()) %>%
-  # Join to get EUNIS info
-   left_join(ReSurvey_data %>%
-               select(PlotObservationID, EUNIS1,EUNIS2)) %>%
-  mutate(PlotObservationID = as.character(PlotObservationID))
-```
-
-```{r eval=FALSE, include=FALSE}
-# Get unique PlotObservationIDs
-unique_ids <- unique(smoothed_data_ids$PlotObservationID)[1:10]
-
-# Create and store plots in a list
-ts_plots_NDMI_NDWI<- map(unique_ids, function(id) {
-  plot_data <- smoothed_data_ids %>% 
-    dplyr::filter(PlotObservationID == id)
-  
-  # Extract metadata for title
-  metadata <- plot_data %>%
-    select(biogeo, unit, EUNIS1, EUNIS2) %>%
-    distinct()
-  
-  ggplot() +
-    # Raw data points
-     geom_point(data = data_RS_Landsat_bands_indices %>%
-                  select(PlotObservationID, DOY, NDMI, NDWI) %>%
-                  pivot_longer(cols = c(NDMI, NDWI), names_to = "index",
-                               values_to = "value") %>%
-                  filter(PlotObservationID == id),
-                aes(x = DOY, y = value), alpha = 0.6) +
-    geom_line(data = plot_data, aes(x = DOY, y = value),
-              size = 0.5, color = "blue") +
-    facet_grid(cols = vars(index)) +
-    labs(
-      title = glue::glue("{id} | {metadata$biogeo}{metadata$unit} | {metadata$EUNIS1} | {metadata$EUNIS2}"),
-      x = "Day of Year",
-      y = "Index Value"
-    ) +
-    theme_minimal() + theme(legend.position = "top")
-})
-
-# Name the list by PlotObservationID
-names(ts_plots_NDMI_NDWI) <- unique_ids
-
-# Display the first plot
-print(ts_plots_NDMI_NDWI)
-```
-
-Save each plot to a file:
-
-```{r eval=FALSE, include=FALSE}
-walk2(ts_plots_NDMI_NDWI, seq_along(ts_plots_NDMI_NDWI), ~ ggsave(
-  filename = paste0("C:/Analyses/MOTIVATE_validation/output/figures/phenology/ts_NDMI_NDWI_Landsat/ts_plots_NDVI_NDMI",
-                    .y, ".jpeg"),
-  plot = .x,
-  width = 8,
-  height = 5
-))
 ```
 
 # Get indices data (max. and min.)
@@ -974,18 +646,12 @@ final_RS_data <- full_join(
 # Add EUNIS codes
 
 ```{r}
-final_RS_data <- final_RS_data %>% left_join(ReSurvey_data) %>%
-  dplyr::filter(!is.na(EUNIS1))
-  # 1 PlotObservationID with EUNIS1 as NA because it had multiple
-  # assignations by the Expert system
+final_RS_data <- ReSurvey_data %>% left_join(final_RS_data)
 ```
 
 ```{r}
 data_RS_Landsat_bands_indices <- data_RS_Landsat_bands_indices %>%
-  left_join(ReSurvey_data) %>%
-  dplyr::filter(!is.na(EUNIS1))
-  # 1 PlotObservationID with EUNIS1 as NA because it had multiple
-  # assignations by the Expert system
+  left_join(ReSurvey_data) 
 ```
 
 # Monthly spectrophenology per habitat type
@@ -1425,30 +1091,21 @@ final_RS_data <- final_RS_data %>%
     )
 ```
 
-# Add canopy height data
-
-Read the data:
+# Add plotID, remove unneeded columns + add needed columns
 
 ```{r}
-data_RS_CH <- read_csv(
-  "C:/Data/MOTIVATE/MOTIVATE_RS_data/validation/Canopy_Height_1m/CanopyHeight_1m.csv")
-```
-
-Join:
-
-```{r}
-final_RS_data <- final_RS_data %>%
-  left_join(data_RS_CH %>% 
-              dplyr::select(PltObID, canopy_height) %>%
-              mutate(PltObID = factor(PltObID)) %>%
-              rename(PlotObservationID = PltObID))
+final_RS_data <- final_RS_data %>% 
+  mutate(plotID = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "-")) %>%
+  select(-RS_CODE, -`ReSurvey site`, -`ReSurvey plot`, -EUNIS2, 
+         -starts_with("EVI"), -matches("_(01|02|04|05|06|07|08|09|11|12)$"),
+         -biogeo, -unit)
 ```
 
 # Save to clean data
 
 ```{r}
 write_tsv(final_RS_data,
-          here("data", "clean","final_RS_data_bands_Landsat_all_20260611.csv"))
+          here("data", "clean","final_RS_data_bands_Landsat_all_20260702.csv"))
 ```
 
 # Session info

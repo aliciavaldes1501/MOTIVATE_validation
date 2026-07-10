@@ -404,10 +404,62 @@ data_validated_clean %>%
 
 # Validation of plots
 
-Extract EUNIS assignations for each plot (sometimes different among different observations of the same plot):
+## Exclude plots with N-to-N relationships
 
 ```{r}
-eunis_wide <- data_validated_clean %>%
+n_to_n <- data_validated_clean %>%
+  # Calculate number of observations for each plot and year
+  group_by(plotID_AV, year) %>% 
+  mutate(n_obs_year = n()) %>%
+  ungroup() %>%
+  group_by(plotID_AV) %>%
+  filter(any(n_obs_year > 1)) %>%
+  distinct(plotID_AV) %>%
+  pull(plotID_AV)
+```
+
+Add column n_to_n (TRUE/FALSE) to data:
+
+```{r}
+data_validated_clean <- data_validated_clean %>%
+  mutate(n_to_n = plotID_AV %in% n_to_n)
+```
+
+Exclude plots with n_to_n = TRUE:
+
+```{r}
+data_validated_clean_no_n_to_n <- data_validated_clean %>%
+  filter(n_to_n == FALSE)
+```
+
+## Validation
+
+Check that only one EUNIS1 is assigned to each plot and year:
+
+```{r}
+data_validated_clean_no_n_to_n %>%
+  group_by(plotID_AV, n_resurveys, year) %>%
+  reframe(
+    EUNISa_vals = unique(EUNIS1)) %>%
+  unnest(EUNISa_vals) %>%
+  group_by(plotID_AV, n_resurveys, year) %>%
+  mutate(EUNIS_idx = row_number()) %>%
+  pivot_wider(
+    names_from = EUNIS_idx,
+    values_from = EUNISa_vals,
+    names_prefix = "EUNIS1_"
+  ) %>%
+  ungroup() %>%
+  # Number of different EUNIS1 assigned
+  mutate(n_EUNIS1 = rowSums(!is.na(select(., starts_with("EUNIS1_"))))) %>%
+  filter(n_EUNIS1 > 1) %>%
+  nrow()
+```
+
+Extract EUNIS assignations for each plot (sometimes different among years, i.e. different observations of the same plot):
+
+```{r}
+eunis_wide <- data_validated_clean_no_n_to_n %>%
   group_by(plotID_AV, n_resurveys) %>%
   reframe(
     EUNISa_vals = unique(EUNIS1)) %>%
@@ -419,6 +471,9 @@ eunis_wide <- data_validated_clean %>%
     values_from = EUNISa_vals,
     names_prefix = "EUNIS1_"
   ) %>%
+  ungroup() %>%
+  # Number of different EUNIS1 assigned
+  mutate(n_EUNIS1 = rowSums(!is.na(select(., starts_with("EUNIS1_"))))) %>%
   # Categorize as "Habitat change" if there was more than one EUNIS assigned
   # to different observations within a plot
   mutate(EUNIS = case_when(
@@ -430,10 +485,16 @@ eunis_wide <- data_validated_clean %>%
   select(-EUNIS1_1, -EUNIS1_2, -EUNIS1_3, -EUNIS1_4)
 ```
 
+Check that the number of EUNIS assignations is never larger than the number of resurveys:
+
+```{r}
+eunis_wide %>% filter(n_EUNIS1 > n_resurveys) %>% nrow()
+```
+
 Extract the latest coordinate pair per plot (sometimes coordinates are different among different observations of the same plot):
 
 ```{r}
-coords_latest <- data_validated_clean %>%
+coords_latest <- data_validated_clean_no_n_to_n %>%
   group_by(plotID_AV, n_resurveys) %>%
   slice_max(order_by = year, n = 1, with_ties = FALSE) %>%
   select(
@@ -444,24 +505,30 @@ coords_latest <- data_validated_clean %>%
 ```
 
 ```{r}
-data_validated_plots <- data_validated_clean %>%
+data_validated_plots <- data_validated_clean_no_n_to_n %>%
   left_join(
     eunis_wide,
     by = c("plotID_AV", "n_resurveys")
   ) %>%
   group_by(plotID_AV, n_resurveys, EUNIS) %>%
   summarise(
-    n_obs = n(),
+    # Total number of observations for that plot
+    n_obs = n(), 
+    # Number of validated observations (TRUE), not validated (FALSE) and NA
     n_true = sum(valid_Landsat == TRUE, na.rm = TRUE),
     n_false = sum(valid_Landsat == FALSE, na.rm = TRUE),
     n_na = sum(is.na(valid_Landsat)),
     .groups = "drop"
   ) %>%
   mutate(
+    # Calculate shares (proportions) of validated and not validated observations 
+    # (only if there are any non-NA observations, otherwise set as NA)
     share_true = ifelse((n_true + n_false) > 0,
                         n_true / (n_true + n_false), NA_real_),
     share_false = ifelse((n_true + n_false) > 0,
-                         n_false / (n_true + n_false), NA_real_)
+                         n_false / (n_true + n_false), NA_real_),
+    # Calculate proportion of NA observations
+    prop_na = n_na/n_obs
   ) %>%
   mutate(
     valid_status = case_when(
@@ -486,24 +553,24 @@ data_validated_plots <- data_validated_clean %>%
       # FALSE dominates TRUE
       share_false > share_true & n_true > 0 ~ "more_FALSE",
 
-      # Some observations validated and some NA --> keep as all validated
+      # Some observations validated and some NA
       # TRUE + NA  --> treat as all_TRUE
-      n_true  > 0 & n_na > 0 & n_false == 0 ~ "all_TRUE",
+      n_true  > 0 & n_na > 0 & n_false == 0 ~ "TRUE_NA", 
 
-      # Some observations not validated and some NA --> keep as all not validated
+      # Some observations not validated and some NA
       # FALSE + NA --> treat as all_FALSE
-      n_false > 0 & n_na > 0 & n_true  == 0 ~ "all_FALSE",
+      n_false > 0 & n_na > 0 & n_true  == 0 ~ "FALSE_NA",
       
       # Fallback (shouldn’t happen, but safe to keep)
       TRUE ~ "mixed"
     ),
     n_resurveys_equal_n_obs = n_resurveys == n_obs
-  ) %>%
+    ) %>%
   # Less restrictive validity status
   mutate(valid_status_new = case_when(
-    valid_status == "TRUE_FALSE" ~ "tie",
-    valid_status %in% c("all_FALSE", "more_FALSE") ~ "not_valid",
-    valid_status %in% c("all_TRUE", "more_TRUE") ~ "valid",
+    valid_status %in% c("TRUE_FALSE", "more_TRUE", "more_FALSE", "FALSE_NA", "TRUE_NA") ~ "mix",
+    valid_status == "all_FALSE" ~ "not_valid",
+    valid_status == "all_TRUE" ~ "valid",
     valid_status == "all_NA" ~ NA,
     TRUE ~ "other"
   )) %>%
@@ -580,6 +647,8 @@ data_validated_plots %>%
   mutate(percent = n / sum(n) * 100)
 ```
 
+# CHANGE FROM HERE
+
 # Write csv of observations in validated plots
 
 This csv contains only information about observations in validated plots (i.e. plots with all observations validated, where valid_status == "all_TRUE", or plots with more observations validated that not validated, where valid_status == "more_TRUE").
@@ -631,7 +700,7 @@ plot_plots <- data_validated_plots %>%
     labels = function(x) {
       x <- ifelse(x == "Q", "Q - Wetlands", x)
       x <- ifelse(x == "R", "R - Grasslands", x)
-      x <- ifelse(x == "S", "S - Scrublands", x)
+      x <- ifelse(x == "S", "S - Shrublands", x)
       x <- ifelse(x == "T", "T - Forests", x)
       x <- ifelse(x == "Change", "Habitat change", x)
       x
@@ -732,7 +801,7 @@ map_grid_plots <- ggplot() +
     nrow = 3,
     ncol = 2,
     labeller = labeller(EUNIS = c("Q" = "Q - Wetlands", "R" = "R - Grasslands",
-                                   "S" = "S - Scrublands", "T" = "T - Forests",
+                                   "S" = "S - Shrublands", "T" = "T - Forests",
                                    "Change" = "Habitat change"))) +
   scale_fill_gradientn(
     colours = c("#D55E00", "#F0E442", "#0072B2"),    # orange → yellow → blue
@@ -825,7 +894,7 @@ plot_obs <- data_validated_clean %>%
     labels = function(x) {
       x <- ifelse(x == "Q", "Q - Wetlands", x)
       x <- ifelse(x == "R", "R - Grasslands", x)
-      x <- ifelse(x == "S", "S - Scrublands", x)
+      x <- ifelse(x == "S", "S - Shrublands", x)
       x <- ifelse(x == "T", "T - Forests", x)
       x
       }
@@ -896,7 +965,7 @@ map_obs_plots <- ggplot() +
     nrow = 3,
     ncol = 2,
     labeller = labeller(EUNIS1 = c("Q" = "Q - Wetlands", "R" = "R - Grasslands",
-                                   "S" = "S - Scrublands", "T" = "T - Forests"))) +
+                                   "S" = "S - Shrublands", "T" = "T - Forests"))) +
   scale_fill_gradientn(
     colours = c("#D55E00", "#F0E442", "#0072B2"),    # orange → yellow → blue
     values = rescale(c(0, 0.5, 1)),
@@ -1012,11 +1081,11 @@ plot_for_legend <- data_validated_clean %>%
   scale_fill_manual(values = c("#0072B2", "#D55E00", "#009E73", "#CC79A7"),
                     breaks = c("Q", "R", "S", "T"), 
                     labels = c("Q" = "Q - Wetlands","R" = "R - Grasslands", 
-                               "S" = "S - Scrublands", "T" = "T - Forests")) +
+                               "S" = "S - Shrublands", "T" = "T - Forests")) +
   scale_color_manual(values = c("#0072B2", "#D55E00", "#009E73", "#CC79A7"),
                      breaks = c("Q", "R", "S", "T"),
                      labels = c("Q" = "Q - Wetlands","R" = "R - Grasslands", 
-                               "S" = "S - Scrublands", "T" = "T - Forests")) +
+                               "S" = "S - Shrublands", "T" = "T - Forests")) +
   guides(fill = guide_legend(
     override.aes = list(shape = 22, size = 8, 
                         fill = c("#0072B2", "#D55E00", "#009E73", "#CC79A7"),
@@ -1150,7 +1219,7 @@ map_grid_GPS <- ggplot() +
     nrow = 2,
     ncol = 2,
     labeller = labeller(EUNIS1 = c("Q" = "Q - Wetlands", "R" = "R - Grasslands",
-                                   "S" = "S - Scrublands", "T" = "T - Forests"))) +
+                                   "S" = "S - Shrublands", "T" = "T - Forests"))) +
   scale_fill_gradientn(
     colours = c("#009E73", "#D3D3D3", "#CC79A7"),  # green → light grey → purple
     values = rescale(c(0, 0.5, 1)),

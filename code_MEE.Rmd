@@ -1,0 +1,2316 @@
+---
+title: "Spatial validation of plot locations in vegetation databases using remote sensing"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+This R script is used to validate the points in the ReSurvey database using RS indicators from Landsat (indices + phenology).
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(parallel)
+library(doParallel)
+library(foreach)
+library(partykit)
+library(caret)
+library(here)
+library(readr)
+library(progressr)
+library(party)
+library(permimp)
+library(tibble)
+library(moreparty)
+library(patchwork)
+library(scales)
+library(sf)
+library(rnaturalearth)
+library(cowplot)
+```
+
+# Load previously created objects
+
+```{r}
+# Load cross-validation objects
+lapply(list.files(here("objects", "RF_1500_cv_20260609"), full.names = TRUE), load,
+       envir = .GlobalEnv)
+```
+
+```{r}
+# Define the folder path
+folder_path <- here("objects", "validated_points_20260702")
+
+# List all .RData or .rda files in the folder
+rdata_files <- list.files(folder_path, full.names = TRUE)
+
+# Load each file
+lapply(rdata_files, load, envir = .GlobalEnv)
+```
+
+# Read initial dataset
+
+```{r}
+initial_dataset <- read_tsv(here(
+  "data", "clean","initial_dataset.csv"))
+```
+
+No parsing issues!
+
+```{r}
+nrow(initial_dataset)
+```
+
+# Define lists of predictor vars
+
+## Moments with slope method
+
+```{r}
+vars_RF_slope_Landsat <- c(
+  # Min values of all indices
+  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI and SAVI
+  "NDVI_auc", "SAVI_auc",
+  # Values of NDVI and SAVI at sos, pos and eos
+  "NDVI_sos_value", "NDVI_pos_value", "NDVI_eos_value",
+  "SAVI_sos_value", "SAVI_pos_value", "SAVI_eos_value",
+  # Differences pos-sos in value and doy
+  "NDVI_diff_pos_sos_value","SAVI_diff_pos_sos_value",
+  "NDVI_diff_pos_sos_doy", "SAVI_diff_pos_sos_doy",
+  # Differences pos-eos in value and doy
+  "NDVI_diff_pos_eos_value", "SAVI_diff_pos_eos_value",
+  "NDVI_diff_pos_eos_doy", "SAVI_diff_pos_eos_doy",
+  # Growing season duration
+  "NDVI_gsd", "SAVI_gsd")
+```
+
+## Months method
+
+```{r}
+vars_RF_months_Landsat <- c(
+  # Min values of all indices
+  "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
+  # Max values of NDMI and NDWI
+  "NDMI_max", "NDWI_max",
+  # AUC of NDVI, and SAVI between march and oct
+  "NDVI_auc_mar_oct", "SAVI_auc_mar_oct",
+  # Values of NDVI and SAVI at march, pos and oct
+  "NDVI_avg_value_03", "NDVI_pos_value", "NDVI_avg_value_10",
+  "SAVI_avg_value_03", "SAVI_pos_value", "SAVI_avg_value_10",
+  # Differences pos-march in value and doy
+  "NDVI_diff_pos_march_value", "SAVI_diff_pos_march_value",
+  "NDVI_diff_pos_march_doy", "SAVI_diff_pos_march_doy",
+  # Differences pos-oct in value and doy
+  "NDVI_diff_pos_oct_value", "SAVI_diff_pos_oct_value",
+  "NDVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy")
+```
+
+# Filter data to use in RF models
+
+## Functions
+
+### Function to get full datasets
+
+```{r}
+get_full_datasets <- function(data, variables) {
+  data %>%
+    mutate(EUNIS1 = as.factor(EUNIS1)) %>%
+    # Remove rows with missing values in predictors
+    dplyr::filter(if_all(all_of(variables), ~ !is.na(.))) %>%
+    # Remove all rows with wrong values of indices (not between -1 and 1)
+    dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+    dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+    dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+    dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+    # Keep only rows with differences > 0 in variables
+    dplyr::filter(if_all(any_of(variables[grepl("diff", variables)]), 
+                  ~ .x > 0)) %>%
+    # Filter based on max NDWI
+    mutate(valid_1_NDWI = case_when(NDWI_max > 0.3 ~ "wrong", 
+                                    TRUE ~ NA_character_),
+           valid_1_count = rowSums(across(c(valid_1_NDWI), ~ . == "wrong"), 
+                                   na.rm = TRUE),
+           valid_1 = if_else(valid_1_count > 0,
+                             "At least 1 rule broken", "No rules broken so far")
+           ) %>%
+    # Keep only rows with no rules broken
+    dplyr::filter(valid_1 == "No rules broken so far") %>%
+    # Remove unneeded cols
+    select(-starts_with("valid"))
+  }
+```
+
+### Function to get training subsets
+
+```{r}
+get_training_subsets <- function(data, variables) {
+  data %>%
+    mutate(EUNIS1 = as.factor(EUNIS1)) %>%
+    # Remove rows with missing values in predictors
+    dplyr::filter(if_all(all_of(variables), ~ !is.na(.))) %>%
+    # Remove all rows with wrong values of indices (not between -1 and 1)
+    dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+    dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+    dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+    dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+    # Keep only rows with differences > 0 in variables
+    dplyr::filter(if_all(any_of(variables[grepl("diff", variables)]), 
+                  ~ .x > 0)) %>%
+    # Filter based on max NDWI
+    mutate(valid_1_NDWI = case_when(NDWI_max > 0.3 ~ "wrong", 
+                                    TRUE ~ NA_character_),
+           valid_1_count = rowSums(across(c(valid_1_NDWI), ~ . == "wrong"), 
+                                   na.rm = TRUE),
+           valid_1 = if_else(valid_1_count > 0,
+                             "At least 1 rule broken", "No rules broken so far")
+           ) %>%
+    # Keep only rows with no rules broken
+    dplyr::filter(valid_1 == "No rules broken so far") %>%
+    # Remove unneeded cols
+    select(-starts_with("valid")) %>%
+    # Select only GPS points
+    dplyr::filter(`Location method` == "Location with GPS" | 
+                    `Location method` == "Location with differential GPS") %>%
+    # Filter based on NDVI percentiles
+    filter_by_group_percentiles("NDVI_pos_value")
+  }
+```
+
+### Function for NDVI-based filtering
+
+```{r}
+# data: your tibble/data.frame
+# y_var: name of the numeric column as a string, e.g., "NDVI_pos_value"
+filter_by_group_percentiles <- function(data, y_var) {
+  cats <- c("T","Q","R","S")
+
+  # Compute thresholds per group for the selected column
+  qs <- data %>%
+    dplyr::group_by(EUNIS1) %>%
+    dplyr::summarise(
+      p10 = stats::quantile(.data[[y_var]], probs = 0.10, na.rm = TRUE),
+      p90 = stats::quantile(.data[[y_var]], probs = 0.90, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  # Join thresholds and filter rows according to the rule
+  d_filtered <- data %>%
+    dplyr::left_join(qs, by = "EUNIS1") %>%
+    dplyr::filter(
+      dplyr::case_when(
+        EUNIS1 == "T" ~ .data[[y_var]] >= p10,        # keep >= 10% for T
+        EUNIS1 %in% c("Q","R","S") ~ .data[[y_var]] <= p90,  # keep <= 90% for Q/R/S
+        TRUE ~ TRUE
+      )
+    ) %>%
+    dplyr::select(-p10, -p90)  # drop helper columns
+
+  return(d_filtered)
+}
+```
+
+## Get full datasets and training subsets
+
+```{r}
+full_dataset_slope <- initial_dataset %>%
+  get_full_datasets(vars_RF_slope_Landsat)
+full_dataset_months <- initial_dataset %>%
+  get_full_datasets(vars_RF_months_Landsat)  
+training_subset_slope <- initial_dataset %>%
+  get_training_subsets(vars_RF_slope_Landsat)
+training_subset_months <- initial_dataset %>%
+  get_training_subsets(vars_RF_months_Landsat)
+```
+
+## N obs
+
+```{r}
+nrow(full_dataset_slope)
+nrow(full_dataset_months)
+nrow(training_subset_slope)
+nrow(training_subset_months)
+```
+
+# Random forest models with k-fold cross-validation 
+
+Using 4 folds.
+
+## Functions
+
+### Function to run CV
+
+```{r}
+run_fastcforest_cv <- function(
+    data, vars_RF, response_var,
+    ntree = 500, k = 4
+) {
+  library(party)
+  library(moreparty)
+  library(doParallel)
+  library(foreach)
+  library(parallel)
+  library(caret)
+
+  # Create folds
+  set.seed(123)
+  folds <- createFolds(data[[response_var]], k = k)
+
+  # Parallel cluster for CV
+  ncores <- max(1, detectCores() - 1)
+  cl <- makeCluster(ncores)
+  registerDoParallel(cl)
+
+  # Export needed objects
+  clusterExport(cl, c("folds", "data", "vars_RF", "response_var"), envir = environment())
+
+  # Load required packages inside workers
+  clusterEvalQ(cl, {
+    library(party)
+    library(moreparty)
+  })
+
+  results <- list()
+
+  for (i in seq_along(folds)) {
+
+    cat("\n========== Starting fold", i, "of", k, "==========\n")
+    t_start <- Sys.time()
+
+    fold_result <- foreach(j = i, .combine = rbind,
+                           .packages = c("party", "moreparty")) %dopar% {
+
+      test_idx  <- folds[[j]]
+      train_idx <- setdiff(seq_len(nrow(data)), test_idx)
+
+      train_data <- data[train_idx, ]
+      test_data  <- data[test_idx, ]
+
+      # Build formula
+      fmla <- reformulate(vars_RF, response = response_var)
+
+      # ✅ Fast parallel conditional forest from moreparty
+      model <- moreparty::fastcforest(
+        formula  = fmla,
+        data     = train_data,
+        controls = party::cforest_unbiased(
+          mtry  = round(sqrt(length(vars_RF))),
+          ntree = ntree
+        ),
+        parallel = TRUE
+      )
+
+      pred <- predict(model, newdata = test_data, type = "response")
+
+      data.frame(
+        obs  = test_data[[response_var]],
+        pred = pred,
+        fold = j
+      )
+    }
+
+    t_end <- Sys.time()
+    cat(
+      "✅ Finished fold", i, "in",
+      round(difftime(t_end, t_start, units = "mins"), 2),
+      "minutes\n"
+    )
+
+    results[[i]] <- fold_result
+  }
+
+  stopCluster(cl)
+
+  do.call(rbind, results)
+}
+```
+
+### Function to compute results from CV
+
+```{r}
+compute_rf_cv_metrics <- function(cv_results) {
+  library(caret)
+  library(pROC)
+  library(dplyr)
+  
+  # Ensure pred is factor with same levels as obs
+  cv_results$obs  <- factor(cv_results$obs)
+  cv_results$pred <- factor(cv_results$pred, levels = levels(cv_results$obs))
+  
+  classes <- levels(cv_results$obs)
+  folds   <- sort(unique(cv_results$fold))
+  
+  ## ---------------------------
+  ## 1. PER-FOLD METRICS
+  ## ---------------------------
+  fold_metrics <- lapply(folds, function(f) {
+    df <- cv_results %>% filter(fold == f)
+    
+    cm <- confusionMatrix(df$pred, df$obs)
+    
+    list(
+      fold = f,
+      accuracy = cm$overall["Accuracy"],
+      kappa    = cm$overall["Kappa"]
+    )
+  })
+  
+  fold_metrics_df <- bind_rows(lapply(fold_metrics, as.data.frame))
+  
+  ## ---------------------------
+  ## 2. OVERALL CONFUSION MATRIX
+  ## ---------------------------
+  overall_cm <- confusionMatrix(cv_results$pred, cv_results$obs)
+  
+  ## ---------------------------
+  ## 3. CLASS-WISE METRICS
+  ## ---------------------------
+  class_metrics <- data.frame(
+    class = classes,
+    users_accuracy     = overall_cm$byClass[, "Pos Pred Value"],
+    producers_accuracy = overall_cm$byClass[, "Sensitivity"],
+    balanced_accuracy  = overall_cm$byClass[, "Balanced Accuracy"]
+  )
+  
+  ## ---------------------------
+  ## 4. FINAL OUTPUT STRUCTURE
+  ## ---------------------------
+  list(
+    overall_confusion_matrix = overall_cm,
+    
+    accuracy_mean_sd = c(
+      mean = mean(fold_metrics_df$accuracy),
+      sd   = sd(fold_metrics_df$accuracy)
+    ),
+    
+    kappa_mean_sd = c(
+      mean = mean(fold_metrics_df$kappa),
+      sd   = sd(fold_metrics_df$kappa)
+    ),
+    
+    per_fold_metrics = fold_metrics_df,
+    
+    per_class_metrics = class_metrics
+  )
+}
+```
+
+## Function for fitting RF models on full dataset
+
+```{r}
+run_rf_parallel <- function(vars_RF, train_data, response_var, ntree = 500) {
+  # Build formula locally (no NSE)
+  fmla <- reformulate(vars_RF, response = response_var)
+
+  # Start cluster
+  n_cores <- max(1, parallel::detectCores() - 1)
+  cl <- parallel::makeCluster(n_cores)
+  doParallel::registerDoParallel(cl)
+
+  # Make sure packages are available on workers
+  parallel::clusterEvalQ(cl, {
+    library(party)
+  })
+
+  # Export the *data* to workers under a simple name
+  local_data <- train_data
+  parallel::clusterExport(cl, varlist = c("local_data"), envir = environment())
+
+  # Fit in parallel
+  execution_time <- system.time({
+    rf_model <- fastcforest(
+      formula  = fmla,
+      data     = local_data,   # use the exported name
+      controls = party::cforest_control(
+        mtry  = max(1, round(sqrt(length(vars_RF)))),
+        ntree = ntree,
+        # Decision trees were developed using subsampling without replacement,
+        # which is appropriate to use when predictors vary in their scale of
+        # measurement (Strobl et al., 2007).
+        replace = FALSE
+      ),
+      parallel = TRUE
+    )
+  })
+
+  parallel::stopCluster(cl)
+
+  list(model = rf_model, time = execution_time)
+}
+```
+
+## Without refinement
+
+### Landsat, slope
+
+#### CV
+
+```{r eval=FALSE, include=FALSE}
+cv_slope_Landsat <- run_fastcforest_cv(
+  data = training_subset_slope,
+  vars_RF = vars_RF_slope_Landsat,
+  response_var = "EUNIS1",
+  ntree = 1500,
+  k = 4
+)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(cv_slope_Landsat,
+     file = "objects/RF_1500_cv_20260609/cv_slope_Landsat.Rdata") 
+```
+
+##### Results
+
+```{r}
+cv_slope_Landsat_results <-
+  compute_rf_cv_metrics(cv_slope_Landsat)
+cv_slope_Landsat_results
+```
+
+#### Fit model on full dataset
+
+```{r eval=FALSE, include=FALSE}
+RF_slope_Landsat <- run_rf_parallel(vars_RF_slope_Landsat, 
+                                    training_subset_slope, 
+                                    "EUNIS1", ntree = 1500)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(RF_slope_Landsat,
+     file = "objects/RF_1500_cv_20260609/RF_slope_Landsat.Rdata") 
+```
+
+### Landsat, months
+
+#### CV
+
+```{r eval=FALSE, include=FALSE}
+cv_months_Landsat <- run_fastcforest_cv(
+  data = training_subset_months,
+  vars_RF = vars_RF_months_Landsat,
+  response_var = "EUNIS1",
+  ntree = 1500,
+  k = 4
+)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(cv_months_Landsat,
+     file = "objects/RF_1500_cv_20260609/cv_months_Landsat.Rdata") 
+```
+
+##### Results
+
+```{r}
+cv_months_Landsat_results <-
+  compute_rf_cv_metrics(cv_months_Landsat)
+cv_months_Landsat_results
+```
+
+#### Fit model on full dataset
+
+```{r eval=FALSE, include=FALSE}
+RF_months_Landsat <- run_rf_parallel(vars_RF_months_Landsat, 
+                                    training_subset_slope, 
+                                    "EUNIS1", ntree = 1500)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(RF_months_Landsat,
+     file = "objects/RF_1500_cv_20260609/RF_months_Landsat.Rdata") 
+```
+
+## Refinement step 1
+
+### Compute predictions for all data and combine with original data
+
+```{r eval=FALSE, include=FALSE}
+# Slope
+training_subset_slope_with_probs <- bind_cols(
+  training_subset_slope %>% select(PlotObservationID, EUNIS1),
+  as.data.frame(predict(RF_slope_Landsat$model, 
+                        # Predicting in all data
+                                          newdata = training_subset_slope,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(RF_slope_Landsat$model, 
+                         # Predicting in all
+                         newdata = training_subset_slope,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNIS1, prob_Q = EUNIS1.Q,
+         prob_R = EUNIS1.R, prob_S = EUNIS1.S, prob_T = EUNIS1.T)
+
+# Months
+training_subset_months_with_probs <- bind_cols(
+  training_subset_months %>% select(PlotObservationID, EUNIS1),
+  as.data.frame(predict(RF_months_Landsat$model, 
+                        # Predicting in all data
+                                          newdata = training_subset_months,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(RF_months_Landsat$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = training_subset_months,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNIS1, prob_Q = EUNIS1.Q,
+         prob_R = EUNIS1.R, prob_S = EUNIS1.S, prob_T = EUNIS1.T)
+```
+
+### Detect probability columns
+
+```{r eval=FALSE, include=FALSE}
+prob_cols_slope_Landsat <- names(training_subset_slope_with_probs)[grepl("^prob_", names(training_subset_slope_with_probs))]
+prob_cols_months_Landsat <- names(training_subset_months_with_probs)[grepl("^prob_", names(training_subset_months_with_probs))]
+```
+
+### Calculate auxiliary metrics
+
+```{r}
+calculate_df_aux <- function(data, prob_cols) {
+  data %>%
+    rowwise() %>%
+    mutate(
+      # Probability of reference (original) class
+      p_ref = get(paste0("prob_", original_EUNIS)),
+      # Maximum probability between all classes
+      max_prob = max(c_across(all_of(prob_cols)), na.rm = TRUE),
+      # Second maximum probability
+      second_max = sort(c_across(all_of(prob_cols)), decreasing = TRUE)[2],
+      # Difference between original class and second best
+      delta = p_ref - second_max,
+      # TRUE if original class is not the most probable
+      neg_flag = p_ref < max_prob,
+      # TRUE if difference is small (uncertainty)
+      small_flag = delta < 0.1,
+      # How much worse is the original class with respect to the best class
+      gap_neg = max_prob - p_ref
+    ) %>%
+    ungroup()
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+df_aux_slope_Landsat <- calculate_df_aux(training_subset_slope_with_probs,
+                                     prob_cols_slope_Landsat)
+df_aux_months_Landsat <- calculate_df_aux(training_subset_months_with_probs,
+                                     prob_cols_months_Landsat)
+```
+
+### Apply filtering function
+
+Removing negatives until 20% of the class and, if there is room, uncertain positives until 10% of the rest.
+
+```{r}
+filter_probs_neg20_pos10 <- function(gdf) {
+  # Removes negatives until 20% of the class
+  cap_total <- ceiling(0.20 * nrow(gdf))  # max 20% of the class
+
+  neg <- gdf %>% dplyr::filter(neg_flag) %>% arrange(desc(gap_neg))
+  drop_neg <- head(neg, cap_total)
+  cap_left <- cap_total - nrow(drop_neg)
+
+  drop_pos <- tibble()
+  if (cap_left > 0) {
+    remaining <- nrow(gdf) - nrow(drop_neg)
+    # If there is room, removes positives with doubts (small_flag = TRUE)
+    # until 10% of the rest
+    pos_cap <- ceiling(0.10 * remaining)
+
+    drop_pos <- gdf %>%
+      dplyr::filter(!neg_flag & small_flag) %>%
+      arrange(delta) %>%
+      slice_head(n = min(cap_left, pos_cap))
+  }
+
+  drop_ids <- c(drop_neg$PlotObservationID, drop_pos$PlotObservationID)
+  gdf %>% dplyr::filter(!PlotObservationID %in% drop_ids) %>%
+    select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+df_final_20_10_slope_Landsat <- df_aux_slope_Landsat %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20_pos10)
+df_final_20_10_months_Landsat <- df_aux_months_Landsat %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20_pos10)
+```
+
+```{r eval=FALSE, include=FALSE}
+filtered_data_20_10_slope_Landsat_probs <- training_subset_slope %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_slope_Landsat$PlotObservationID)
+filtered_data_20_10_months_Landsat_probs <- training_subset_months %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_months_Landsat$PlotObservationID)
+```
+
+### Save
+
+```{r}
+filtered_data_with_probs <- c("filtered_data_20_10_slope_Landsat_probs", 
+                              "filtered_data_20_10_months_Landsat_probs")
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (filtered_data_name in filtered_data_with_probs) {
+  file_path <- paste0("objects/RF_1500_cv_20260609/", filtered_data_name, ".Rdata")
+  save(list = filtered_data_name, file = file_path)
+}
+```
+
+### Fit models
+
+#### Landsat, slope
+
+##### CV
+
+```{r eval=FALSE, include=FALSE}
+cv_slope_Landsat_step1 <- run_fastcforest_cv(
+  data = filtered_data_20_10_slope_Landsat_probs,
+  vars_RF = vars_RF_slope_Landsat,
+  response_var = "EUNIS1",
+  ntree = 1500,
+  k = 4
+)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(cv_slope_Landsat_step1, 
+     file = "objects/RF_1500_cv_20260609/cv_slope_Landsat_step1.Rdata") 
+```
+
+##### Results
+
+```{r}
+cv_slope_Landsat_step1_results <-
+  compute_rf_cv_metrics(cv_slope_Landsat_step1)
+cv_slope_Landsat_step1_results
+```
+
+##### Fit model on full dataset
+
+```{r eval=FALSE, include=FALSE}
+RF_slope_Landsat_step1 <- run_rf_parallel(vars_RF_slope_Landsat, 
+                                          filtered_data_20_10_slope_Landsat_probs, 
+                                          "EUNIS1", ntree = 1500)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(RF_slope_Landsat_step1,
+     file = "objects/RF_1500_cv_20260609/RF_slope_Landsat_step1.Rdata") 
+```
+
+#### Landsat, months
+
+##### CV
+
+```{r eval=FALSE, include=FALSE}
+cv_months_Landsat_step1 <- run_fastcforest_cv(
+  data = filtered_data_20_10_months_Landsat_probs,
+  vars_RF = vars_RF_months_Landsat,
+  response_var = "EUNIS1",
+  ntree = 1500,
+  k = 4
+)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(cv_months_Landsat_step1, 
+     file = "objects/RF_1500_cv_20260609/cv_months_Landsat_step1.Rdata") 
+```
+
+##### Results
+
+```{r}
+cv_months_Landsat_step1_results <-
+  compute_rf_cv_metrics(cv_months_Landsat_step1)
+cv_months_Landsat_step1_results
+```
+
+##### Fit model on full dataset
+
+```{r eval=FALSE, include=FALSE}
+RF_months_Landsat_step1 <- run_rf_parallel(vars_RF_months_Landsat, 
+                                          filtered_data_20_10_months_Landsat_probs, 
+                                          "EUNIS1", ntree = 1500)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(RF_months_Landsat_step1,
+     file = "objects/RF_1500_cv_20260609/RF_months_Landsat_step1.Rdata") 
+```
+
+## Refinement step 2
+
+#### Compute predictions for all data and combine with original data
+
+```{r eval=FALSE, include=FALSE}
+# Landsat, slope
+filtered_data_slope_Landsat_with_probs_2x <- bind_cols(
+  filtered_data_20_10_slope_Landsat_probs %>% select(PlotObservationID, EUNIS1),
+  as.data.frame(predict(RF_slope_Landsat_step1$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_20_10_slope_Landsat_probs,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(RF_slope_Landsat_step1$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_20_10_slope_Landsat_probs,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNIS1, prob_Q = EUNIS1.Q,
+         prob_R = EUNIS1.R, prob_S = EUNIS1.S, prob_T = EUNIS1.T)
+
+# Landsat, months
+filtered_data_months_Landsat_with_probs_2x <- bind_cols(
+  filtered_data_20_10_months_Landsat_probs %>% select(PlotObservationID, EUNIS1),
+  as.data.frame(predict(RF_months_Landsat_step1$model, 
+                        # Predicting in all data (training + testing)
+                                          newdata = filtered_data_20_10_months_Landsat_probs,
+                      type = "response")) %>%
+    rename(predicted_EUNIS = 1),
+  do.call(rbind, predict(RF_months_Landsat_step1$model, 
+                         # Predicting in all data (training + testing)
+                         newdata = filtered_data_20_10_months_Landsat_probs,
+                      type = "prob")) %>% as.data.frame()
+  ) %>%
+  rename(original_EUNIS = EUNIS1, prob_Q = EUNIS1.Q,
+         prob_R = EUNIS1.R, prob_S = EUNIS1.S, prob_T = EUNIS1.T)
+```
+
+### Detect probability columns
+
+```{r eval=FALSE, include=FALSE}
+prob_cols_slope_Landsat <- names(filtered_data_slope_Landsat_with_probs_2x)[grepl("^prob_", names(filtered_data_slope_Landsat_with_probs_2x))]
+prob_cols_months_Landsat <- names(filtered_data_months_Landsat_with_probs_2x)[grepl("^prob_", names(filtered_data_months_Landsat_with_probs_2x))]
+```
+
+#### Calculate auxiliary metrics
+
+```{r eval=FALSE, include=FALSE}
+df_aux_slope_Landsat_2x <- calculate_df_aux(filtered_data_slope_Landsat_with_probs_2x,
+                                     prob_cols_slope_Landsat)
+df_aux_months_Landsat_2x <- calculate_df_aux(filtered_data_months_Landsat_with_probs_2x,
+                                     prob_cols_months_Landsat)
+```
+
+#### Apply filtering function
+
+```{r}
+filter_probs_neg20 <- function(gdf) {
+  # Removes negatives until 20% of the class
+  cap_total <- ceiling(0.20 * nrow(gdf))  # max 20% of the class
+
+  neg <- gdf %>% filter(neg_flag) %>% arrange(desc(gap_neg))
+  drop_neg <- head(neg, cap_total)
+  cap_left <- cap_total - nrow(drop_neg)
+
+  drop_ids <- c(drop_neg$PlotObservationID)
+  gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
+    select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+df_final_20_10_slope_Landsat_2x <- df_aux_slope_Landsat_2x %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20)
+df_final_20_10_months_Landsat_2x <- df_aux_months_Landsat_2x %>%
+  group_split(original_EUNIS) %>%
+  map_dfr(filter_probs_neg20)
+```
+
+```{r eval=FALSE, include=FALSE}
+filtered_data_20_10_slope_Landsat_probs_2x <- filtered_data_20_10_slope_Landsat_probs %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_slope_Landsat_2x$PlotObservationID)
+filtered_data_20_10_months_Landsat_probs_2x <- filtered_data_20_10_months_Landsat_probs %>%
+  dplyr::filter(PlotObservationID %in% df_final_20_10_months_Landsat_2x$PlotObservationID)
+```
+
+### Save
+
+```{r}
+filtered_data_with_probs_2x <- c("filtered_data_20_10_slope_Landsat_probs_2x", 
+                              "filtered_data_20_10_months_Landsat_probs_2x")
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (filtered_data_name in filtered_data_with_probs_2x) {
+  file_path <- paste0("objects/RF_1500_cv_20260609/", filtered_data_name, ".Rdata")
+  save(list = filtered_data_name, file = file_path)
+}
+```
+
+### Fit models
+
+#### Landsat, slope
+
+##### CV
+
+```{r eval=FALSE, include=FALSE}
+cv_slope_Landsat_step2 <- run_fastcforest_cv(
+  data = filtered_data_20_10_slope_Landsat_probs_2x,
+  vars_RF = vars_RF_slope_Landsat,
+  response_var = "EUNIS1",
+  ntree = 1500,
+  k = 4
+)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(cv_slope_Landsat_step2, 
+     file = "objects/RF_1500_cv_20260609/cv_slope_Landsat_step2.Rdata") 
+```
+
+##### Results
+
+```{r}
+cv_slope_Landsat_step2_results <-
+  compute_rf_cv_metrics(cv_slope_Landsat_step2)
+cv_slope_Landsat_step2_results
+```
+
+##### Fit model on full dataset
+
+```{r eval=FALSE, include=FALSE}
+RF_slope_Landsat_step2 <- run_rf_parallel(vars_RF_slope_Landsat, 
+                                          filtered_data_20_10_slope_Landsat_probs_2x, 
+                                          "EUNIS1", ntree = 1500)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(RF_slope_Landsat_step2,
+     file = "objects/RF_1500_cv_20260609/RF_slope_Landsat_step2.Rdata") 
+```
+
+#### Landsat, months --> BEST MODEL
+
+##### CV
+
+```{r eval=FALSE, include=FALSE}
+cv_months_Landsat_step2 <- run_fastcforest_cv(
+  data = filtered_data_20_10_months_Landsat_probs_2x,
+  vars_RF = vars_RF_months_Landsat,
+  response_var = "EUNIS1",
+  ntree = 1500,
+  k = 4
+)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(cv_months_Landsat_step2, file = "objects/RF_1500_cv_20260609/cv_months_Landsat_step2.Rdata") 
+```
+
+##### (Table 2) Results
+
+```{r}
+cv_months_Landsat_step2_results <-
+  compute_rf_cv_metrics(cv_months_Landsat_step2)
+cv_months_Landsat_step2_results
+```
+
+##### Fit model on full dataset
+
+```{r eval=FALSE, include=FALSE}
+RF_months_Landsat_step2 <- run_rf_parallel(vars_RF_months_Landsat, 
+                                          filtered_data_20_10_months_Landsat_probs_2x, 
+                                          "EUNIS1", ntree = 1500)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(RF_months_Landsat_step2,
+     file = "objects/RF_1500_cv_20260609/RF_months_Landsat_step2.Rdata") 
+```
+
+# Variable importance from best model
+
+```{r}
+compute_varimp <- function(model, nperm = 100) {
+
+  # Measure execution time
+  execution_time <- system.time({
+    varimp_result <- permimp(model, conditional = FALSE, progressBar = TRUE)
+  })
+
+  return(list(varimp = varimp_result, time = execution_time))
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+varimp_months_Landsat_step2 <-
+  compute_varimp(RF_months_Landsat_step2$model, nperm = 100)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(varimp_months_Landsat_step2,
+     file = "objects/RF_1500_cv_20260609/varimp_months_Landsat_step2.Rdata")
+```
+
+# ROC curves from best model
+
+```{r}
+compute_roc_level1 <- function(model, test_data) {
+  # Measure execution time
+  execution_time <- system.time({
+    # Step 1: Predict probabilities
+    probabilities <- predict(model, newdata = test_data, type = "prob")
+    
+    # Step 2: Convert list of matrices to a proper data frame
+    prob_matrix <- t(sapply(probabilities, as.vector))
+    prob_df <- as.data.frame(prob_matrix)
+    colnames(prob_df) <- c("Q", "R", "S", "T")
+    
+    # Step 3: Prepare actual class labels
+    actual <- factor(test_data$EUNIS1, levels = c("Q", "R", "S", "T"))
+    
+    # Step 4: Binarize actual labels
+    actual_bin <- model.matrix(~ actual - 1)
+    colnames(actual_bin) <- gsub("actual", "", colnames(actual_bin))
+    
+    # Step 5: Compute ROC data for each class
+    roc_data <- lapply(levels(actual), function(class) {
+      roc_obj <- roc(actual_bin[, class], prob_df[[class]])
+      auc_val <- round(auc(roc_obj), 3)
+      data.frame(
+        FPR = 1 - roc_obj$specificities,
+        TPR = roc_obj$sensitivities,
+        Class = paste0(class, " (AUC = ", auc_val, ")")
+      )
+    }) %>% bind_rows()
+  })
+  
+  # Return both ROC data and execution time
+  return(list(roc = roc_data, time = execution_time))
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+rocdata_months_Landsat_step2 <-
+  compute_roc_level1(RF_months_Landsat_step2$model,
+                     filtered_data_20_10_months_Landsat_probs_2x)
+```
+
+```{r eval=FALSE, include=FALSE}
+save(rocdata_months_Landsat_step2,
+     file = "objects/RF_1500_cv_20260609/rocdata_months_Landsat_step2.Rdata")
+```
+
+# Validation
+
+## Get predictions from best models 
+
+Predict in full dataset.
+
+Model with months, Landsat for predicting EVERYWHERE:
+
+```{r eval=FALSE, include=FALSE}
+prediction_Landsat_resp <- predict(RF_months_Landsat_step2$model,
+                                   newdata = full_dataset_months, 
+                                   type = "response")
+```
+
+```{r eval=FALSE, include=FALSE}
+prediction_Landsat_prob <- predict(RF_months_Landsat_step2$model,
+                                   newdata = full_dataset_months, 
+                                   type = "prob")
+```
+
+```{r}
+predictions <- c("prediction_Landsat_resp", "prediction_Landsat_prob")
+```
+
+Save:
+
+```{r eval=FALSE, include=FALSE}
+for (prediction_name in predictions) {
+  file_path <- paste0("objects/validated_points_20260630/", prediction_name, ".Rdata")
+  save(list = prediction_name, file = file_path)
+}
+```
+
+Add predictions:
+
+```{r}
+data_validated <- initial_dataset %>%
+  left_join(
+    # Predictions from model with months, Landsat
+    cbind(
+      data.frame(
+        # PlotObservationIDs
+        PlotObservationID = full_dataset_months %>% 
+          pull(PlotObservationID),
+        # Prediction response
+        pred_Landsat_resp = prediction_Landsat_resp
+        ),
+      # Prediction probabilities
+      do.call(rbind, prediction_Landsat_prob) %>% as.data.frame() %>%
+        rename(pred_Landsat_Q = EUNIS1.Q, pred_Landsat_R = EUNIS1.R,
+               pred_Landsat_S = EUNIS1.S, pred_Landsat_T = EUNIS1.T)
+      )
+  ) %>%
+  # Validated or not (Landsat)
+  mutate(valid_Landsat = ifelse(pred_Landsat_resp == EUNIS1, TRUE, 
+                                ifelse(is.na(pred_Landsat_resp), NA, FALSE)))
+```
+
+## Data preparation
+
+```{r}
+data_validated_clean <- data_validated %>%
+  # Keep only needed cols
+  select(PlotObservationID, plotID, year, EUNIS1, Lon_updated, Lat_updated, 
+         pred_Landsat_resp, pred_Landsat_Q, pred_Landsat_R, pred_Landsat_S, 
+         pred_Landsat_T, valid_Landsat) %>%
+  # Add info on nr resurveys (n different years)
+  # Some have only 1 year, either because the first year(s) were prior to 
+  # Landsat, or because they were still not resurveyed. 
+  group_by(plotID) %>%
+  mutate(
+    n_resurveys = n_distinct(year, na.rm = TRUE),   # count unique years
+    first_year  = min(year, na.rm = TRUE),          # earliest year
+    last_year   = max(year, na.rm = TRUE)           # latest year
+  ) %>%
+  ungroup()
+```
+
+## Write csv
+
+```{r}
+write_csv(data_validated_clean,
+          here("data", "clean","data_validated_clean_20260702.csv"))
+```
+
+## Counts of validated / not-validated obs
+
+### General
+
+#### From all obs
+
+```{r}
+data_validated_clean %>%
+  count(valid_Landsat) %>%
+  mutate(percent = n / sum(n) * 100)
+# Here, NAs are those obs not in the full dataset
+```
+
+#### From full dataset
+
+```{r}
+data_validated_clean %>%
+  filter(!is.na(valid_Landsat)) %>% # This keeps only those obs in the full dataset!
+  count(valid_Landsat) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+### By habitat, from full dataset
+
+```{r}
+data_validated_clean %>%
+  filter(EUNIS1 == "Q") %>%
+  filter(!is.na(valid_Landsat)) %>%
+  count(valid_Landsat) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_clean %>%
+  filter(EUNIS1 == "R") %>%
+  filter(!is.na(valid_Landsat)) %>%
+  count(valid_Landsat) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_clean %>%
+  filter(EUNIS1 == "S") %>%
+  filter(!is.na(valid_Landsat)) %>%
+  count(valid_Landsat) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_clean %>%
+  filter(EUNIS1 == "T") %>%
+  filter(!is.na(valid_Landsat)) %>%
+  count(valid_Landsat) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+## Validation of plots
+
+Check that only one EUNIS1 is assigned to each plot and year:
+
+```{r}
+data_validated_clean %>%
+  group_by(plotID, n_resurveys, year) %>%
+  reframe(
+    EUNISa_vals = unique(EUNIS1)) %>%
+  unnest(EUNISa_vals) %>%
+  group_by(plotID, n_resurveys, year) %>%
+  mutate(EUNIS_idx = row_number()) %>%
+  pivot_wider(
+    names_from = EUNIS_idx,
+    values_from = EUNISa_vals,
+    names_prefix = "EUNIS1_"
+  ) %>%
+  ungroup() %>%
+  # Number of different EUNIS1 assigned
+  mutate(n_EUNIS1 = rowSums(!is.na(select(., starts_with("EUNIS1_"))))) %>%
+  filter(n_EUNIS1 > 1) %>%
+  nrow()
+```
+
+Extract EUNIS assignations for each plot (sometimes different among years, i.e. different observations of the same plot):
+
+```{r}
+eunis_wide <- data_validated_clean %>%
+  group_by(plotID, n_resurveys) %>%
+  reframe(
+    EUNISa_vals = unique(EUNIS1)) %>%
+  unnest(EUNISa_vals) %>%
+  group_by(plotID, n_resurveys) %>%
+  mutate(EUNIS_idx = row_number()) %>%
+  pivot_wider(
+    names_from = EUNIS_idx,
+    values_from = EUNISa_vals,
+    names_prefix = "EUNIS1_"
+  ) %>%
+  ungroup() %>%
+  # Number of different EUNIS1 assigned
+  mutate(n_EUNIS1 = rowSums(!is.na(select(., starts_with("EUNIS1_"))))) %>%
+  # Categorize as "Habitat change" if there was more than one EUNIS assigned
+  # to different observations within a plot
+  mutate(EUNIS = case_when(
+    is.na(EUNIS1_2) & is.na(EUNIS1_3) & is.na(EUNIS1_4) ~ EUNIS1_1,
+    TRUE ~ "Change"
+    )) %>%
+  ungroup() %>%
+  # Remove unneeded cols
+  select(-EUNIS1_1, -EUNIS1_2, -EUNIS1_3, -EUNIS1_4)
+```
+
+Check that the number of EUNIS assignations is never larger than the number of resurveys:
+
+```{r}
+eunis_wide %>% filter(n_EUNIS1 > n_resurveys) %>% nrow()
+```
+
+Extract the latest coordinate pair per plot (sometimes coordinates are different among different observations of the same plot):
+
+```{r}
+coords_latest <- data_validated_clean %>%
+  group_by(plotID, n_resurveys) %>%
+  slice_max(order_by = year, n = 1, with_ties = FALSE) %>%
+  select(
+    plotID, n_resurveys, Lon_updated, Lat_updated
+  ) %>%
+  ungroup()
+```
+
+```{r}
+PlotObservationIDs_full_dataset <- full_dataset_months %>% pull(PlotObservationID)
+data_validated_clean <- data_validated_clean %>%
+  mutate(in_full_dataset = ifelse(
+    PlotObservationID %in% PlotObservationIDs_full_dataset, TRUE, FALSE))
+```
+
+```{r}
+data_validated_plots <- data_validated_clean %>%
+  left_join(
+    eunis_wide,
+    by = c("plotID", "n_resurveys")
+  ) %>%
+  group_by(plotID, n_resurveys, EUNIS) %>%
+  summarise(
+    # Total number of observations for that plot
+    n_obs = n(), 
+    # Number of validated observations, not validated and NA
+    n_val = sum(valid_Landsat == TRUE, na.rm = TRUE),
+    n_notval = sum(valid_Landsat == FALSE, na.rm = TRUE),
+    n_na = sum(is.na(valid_Landsat)),
+    # N obs in full dataset
+    n_in_full = sum(in_full_dataset),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # Calculate shares (proportions) of validated and not validated observations 
+    # (only if there are any non-NA observations, otherwise set as NA)
+    share_val = ifelse((n_val + n_notval) > 0,
+                        n_val / (n_val + n_notval), NA_real_),
+    share_notval = ifelse((n_val + n_notval) > 0,
+                         n_notval / (n_val + n_notval), NA_real_),
+    # Calculate proportion of NA observations
+    prop_na = n_na/n_obs,
+    # Calculate proportion of obs in full dataset
+    prop_in_full = n_in_full / n_obs
+  )
+```
+
+```{r}
+cat("\nPlots with no observations in full dataset",
+    data_validated_plots %>% filter(prop_in_full == 0) %>% nrow()) # --> Plot cannot be validated - NA
+cat("\nPlots with all observations in full dataset",
+    data_validated_plots %>% filter(prop_in_full == 1) %>% nrow()) # --> Plot can be validated
+cat("\nPlots with some observations in full dataset and some not",
+    data_validated_plots %>% filter(prop_in_full > 0 & prop_in_full < 1) %>% nrow()) # --> Plot cannot be validated - NA
+```
+
+```{r}
+data_validated_plots <- data_validated_plots %>%
+  mutate(valid_status = case_when(
+    prop_in_full == 0 ~ NA,                           # Plots with no observations in full dataset
+    prop_in_full > 0 & prop_in_full < 1 ~ NA,         # Plots with some observations in full dataset and some not
+    prop_in_full == 1 & share_val == 1 ~ "valid",     # Plots with all observations in full dataset
+    prop_in_full == 1 & share_val != 1 ~ "not_valid"  # Plots with all observations in full dataset
+  )) %>%
+  # Add coordinates (if coordinates are different among different observations 
+  # of the same plot, extract the latest coordinate pair per plot, i.e. from
+  # the last observation year)
+  left_join(coords_latest, by = c("plotID", "n_resurveys"))
+```
+
+## Counts of validated / not-validated plots
+
+### General
+
+#### All plots
+
+```{r}
+data_validated_plots %>%
+  count(valid_status) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+#### Plots with all obs in full dataset
+
+```{r}
+data_validated_plots %>%
+  filter(!is.na(valid_status)) %>%
+  count(valid_status) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+### By habitat, plots with all obs in full dataset
+
+```{r}
+data_validated_plots %>%
+  filter(EUNIS == "Q") %>%
+  filter(!is.na(valid_status)) %>%
+  count(valid_status) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_plots %>%
+  filter(EUNIS == "R") %>%
+  filter(!is.na(valid_status)) %>%
+  count(valid_status) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_plots %>%
+  filter(EUNIS == "S") %>%
+  filter(!is.na(valid_status)) %>%
+  count(valid_status) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_plots %>%
+  filter(EUNIS == "T") %>%
+  filter(!is.na(valid_status)) %>%
+  count(valid_status) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+```{r}
+data_validated_plots %>%
+  filter(EUNIS == "Change") %>%
+  filter(!is.na(valid_status)) %>%
+  count(valid_status) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+## Write csv of observations in validated plots
+
+This csv contains only information about observations in validated plots (i.e. plots with all observations validated).
+
+```{r}
+data_obs_in_val_plots <- data_validated_clean %>% 
+  # Filter validated plots
+  filter(plotID %in% 
+           c(data_validated_plots %>% 
+           filter(valid_status == "valid") %>% 
+           pull(plotID))) %>%
+  # For each plotID, create a column plotID_num (numeric identifier)
+  group_by(plotID) %>%
+  mutate(plotID_num = cur_group_id()) %>%
+  ungroup()
+```
+
+```{r}
+write_csv(data_obs_in_val_plots,
+          here("data", "clean","data_obs_in_val_plots_20260702.csv"))
+```
+
+# Figures
+
+## (Fig 3) Plots most influential variables
+
+```{r}
+source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/fb53bd97121f7f9ce947837ef1a4c65a73bffb3f/geom_flat_violin.R")
+```
+
+```{r}
+distr_plot <- function(data,
+                       y_vars,
+                       y_labels,
+                       grey = TRUE,
+                       p_low = 0.10,
+                       p_high = 0.90,
+                       low_groups = c("T"),
+                       high_groups = c("Q", "R", "S"),
+                       grey_color = "grey60",
+                       print_plots = FALSE) {
+  stopifnot(length(y_vars) == length(y_labels))
+
+  # Ensure y_vars/y_labels can be length-1 strings
+  if (!is.vector(y_vars))   y_vars   <- c(y_vars)
+  if (!is.vector(y_labels)) y_labels <- c(y_labels)
+
+  library(ggplot2)
+  library(dplyr)
+  library(rlang)
+  library(stringr)
+
+  base_data <- data %>%
+    dplyr::filter(EUNIS1 %in% union(low_groups, high_groups))
+
+  plots <- vector("list", length(y_vars))
+
+  for (i in seq_along(y_vars)) {
+    y_var   <- y_vars[[i]]
+    y_label <- y_labels[[i]]
+
+    if (grey) {
+      df_flag <- base_data %>%
+        group_by(EUNIS1) %>%
+        mutate(
+          q_low  = quantile(!!sym(y_var), p_low,  na.rm = TRUE),
+          q_high = quantile(!!sym(y_var), p_high, na.rm = TRUE),
+          grey_flag = case_when(
+            EUNIS1 %in% low_groups  ~ (!!sym(y_var)) <= q_low,
+            EUNIS1 %in% high_groups ~ (!!sym(y_var)) >= q_high,
+            TRUE ~ FALSE
+          ),
+          grey_flag = coalesce(grey_flag, FALSE)
+        ) %>%
+        ungroup()
+    }
+
+    p <- ggplot(
+      data = base_data,
+      aes(x = EUNIS1, y = !!sym(y_var), fill = EUNIS1)
+    ) +
+      # Violin
+      geom_flat_violin(position = position_nudge(x = 0.2, y = 0), alpha = 0.8) +
+
+      # Points (with or without greying)
+      {
+        if (grey) {
+          list(
+            geom_point(
+              data = df_flag %>% dplyr::filter(!grey_flag),
+              aes(y = !!sym(y_var), color = EUNIS1),
+              position = position_jitter(width = 0.15),
+              size = 0.05, alpha = 0.25
+            ),
+            geom_point(
+              data = df_flag %>% dplyr::filter(grey_flag),
+              aes(y = !!sym(y_var)),
+              color = grey_color,
+              position = position_jitter(width = 0.15),
+              size = 0.05, alpha = 0.6
+            )
+          )
+        } else {
+          geom_point(
+            aes(y = !!sym(y_var), color = EUNIS1),
+            position = position_jitter(width = 0.15),
+            size = 0.05, alpha = 0.25
+          )
+        }
+      } +
+
+      # BOX PLOT LAST (on top) — only change for rule #1
+      geom_boxplot(width = 0.2, outlier.shape = NA, alpha = 0.5) +
+
+      labs(y = y_label, x = "EUNIS level 1") +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) +
+      guides(fill = "none", color = "none") +
+      theme_bw() + coord_flip()  +
+      scale_color_manual(values = c(
+        "#0072B2", # blue
+        "#D55E00", # vermillion
+        "#009E73", # bluish green
+        "#CC79A7"  # reddish purple
+        )) +
+      scale_fill_manual(values = c(
+        "#0072B2", # blue
+        "#D55E00", # vermillion
+        "#009E73", # bluish green
+        "#CC79A7"  # reddish purple
+        ))
+    
+    if (print_plots) print(p)
+    plots[[i]] <- p
+  }
+
+  # Return a single ggplot if length == 1 (so you can use it with grid.arrange directly)
+  if (length(plots) == 1L) {
+    return(plots[[1L]])
+  } else {
+    return(plots)  # list of ggplots
+  }
+}
+```
+
+These plots include all observations in the full dataset.
+
+```{r}
+plot1_Landsat <- data_validated_clean %>%
+  mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
+  filter(!is.na(valid_Landsat)) %>%
+  left_join(initial_dataset %>% 
+              select(PlotObservationID, NDMI_max)) %>%
+  distr_plot("NDMI_max", "Maximum NDMI", grey = F) +
+  theme(plot.margin = margin(2, 2, 2, 2)) +
+  scale_x_discrete(limits = c("T", "S", "R", "Q"))
+plot2_Landsat <- data_validated_clean %>%
+  mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
+  filter(!is.na(valid_Landsat)) %>%
+  left_join(initial_dataset %>% 
+              select(PlotObservationID, SAVI_avg_value_03)) %>%
+  distr_plot("SAVI_avg_value_03", 
+             "SAVI value at greening", grey = F) +
+  theme(axis.title.y = element_blank(),
+        axis.text.y  = element_blank(),
+        axis.ticks.y = element_blank()) + 
+  theme(plot.margin = margin(2, 2, 2, 2)) +
+  scale_x_discrete(limits = c("T", "S", "R", "Q"))
+plot3_Landsat <- data_validated_clean %>%
+  mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
+  filter(!is.na(valid_Landsat)) %>%
+  left_join(initial_dataset %>% 
+              select(PlotObservationID, NDWI_min)) %>%
+  distr_plot("NDWI_min", 
+             "Minimum NDWI", grey = F) + 
+  theme(plot.margin = margin(2, 2, 2, 2)) +
+  scale_x_discrete(limits = c("T", "S", "R", "Q"))
+plot4_Landsat <- data_validated_clean %>%
+  mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
+  filter(!is.na(valid_Landsat)) %>%
+  left_join(initial_dataset %>% 
+              select(PlotObservationID, SAVI_diff_pos_march_value)) %>%
+  distr_plot("SAVI_diff_pos_march_value", 
+             "SAVI difference in value peak - greening", 
+             grey = F) +
+  theme(plot.margin = margin(2, 2, 2, 2)) +
+  theme(axis.title.y = element_blank(),
+        axis.text.y  = element_blank(),
+        axis.ticks.y = element_blank()) + 
+  scale_x_discrete(limits = c("T", "S", "R", "Q"))
+plot5_Landsat <- data_validated_clean %>%
+  mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
+  filter(!is.na(valid_Landsat)) %>%
+  left_join(initial_dataset %>% 
+              select(PlotObservationID, NDVI_diff_pos_march_value)) %>%
+  distr_plot("NDVI_diff_pos_march_value", 
+             "NDVI difference in value peak - greening", 
+             grey = F) +
+  theme(plot.margin = margin(2, 2, 2, 2)) +
+  scale_x_discrete(limits = c("T", "S", "R", "Q"))
+plot6_Landsat <- data_validated_clean %>%
+  mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
+  filter(!is.na(valid_Landsat)) %>%
+  left_join(initial_dataset %>% 
+              select(PlotObservationID, NDVI_auc_mar_oct)) %>%
+  distr_plot("NDVI_auc_mar_oct", 
+             "NDVI AUC greening-browning", grey = F) +
+  theme(plot.margin = margin(2, 2, 2, 2)) +
+  theme(axis.title.y = element_blank(),
+        axis.text.y  = element_blank(),
+        axis.ticks.y = element_blank()) + 
+  scale_x_discrete(limits = c("T", "S", "R", "Q"))
+plot7_Landsat <- data_validated_clean %>%
+  mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
+  filter(!is.na(valid_Landsat)) %>%
+  left_join(initial_dataset %>% 
+              select(PlotObservationID, SAVI_auc_mar_oct)) %>%
+  distr_plot("SAVI_auc_mar_oct", 
+             "SAVI AUC greening-browning", grey = F)  +
+  theme(plot.margin = margin(2, 2, 2, 2)) +
+  scale_x_discrete(limits = c("T", "S", "R", "Q"))
+
+plot_for_legend <- data_validated_clean %>%
+  mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
+  filter(!is.na(valid_Landsat)) %>%
+  left_join(initial_dataset %>% 
+              select(PlotObservationID, NDMI_max)) %>%
+  distr_plot("NDMI_max", "Maximum NDMI", grey = FALSE) +
+  guides(fill = guide_legend(), color = guide_legend()) +
+  labs(fill = "EUNIS level 1", color = "EUNIS level 1") +
+  theme(legend.position = "right") +
+  scale_fill_manual(values = c("#0072B2", "#D55E00", "#009E73", "#CC79A7"),
+                    breaks = c("Q", "R", "S", "T"), 
+                    labels = c("Q" = "Q - Wetlands","R" = "R - Grasslands", 
+                               "S" = "S - Shrublands", "T" = "T - Forests")) +
+  scale_color_manual(values = c("#0072B2", "#D55E00", "#009E73", "#CC79A7"),
+                     breaks = c("Q", "R", "S", "T"),
+                     labels = c("Q" = "Q - Wetlands","R" = "R - Grasslands", 
+                               "S" = "S - Shrublands", "T" = "T - Forests")) +
+  guides(fill = guide_legend(
+    override.aes = list(shape = 22, size = 8, 
+                        fill = c("#0072B2", "#D55E00", "#009E73", "#CC79A7"),
+                        color = NA, linetype = 0, alpha = 1)),
+    color = "none") +
+  theme(legend.text = element_text(size = 12), 
+        legend.title = element_text(size = 13)) +
+  scale_x_discrete(limits = c("Q", "R", "S", "T"))
+legend <- patchwork::wrap_elements(get_legend(plot_for_legend))
+```
+
+```{r}
+fig3 <- (
+    plot1_Landsat + theme(plot.margin = margin(2,2,2,2)) |
+      plot2_Landsat + theme(plot.margin = margin(2,2,2,2))
+    ) /
+  (plot3_Landsat + theme(plot.margin = margin(2,2,2,2)) |
+     plot4_Landsat + theme(plot.margin = margin(2,2,2,2))
+   ) /
+  (plot5_Landsat + theme(plot.margin = margin(2,2,2,2)) |
+     plot6_Landsat + theme(plot.margin = margin(2,2,2,2))
+   ) /
+  (plot7_Landsat + theme(plot.margin = margin(2,2,2,2)) |
+    legend
+  ) +
+  plot_layout(heights = c(1,1,1,1)) &
+  theme(plot.margin = margin(2,2,2,2))
+fig3
+ggsave(here("output", "figures", "manuscript", "fig3.jpeg"), plot = fig3,
+       dpi = 300, width = 7, height = 11)
+```
+
+## (Fig 4) Maps + graph validated plots
+
+```{r}
+plot_plots <- data_validated_plots %>%
+  mutate(EUNIS = forcats::fct_relevel(EUNIS, "Change", after = Inf)) %>%
+  count(EUNIS, valid_status, name = "n") %>% 
+  ggplot(aes(x = EUNIS, y = n, fill = valid_status)) +
+  geom_col(position = position_stack()) +
+  xlab(NULL) + ylab("Number of plots") +
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k")) +
+  scale_fill_manual(values = c("not_valid" = "#D55E00", "valid" = "#0072B2",
+                               "NA" = "#828282"),
+                    labels = c("not_valid" = "Non-validated",
+                               "valid"     = "Validated",
+                               "NA"        = "NA"),
+                    name = "Validated") +
+  scale_x_discrete(
+    breaks = c("Q", "R", "S", "T", "Change"),
+    labels = function(x) {
+      x <- ifelse(x == "Q", "Q - Wetlands", x)
+      x <- ifelse(x == "R", "R - Grasslands", x)
+      x <- ifelse(x == "S", "S - Shrublands", x)
+      x <- ifelse(x == "T", "T - Forests", x)
+      x <- ifelse(x == "Change", "Habitat change", x)
+      x
+      }
+    ) +
+  theme_minimal() + theme(legend.position = c(0.9, 0.9)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank())
+plot_plots
+```
+
+```{r}
+europe_bbox_3035 <- st_bbox(
+  c(
+    xmin = 2500000,
+    ymin = 1400000,
+    xmax = 6500000,
+    ymax = 5500000
+  ),
+  crs = st_crs(3035)
+)
+
+world <- ne_countries(scale = "medium", returnclass = "sf")
+world_3035 <- st_transform(world, 3035)
+
+world_3035_crop <- st_crop(world_3035, europe_bbox_3035)
+
+plots_3035 <- st_as_sf(
+  data_validated_plots,
+  coords = c("Lon_updated", "Lat_updated"),
+  crs = 4326
+) |>
+  st_transform(3035)
+```
+
+```{r}
+# 1) Create a regular grid over your bbox
+cell_km <- 50
+grid_3035 <- st_make_grid(
+  europe_bbox_3035,
+  cellsize = cell_km * 1000,
+  what = "polygons",
+  square = TRUE
+) |> 
+  (\(g) st_sf(grid_id = seq_len(length(g)), geometry = g))()
+
+# 2) Keep only grid cells that overlap your area of interest (optional)
+grid_3035 <- st_intersection(grid_3035, st_as_sf(world_3035_crop))
+
+plots_3035_crop <- st_crop(plots_3035, europe_bbox_3035)
+
+# 3) Spatial join: assign each point to a grid cell
+# (st_join on polygons brings grid_id onto points)
+pts_with_grid <- st_join(
+  plots_3035_crop %>% # points, filter only validated / invalidated
+    filter(valid_status == "not_valid" | valid_status == "valid"),
+  grid_3035["grid_id"],           # only keep grid_id column from grid
+  left = FALSE                    # drop points outside the grid
+)
+
+# 4) Aggregate by grid_id and EUNIS category
+agg <- pts_with_grid |>
+  st_drop_geometry() |>
+  mutate(
+    # ensure EUNIS "Change" is last if you facet later (optional)
+    EUNIS = fct_relevel(EUNIS, "Change", after = Inf),
+    is_valid = case_when(
+      valid_status == "valid" ~ 1L,
+      TRUE ~ 0L
+    )
+  ) |>
+  group_by(grid_id, EUNIS) |>
+  summarise(
+    n_total = n(),
+    n_valid = sum(is_valid, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    prop_valid = if_else(n_total > 0, n_valid / n_total, NA_real_)
+  )
+
+# 5) Join back to grid polygons
+grid_agg <- grid_3035 |>
+  inner_join(agg, by = "grid_id")
+
+map_grid_plots <- ggplot() +
+  geom_sf(data = world_3035_crop, fill = "grey95", color = "grey80", linewidth = 0.2) +
+  geom_sf(data = grid_agg, aes(fill = prop_valid), color = NA) +   # no borders for speed
+  facet_wrap(
+    ~ EUNIS,
+    nrow = 3,
+    ncol = 2,
+    labeller = labeller(EUNIS = c("Q" = "Q - Wetlands", "R" = "R - Grasslands",
+                                   "S" = "S - Shrublands", "T" = "T - Forests",
+                                   "Change" = "Habitat change"))) +
+  scale_fill_gradientn(
+    colours = c("#D55E00", "#F0E442", "#0072B2"),    # orange → yellow → blue
+    values = rescale(c(0, 0.5, 1)),
+    limits = c(0, 1),
+    oob = squish,
+    na.value = "grey90",
+    name = "Proportion validated"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    legend.justification = c("center", "top"),
+    # Tighten the legend itself
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    # Pull the legend box closer to the panels (reduce bottom gap)
+    legend.box.margin = margin(t = 0, r = 0, b = -6, l = 0),
+    # Keep a little top plot margin so nothing clips
+    plot.margin = margin(t = 6, r = 0, b = 5, l = 0),
+    panel.spacing = unit(6, "pt"),
+    legend.key.size = unit(0.3, "lines"),
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 7)
+  ) +
+  coord_sf(expand = FALSE) +
+  guides(
+  fill = guide_colorbar(
+    barwidth = unit(4, "cm"),   # increase width
+    barheight = unit(0.3, "cm"),  # keep it thin
+    title.vjust = 0.8
+  )
+)
+map_grid_plots
+```
+
+```{r}
+plot_plots_inset <- plot_plots +
+  theme(
+    aspect.ratio = 3/2,        # height / width  → tall & thin (try 3/1, 4/1, 5/1)
+    plot.margin  = margin(0, 0 , 0, 0),
+    axis.text.x  = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+    axis.text.y  = element_text(size = 8, vjust = 1, hjust = 1),
+    axis.title.y = element_text(size = 8),
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 8),
+    legend.key.size = unit(6, "pt"),
+
+    # 🔹 Put legend inside, top-right of inset
+    legend.position = c(1.4, 0.98),
+    legend.justification = c(1, 1),
+
+    # 🔹 Semi-transparent background helps readability
+    legend.background = element_rect(fill = alpha("white", 0.6), color = NA)
+  ) +
+  coord_cartesian(clip = "off", expand = FALSE)
+
+map_plots_with_inset <- map_grid_plots +
+  inset_element(
+    plot_plots_inset,
+    left   = 0.45,
+    right  = 0.97,
+    bottom = -0.05,
+    top    = 0.3, 
+    align_to = "panel"
+  )
+
+map_plots_with_inset +
+  theme(plot.margin = margin(1, 1, 1, 1))
+
+ggsave(here("output", "figures", "manuscript", "fig4.jpeg"), 
+       dpi = 300, width = 5, height = 8)
+```
+
+# Appendices
+
+## (Appendix 4) Plot GPS observations used for models
+
+```{r}
+data_GPS <- get_full_datasets(initial_dataset, vars_RF_months_Landsat) %>%
+  mutate(GPS = case_when(`Location method` %in% 
+                           c("Location with GPS", 
+                             "Location with differential GPS") ~ TRUE,
+                         !`Location method` %in% 
+                           c("Location with GPS", 
+                             "Location with differential GPS") ~ FALSE,
+                         is.na(`Location method`) ~ FALSE))
+```
+
+```{r}
+points_3035 <- st_as_sf(data_GPS,
+                        coords = c("Lon_updated", "Lat_updated"),
+                        crs = 4326
+                        ) |>
+  st_transform(3035)
+
+points_3035_crop <- st_crop(points_3035, europe_bbox_3035)
+```
+
+```{r}
+# 1) Create a regular grid over your bbox
+cell_km <- 50
+grid_3035 <- st_make_grid(
+  europe_bbox_3035,
+  cellsize = cell_km * 1000,
+  what = "polygons",
+  square = TRUE
+) |> 
+  (\(g) st_sf(grid_id = seq_len(length(g)), geometry = g))()
+
+# 2) Keep only grid cells that overlap your area of interest (optional)
+grid_3035 <- st_intersection(grid_3035, st_as_sf(world_3035_crop))
+
+points_3035_crop <- st_crop(points_3035_crop, europe_bbox_3035)
+
+# 3) Spatial join: assign each point to a grid cell
+# (st_join on polygons brings grid_id onto points)
+pts_with_grid <- st_join(
+  points_3035_crop,
+  grid_3035["grid_id"],           # only keep grid_id column from grid
+  left = FALSE                    # drop points outside the grid
+)
+
+# 4) Aggregate by grid_id and EUNIS category
+agg <- pts_with_grid |>
+  st_drop_geometry() |>
+  group_by(grid_id, EUNIS1) |>
+  summarise(
+    n_total = n(),
+    n_GPS = sum(GPS, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    prop_GPS = if_else(n_total > 0, n_GPS / n_total, NA_real_)
+  )
+
+# 5) Join back to grid polygons
+grid_agg <- grid_3035 |>
+  inner_join(agg, by = "grid_id")
+
+map_grid_GPS <- ggplot() +
+  geom_sf(data = world_3035_crop, fill = "grey95", color = "grey80", linewidth = 0.2) +
+  geom_sf(data = grid_agg, aes(fill = prop_GPS), color = NA) +   # no borders for speed
+  facet_wrap(
+    ~ EUNIS1,
+    nrow = 2,
+    ncol = 2,
+    labeller = labeller(EUNIS1 = c("Q" = "Q - Wetlands", "R" = "R - Grasslands",
+                                   "S" = "S - Shrublands", "T" = "T - Forests"))) +
+  scale_fill_gradientn(
+    colours = c("#009E73", "#D3D3D3", "#CC79A7"),  # green → light grey → purple
+    values = rescale(c(0, 0.5, 1)),
+    limits = c(0, 1),
+    oob = squish,
+    na.value = "grey90",
+    name = "Proportion GNSS"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    legend.justification = c("center", "top"),
+    # Tighten the legend itself
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    # Pull the legend box closer to the panels (reduce bottom gap)
+    legend.box.margin = margin(t = 0, r = 0, b = -6, l = 0),
+    # Keep a little top plot margin so nothing clips
+    plot.margin = margin(t = 6, r = 0, b = 5, l = 0),
+    panel.spacing = unit(6, "pt"),
+    legend.key.size = unit(0.3, "lines"),
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 7)
+  ) +
+  coord_sf(expand = FALSE) +
+  guides(
+  fill = guide_colorbar(
+    barwidth = unit(4, "cm"),   # increase width
+    barheight = unit(0.3, "cm"),  # keep it thin
+    title.vjust = 0.8
+  )
+)
+map_grid_GPS
+ggsave(here("output", "figures", "manuscript", "appendix4.jpeg"), 
+       dpi = 300, width = 5, height = 6)
+```
+
+## (Appendix 5) Plots distribution max NDVI
+
+```{r}
+plot_perc_Landsat <- full_dataset_months %>%
+    # Select only GPS points
+    dplyr::filter(`Location method` == "Location with GPS" | 
+                    `Location method` == "Location with differential GPS") %>%
+  distr_plot("NDVI_pos_value", "Maximum NDVI", grey = T) +
+  scale_x_discrete(limits = c("T", "S", "R", "Q"),
+                   labels = c("T" = "T - Forests", "S" = "S - Shrublands",
+                              "R" = "R - Grasslands", "Q" = "Q - Wetlands"))
+plot_perc_Landsat
+ggsave(here("output", "figures", "manuscript", "appendix5.jpeg"), 
+       dpi = 300, width = 5, height = 4)
+```
+
+## (Appendix 6) Compare classes before and after
+
+```{r}
+compare_classes <- function(
+  data_before, data_step1, data_step2 = NULL,
+  class_col = "EUNIS1",
+  x_lab = NULL,
+  title = NULL,
+  return = c("plot", "both", "counts")
+) {
+  return <- match.arg(return)
+
+  # Helper: safe counting that works with empty data frames
+  count_safe <- function(df, out_name) {
+    if (is.null(df) || nrow(df) == 0) {
+      tibble(!!class_col := character(), !!out_name := integer())
+    } else {
+      if (!(class_col %in% names(df))) {
+        abort(paste0("Column '", class_col, "' is missing in one of the inputs."))
+      }
+      df %>% count(.data[[class_col]], name = out_name)
+    }
+  }
+
+  # Build counts table (before + step1; optionally step2)
+  counts <- full_join(
+    count_safe(data_before, "before"),
+    count_safe(data_step1,  "step1"),
+    by = class_col
+  )
+
+  has_step2 <- !is.null(data_step2)
+  if (has_step2) {
+    counts <- full_join(
+      counts,
+      count_safe(data_step2, "step2"),
+      by = class_col
+    )
+  } else {
+    # Ensure the column exists for consistent downstream handling (as NA)
+    counts <- counts %>% mutate(step2 = NA_integer_)
+  }
+
+  # Replace missing counts with zero for plotting
+  counts <- counts %>%
+    mutate(
+      before = replace_na(before, 0L),
+      step1  = replace_na(step1,  0L),
+      step2  = replace_na(step2,  0L)
+    )
+
+  # Prepare long format depending on availability of step2
+  if (has_step2) {
+    counts_long <- counts %>%
+      pivot_longer(
+        cols = c(before, step1, step2),
+        names_to = "state",
+        values_to = "n"
+      ) %>%
+      mutate(state = factor(state, levels = c("before", "step1", "step2")))
+    legend_title <- "State"
+  } else {
+    counts_long <- counts %>%
+      select(any_of(c(class_col, "before", "step1"))) %>%
+      pivot_longer(
+        cols = c(before, step1),
+        names_to = "state",
+        values_to = "n"
+      ) %>%
+      mutate(state = factor(state, levels = c("before", "step1")))
+    legend_title <- "State"
+  }
+
+    # Plot
+  p <- ggplot(counts_long, aes(x = .data[[class_col]], y = n, fill = state)) +
+    geom_col(position = position_dodge(width = 0.85),
+             width = 0.8, color = "black", linewidth = 0.25) +
+    labs(
+      title = title,
+      x = x_lab,
+      y = "Number of plot observations",
+      fill = legend_title
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 0, hjust = 1),
+      panel.grid.minor = element_blank()
+    ) +
+    scale_x_discrete(
+    breaks = c("Q", "R", "S", "T"),
+    
+    labels = function(x) {
+      x <- ifelse(x == "Q", "Q - Wetlands", x)
+      x <- ifelse(x == "R", "R - Grasslands", x)
+      x <- ifelse(x == "S", "S - Shrublands", x)
+      x <- ifelse(x == "T", "T - Forests", x)
+      x
+      }
+    ) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  # Optionally attach counts to the plot as an attribute for quick retrieval
+  attr(p, "counts") <- counts
+
+  # Return mode
+  if (return == "plot") {
+    return(p)
+  } else if (return == "counts") {
+    return(counts)
+  } else {
+    # both
+    return(list(plot = p, counts = counts))
+  }
+}
+```
+
+```{r}
+(compare_classes(training_subset_slope, 
+                  filtered_data_20_10_slope_Landsat_probs,
+                  filtered_data_20_10_slope_Landsat_probs_2x,
+                  return = "plot") +
+  compare_classes(training_subset_months, 
+                  filtered_data_20_10_months_Landsat_probs,
+                  filtered_data_20_10_months_Landsat_probs_2x,
+                  return = "plot")
+ ) +
+  plot_annotation(tag_levels = "A", tag_suffix = ")") +
+  plot_layout(guides = "collect") &
+  scale_fill_manual(
+    breaks = c("before", "step1", "step2"),
+    labels = c("No refinement", "Refinement step 1", "Refinement step 2"),
+    values = c(
+      "before" = "#edf8b1", 
+      "step1"  = "#7fcdbb",
+      "step2"  = "#2c7fb8"
+    )
+  ) &
+  scale_y_continuous(limits = c(0, 45000),
+                  labels = label_number(scale = 1e-3, suffix = "k")) &
+  theme(legend.position = "bottom", legend.title = element_blank()) +
+  theme(panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank())
+ggsave(here("output", "figures", "manuscript", "appendix6.jpeg"), 
+       dpi = 300, width = 6, height = 4.5)
+```
+
+## (Appendix 8) ROC curves from best model
+
+```{r}
+ggplot(rocdata_months_Landsat_step2$roc, aes(x = FPR, y = TPR, color = Class)) +
+  geom_line(linewidth = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(x = "False Positive Rate (1-Specificity",
+       y = "True Positive Rate (Sensitivity)",
+       color = "Class (AUC)") +
+  scale_color_manual(
+    values = c(
+      "Q (AUC = 0.97)" = "#0072B2",
+      "R (AUC = 0.993)" = "#D55E00",
+      "S (AUC = 0.984)" = "#009E73",
+      "T (AUC = 0.999)" = "#CC79A7"
+    ),
+    labels = c(
+      "Q (AUC = 0.97)" = "Q – Wetlands (AUC = 0.970)",
+      "R (AUC = 0.993)" = "R – Grasslands (AUC = 0.993)",
+      "S (AUC = 0.984)" = "S – Shrublands (AUC = 0.984)",
+      "T (AUC = 0.999)" = "T – Forests (AUC = 0.999)"
+    )
+  ) +
+  theme_minimal() + ggtitle(NULL) +
+  theme(legend.position = "right")
+ggsave(here("output", "figures", "manuscript", "appendix8.jpeg"), 
+       dpi = 300, width = 7, height = 4)
+```
+
+## (Appendix 9) Variable importance from best model
+
+```{r}
+enframe(
+  varimp_months_Landsat_step2$varimp$values,
+  name  = "variable",
+  value = "importance"
+) %>%
+  mutate(
+    importance100 = 100 * importance / max(importance)
+  ) %>%
+  arrange(desc(importance100)) %>%
+  mutate(variable_long = case_when(
+    variable == "NDMI_max" ~ "Maximum NDMI",
+    variable == "NDWI_max" ~ "Maximum NDWI",
+    variable == "NDVI_max" ~ "Maximum NDVI",
+    variable == "SAVI_max" ~ "Maximum SAVI",
+    variable == "NDMI_min" ~ "Minimum NDMI",
+    variable == "NDWI_min" ~ "Minimum NDWI",
+    variable == "NDVI_min" ~ "Minimum NDVI",
+    variable == "SAVI_min" ~ "Minimum SAVI",
+    variable == "NDVI_avg_value_03" ~ "NDVI value at greening",
+    variable == "NDVI_pos_value" ~ "NDVI value at peak",
+    variable == "NDVI_avg_value_10" ~ "NDVI value at browning",
+    variable == "SAVI_avg_value_03" ~ "SAVI value at greening",
+    variable == "SAVI_pos_value" ~ "SAVI value at peak",
+    variable == "SAVI_avg_value_10" ~ "SAVI value at browning",
+    variable == "NDVI_auc_mar_oct" ~ "NDVI AUC greening - browning",
+    variable == "SAVI_auc_mar_oct" ~ "SAVI AUC greening - browning",
+    variable == "NDVI_diff_pos_march_value" ~ 
+      "NDVI difference in value peak - greening",
+    variable == "SAVI_diff_pos_march_value" ~
+      "SAVI difference in value peak - greening",
+    variable == "NDVI_diff_pos_march_doy" ~
+      "NDVI difference in DOY peak - greening",
+    variable == "SAVI_diff_pos_march_doy" ~
+      "SAVI difference in DOY peak - greening",
+    variable == "NDVI_diff_pos_oct_value" ~
+      "NDVI difference in value peak - browning",
+    variable == "SAVI_diff_pos_oct_value" ~
+      "SAVI difference in value peak - browning",
+    variable == "NDVI_diff_pos_oct_doy" ~
+      "NDVI difference in DOY peak - browning",
+    variable == "SAVI_diff_pos_oct_doy" ~
+      "SAVI difference in DOY peak - browning",
+    TRUE ~ variable
+  )) %>%
+ggplot(aes(x = reorder(variable_long, importance100), y = importance100)) +
+  geom_col(fill = "#2c7fb8") +
+  coord_flip() +
+  labs(x = "Predictor", y = "Importance (scaled)") +
+  theme_minimal()
+ggsave(here("output", "figures", "manuscript", "appendix9.jpeg"), 
+       dpi = 300, width = 6, height = 4)
+```
+
+## (Appendix 10): Maps + graph validated obs
+
+```{r}
+plot_obs <- data_validated_clean %>%
+  count(EUNIS1, valid_Landsat, name = "n") %>% 
+  ggplot(aes(x = EUNIS1, y = n, fill = valid_Landsat)) +
+  geom_col(position = position_stack()) +
+  xlab(NULL) + ylab("Number of plot observations") +
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k")) +
+  scale_fill_manual(values = c("FALSE" = "#D55E00", "TRUE" = "#0072B2",
+                               "NA" = "#828282"),
+                    labels = c("FALSE" = "Non-validated",
+                               "TRUE" = "Validated",
+                               "NA"        = "NA"),
+                     name = "Validated") +
+  scale_x_discrete(
+    labels = function(x) {
+      x <- ifelse(x == "Q", "Q - Wetlands", x)
+      x <- ifelse(x == "R", "R - Grasslands", x)
+      x <- ifelse(x == "S", "S - Shrublands", x)
+      x <- ifelse(x == "T", "T - Forests", x)
+      x
+      }
+    ) +
+  theme_minimal() + theme(legend.position = c(0.9, 0.8)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        legend.title = element_blank(),
+        legend.text  = element_text(size = 12),
+        legend.key.size = unit(12, "pt"))
+plot_obs
+```
+
+```{r}
+# 1) Create a regular grid over your bbox
+cell_km <- 50
+grid_3035 <- st_make_grid(
+  europe_bbox_3035,
+  cellsize = cell_km * 1000,
+  what = "polygons",
+  square = TRUE
+) |> 
+  (\(g) st_sf(grid_id = seq_len(length(g)), geometry = g))()
+
+# 2) Keep only grid cells that overlap your area of interest (optional)
+grid_3035 <- st_intersection(grid_3035, st_as_sf(world_3035_crop))
+
+points_3035 <- st_as_sf(
+  data_validated_clean,
+  coords = c("Lon_updated", "Lat_updated"),
+  crs = 4326
+) |>
+  st_transform(3035)
+
+points_3035_crop <- st_crop(points_3035, europe_bbox_3035)
+
+# 3) Spatial join: assign each point to a grid cell
+# (st_join on polygons brings grid_id onto points)
+pts_with_grid <- st_join(
+  points_3035_crop %>% # points, filter only validated / invalidated
+    filter(valid_Landsat == "TRUE" | valid_Landsat == "FALSE"),
+  grid_3035["grid_id"],           # only keep grid_id column from grid
+  left = FALSE                    # drop points outside the grid
+)
+
+# 4) Aggregate by grid_id and EUNIS category
+agg <- pts_with_grid |>
+  st_drop_geometry() |>
+  mutate(
+    is_valid = case_when(
+      valid_Landsat== "TRUE" ~ 1L,
+      TRUE ~ 0L
+    )
+  ) |>
+  group_by(grid_id, EUNIS1) |>
+  summarise(
+    n_total = n(),
+    n_valid = sum(is_valid, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    prop_valid = if_else(n_total > 0, n_valid / n_total, NA_real_)
+  )
+
+# 5) Join back to grid polygons
+grid_agg <- grid_3035 |>
+  inner_join(agg, by = "grid_id")
+
+map_obs_plots <- ggplot() +
+  geom_sf(data = world_3035_crop, fill = "grey95", color = "grey80", linewidth = 0.2) +
+  geom_sf(data = grid_agg, aes(fill = prop_valid), color = NA) +   # no borders for speed
+  facet_wrap(
+    ~ EUNIS1,
+    nrow = 3,
+    ncol = 2,
+    labeller = labeller(EUNIS1 = c("Q" = "Q - Wetlands", "R" = "R - Grasslands",
+                                   "S" = "S - Shrublands", "T" = "T - Forests"))) +
+  scale_fill_gradientn(
+    colours = c("#D55E00", "#F0E442", "#0072B2"),    # orange → yellow → blue
+    values = rescale(c(0, 0.5, 1)),
+    limits = c(0, 1),
+    oob = squish,
+    na.value = "grey90",
+    name = "Proportion validated"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    legend.justification = c("center", "top"),
+    # Tighten the legend itself
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0),
+    # Pull the legend box closer to the panels (reduce bottom gap)
+    legend.box.margin = margin(t = 0, r = 0, b = -6, l = 0),
+    # Keep a little top plot margin so nothing clips
+    plot.margin = margin(t = 6, r = 0, b = 5, l = 0),
+    panel.spacing = unit(6, "pt"),
+    legend.key.size = unit(0.3, "lines"),
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 7)
+  ) +
+  coord_sf(expand = FALSE) +
+  guides(
+  fill = guide_colorbar(
+    barwidth = unit(4, "cm"),   # increase width
+    barheight = unit(0.3, "cm"),  # keep it thin
+    title.vjust = 0.8
+  )
+)
+map_obs_plots
+```
+
+```{r}
+(map_obs_plots / 
+(
+  (plot_spacer() | plot_obs | plot_spacer()) +
+    plot_layout(widths = c(1, 3, 1))    # ← side padding : middle column is the plot
+)
+)  +
+  plot_layout(heights = c(4, 2)) +
+  theme(plot.margin = margin(1, 1, 1, 1))
+ggsave(here("output", "figures", "manuscript", "appendix10.jpeg"), 
+       dpi = 300, width = 5, height = 8)
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```

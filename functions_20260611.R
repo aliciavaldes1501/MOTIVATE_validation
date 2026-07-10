@@ -1,31 +1,14 @@
----
-title: "Functions"
-author: "Alicia Valdés"
-date: "`r format(Sys.time(), '%d %B %Y')`"
-output:
-  pdf_document: default
-  html_notebook: default
----
-
-This is a notebook to store functions used in other notebooks.
-
-# Load geom_flat_violin plot
-
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/fb53bd97121f7f9ce947837ef1a4c65a73bffb3f/geom_flat_violin.R")
-```
 
-# Function to print all columns of a tibble
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 printall <- function(tibble) {
   print(tibble, width = Inf)
 }
-```
 
-# Function to extract biogeo and unit from the filename of csv files from GEE
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 extract_info <- function(filename) {
   first_word <- strsplit(filename, "_")[[1]][1]
   biogeo <- str_extract(first_word,
@@ -34,17 +17,9 @@ extract_info <- function(filename) {
   if (is.na(unit) || unit == "") unit <- NA_character_
   list(biogeo = biogeo, unit = unit)
 }
-```
 
-# Function to smooth time series of NDVI, EVI and SAVI and get phenological momments
 
-Using GAMs, reweighting and 3 iterations.
-
-Using only a change detection method (maximum slope) to calculate sos and eos.
-
-Approach similar to https://doi.org/10.1016/j.jag.2020.102172 for GAM fitting and change detection method.
-
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
   suppressPackageStartupMessages({
     library(mgcv)
@@ -179,11 +154,9 @@ compute_metrics_models <- function(df, index_cols = c("NDVI", "EVI", "SAVI")) {
   if (length(results) == 0) return(tibble())  # or return(NULL)
   bind_rows(results)
 }
-```
 
-# Function to extract average values of indices per month and AUC between March and October 
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 extract_monthly_avg_indices <- function(GAM_data) {
 
   # 1. Build monthly DOY mapping per year (handles leap years automatically)
@@ -241,13 +214,9 @@ extract_monthly_avg_indices <- function(GAM_data) {
 
   return(final_df)
 }
-```
 
-# Function to smooth the time series of NDMI and NDWI
 
-Using GAM, also replacing values in DOY 1–50 and DOY 315–end with separate base values, use only unweighted GAM.
-
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_unweighted_fit <- function(
     # Data frame df with index values over time (DOY)
     df, 
@@ -311,148 +280,9 @@ compute_unweighted_fit <- function(
   
   bind_rows(fits_list)
 }
-```
 
-# Function to calculate index values at POS +/- 60 days
 
-```{r}
-# Combined: returns interpolated values at POS - 60 and POS + 60 days,
-# and the AUC between those two DOYs using a trapezoidal rule.
-# Options:
-#  - extrapolate = TRUE  → linear extrapolation outside [min(DOY), max(DOY)] (rule = 2)
-#  - extrapolate = FALSE → fallback to nearest observed day (no extrapolation) and
-#                          AUC window is clipped to the observed DOY range.
-get_pos_minus_plus60 <- function(GAM_data, extrapolate = TRUE) {
-  # If value is a list column (e.g., <dbl[1d]>), coerce to numeric
-  if (inherits(GAM_data$value, "list")) {
-    GAM_data <- GAM_data %>% dplyr::mutate(value = as.numeric(value))
-  }
-
-  # Prepare DOY–value curves per (PlotObservationID, index, year)
-  curves <- GAM_data %>%
-    dplyr::filter(!is.na(value)) %>%
-    dplyr::group_by(PlotObservationID, index, year) %>%
-    dplyr::summarise(
-      x = list(as.numeric(DOY)),
-      y = list(as.numeric(value)),
-      .groups = "drop"
-    )
-
-  # One POS per (PlotObservationID, index, year)
-  pos_tbl <- GAM_data %>%
-    dplyr::filter(!is.na(pos)) %>%
-    dplyr::distinct(PlotObservationID, index, year, pos) %>%
-    dplyr::mutate(
-      target_doy_minus60 = as.numeric(pos) - 60,
-      target_doy_plus60  = as.numeric(pos) + 60
-    )
-
-  # Interpolation helper (linear; nearest if no extrapolation and out of range)
-  interp_linear_or_nearest <- function(x, y, xout, extrapolate) {
-    if (is.null(x) || is.null(y) || length(x) < 2 || length(unique(x)) < 2) {
-      return(NA_real_)
-    }
-    ord <- order(x)
-    x <- x[ord]; y <- y[ord]
-
-    if (!extrapolate && (xout < min(x) || xout > max(x))) {
-      idx <- which.min(abs(x - xout))
-      return(if (length(idx)) y[idx] else NA_real_)
-    }
-
-    val <- suppressWarnings(
-      approx(x, y, xout = xout, method = "linear", ties = mean, rule = 2)$y
-    )
-    if (is.na(val)) {
-      idx <- which.min(abs(x - xout))
-      val <- if (length(idx)) y[idx] else NA_real_
-    }
-    val
-  }
-
-  # Trapezoidal AUC between [a, b] with boundary interpolation and optional clipping
-  auc_between <- function(x, y, a, b, extrapolate) {
-    if (is.null(x) || is.null(y) || length(x) < 2 || length(unique(x)) < 2) {
-      return(NA_real_)
-    }
-
-    # Ensure a <= b
-    if (is.na(a) || is.na(b)) return(NA_real_)
-    if (a > b) { tmp <- a; a <- b; b <- tmp }
-
-    # Sort and collapse duplicates using mean
-    ord <- order(x)
-    x <- x[ord]; y <- y[ord]
-    if (any(duplicated(x))) {
-      df <- aggregate(y ~ x, FUN = mean)
-      x <- as.numeric(df$x)
-      y <- as.numeric(df$y)
-      ord <- order(x); x <- x[ord]; y <- y[ord]
-    }
-
-    # If no extrapolation, clip integration limits to observed range
-    if (!extrapolate) {
-      a_clipped <- max(a, min(x))
-      b_clipped <- min(b, max(x))
-      if (b_clipped <= a_clipped) return(NA_real_)
-      a <- a_clipped
-      b <- b_clipped
-    }
-
-    # Interpolate boundary values (consistent with extrapolate policy)
-    ya <- interp_linear_or_nearest(x, y, a, extrapolate)
-    yb <- interp_linear_or_nearest(x, y, b, extrapolate)
-    if (is.na(ya) || is.na(yb)) return(NA_real_)
-
-    # Collect interior points strictly inside (a, b)
-    inside <- which(x > a & x < b)
-    X <- c(a, x[inside], b)
-    Y <- c(ya, y[inside], yb)
-
-    # Safety: need at least two points
-    if (length(X) < 2) return(NA_real_)
-
-    # Ensure strictly increasing X (should be, by construction)
-    ord2 <- order(X)
-    X <- X[ord2]; Y <- Y[ord2]
-
-    # Trapezoidal rule: sum((x_{i+1}-x_i) * (y_{i+1}+y_i)/2)
-    dx  <- diff(X)
-    ym  <- (head(Y, -1) + tail(Y, 1)) / 2
-    sum(dx * ym)
-  }
-
-  # Join POS targets with curves and compute both values + AUC
-  result <- pos_tbl %>%
-    dplyr::left_join(curves, by = c("PlotObservationID", "index", "year")) %>%
-    dplyr::mutate(
-      pos_minus60_value = purrr::pmap_dbl(
-        list(x, y, target_doy_minus60),
-        ~ interp_linear_or_nearest(..1, ..2, ..3, extrapolate)
-      ),
-      pos_plus60_value = purrr::pmap_dbl(
-        list(x, y, target_doy_plus60),
-        ~ interp_linear_or_nearest(..1, ..2, ..3, extrapolate)
-      ),
-      auc_pos2 = purrr::pmap_dbl(
-        list(x, y, target_doy_minus60, target_doy_plus60),
-        ~ auc_between(..1, ..2, ..3, ..4, extrapolate)
-      )
-    ) %>%
-    dplyr::select(
-      PlotObservationID, index, year, pos,
-      target_doy_minus60, pos_minus60_value,
-      target_doy_plus60,  pos_plus60_value,
-      auc_pos2
-    )
-
-  result
-}
-```
-
-# Function to create histograms
-
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 plot_histogram <- function(data, x_var, x_label) {
   ggplot(data %>%
            dplyr::filter(EUNIS1 %in% c("T", "R", "S", "Q")),
@@ -461,11 +291,9 @@ plot_histogram <- function(data, x_var, x_label) {
     labs(x = x_label, y = "Frequency") +
     theme_bw()
 }
-```
 
-# Function to create plots with violin + boxplot + points (NEW)
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 distr_plot <- function(data,
                        y_vars,
                        y_labels,
@@ -577,11 +405,9 @@ distr_plot <- function(data,
     return(plots)  # list of ggplots
   }
 }
-```
 
-# Function to create plots with violin + boxplot + points per bioregion
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 distr_plot_biogeo <- function(data, y_vars, y_labels) {
   plots <- list()
   
@@ -610,40 +436,18 @@ distr_plot_biogeo <- function(data, y_vars, y_labels) {
   
   return(plots)
 }
-```
 
-# Functions for RF models
 
-## Function for splitting data into training and test data sets
-
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 split_train_test <- function(data, proportion = 0.7) {
   train_indices <- sample(1:nrow(data), size = floor(proportion * nrow(data)))
   train_data <- data[train_indices, ]
   test_data <- data[-train_indices, ]
   return(list(train = train_data, test = test_data))
   }
-```
 
-## Function for fitting RF models
 
-RF models fitted using the conditional inference version of random forest (first cforest in package party, now fastcforest in package moreparty). Suggested if the data are highly correlated. Cforest is more stable in deriving variable importance values in the presence of highly correlated variables, thus providing better accuracy in calculating variable importance (ref below).
-
-Hothorn, T., Hornik, K. and Zeileis, A. (2006) Unbiased Recursive Portioning: A Conditional Inference Framework. Journal of Computational and Graphical Statistics, 15, 651-
-674. http://dx.doi.org/10.1198/106186006X133933
-
-Choose the hyperparameter mtry based on the square root of the number of predictor variables:
-
-Hastie, T., Tibshirani, R., & Friedman, J. (2009). The elements of statistical
-learning: Data mining, inference, and prediction. Springer Science &
-Business Media.
-
-Maybe TO_DO:
-We variated ntree from 50 to 800 in steps of 50, leaving mtry constant at 2. Tis parameter variation showed that ntree=500 was optimal, while higher ntree led to no further model improvement (Supplementary Fig. S10). Subsequently, the hyperparameter mtry was varied from 2 to 8 with constant ntree=500. Here, mtry=3 led to the best results in almost all cases (Supplementary Fig. S11). Consequently, we chose ntree=500 and mtry=3 for our main analysis across all study sites.
-
-Define a function to run fastcforest models:
-
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 run_rf <- function(vars_RF, train_data, response_var, ntree = 500, seed = 123) {
   set.seed(seed)
   execution_time <- system.time({
@@ -658,11 +462,9 @@ run_rf <- function(vars_RF, train_data, response_var, ntree = 500, seed = 123) {
   })
   list(model = rf_model, time = execution_time)
 }
-```
 
-## Parallelized function for fitting RF models
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 run_rf_parallel <- function(vars_RF, train_data, response_var, ntree = 500) {
   # Build formula locally (no NSE)
   fmla <- reformulate(vars_RF, response = response_var)
@@ -702,14 +504,9 @@ run_rf_parallel <- function(vars_RF, train_data, response_var, ntree = 500) {
 
   list(model = rf_model, time = execution_time)
 }
-```
 
-## Function to compute variable importance
 
-Using permimp() en permimp package:
-https://cran.r-project.org/web/packages/permimp/vignettes/permimp-package.html#fn1
-
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_varimp <- function(model, nperm = 100) {
 
   # Measure execution time
@@ -719,11 +516,9 @@ compute_varimp <- function(model, nperm = 100) {
 
   return(list(varimp = varimp_result, time = execution_time))
 }
-```
 
-## Function to compute CONDITIONAL variable importance
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_varimp_cond <- function(model, nperm = 100) {
 
   # Measure execution time
@@ -733,11 +528,9 @@ compute_varimp_cond <- function(model, nperm = 100) {
 
   return(list(varimp = varimp_result, time = execution_time))
 }
-```
 
-## Function to compute ROC (level 1)
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_roc_level1 <- function(model, test_data) {
   # Measure execution time
   execution_time <- system.time({
@@ -771,11 +564,9 @@ compute_roc_level1 <- function(model, test_data) {
   # Return both ROC data and execution time
   return(list(roc = roc_data, time = execution_time))
 }
-```
 
-## Function to compute ROC (level 2)
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 compute_roc_level2 <- function(model, test_data) {
   # Measure execution time
   execution_time <- system.time({
@@ -812,73 +603,9 @@ compute_roc_level2 <- function(model, test_data) {
   # Return both ROC data and execution time
   return(list(roc = roc_data, time = execution_time))
 }
-```
 
-# Function for rough validation (S2)
 
-```{r}
-rough_validation_S2 <- function(data) {
-  data %>%
-    mutate(
-      valid_1_NDWI = case_when(
-        NDWI_max > 0.3 ~ "wrong",
-        TRUE ~ NA_character_
-      ),
-      valid_1_CH = case_when(
-        EUNIS1 %in% c("R", "Q") & canopy_height > 2 ~ "wrong",
-        EUNIS1 == "T" & canopy_height < 3 ~ "wrong",
-        EUNIS1 == "S" & canopy_height > 3 ~ "wrong",
-        TRUE ~ NA_character_
-      ),
-      valid_1_count = rowSums(across(c(valid_1_NDWI, valid_1_CH), ~ . == "wrong"), na.rm = TRUE),
-      valid_1 = if_else(valid_1_count > 0, "At least 1 rule broken", "No rules broken so far")
-    ) %>%
-    # Keep only rows with no rules broken
-    dplyr::filter(valid_1 == "No rules broken so far")
-}
-```
-
-# Function for rough validation (SatEmb)
-
-```{r}
-rough_validation_SatEmb <- function(data) {
-  data %>%
-    mutate(
-      valid_1_CH = case_when(
-        EUNIS1 %in% c("R", "Q") & canopy_height > 2 ~ "wrong",
-        EUNIS1 == "T" & canopy_height < 3 ~ "wrong",
-        EUNIS1 == "S" & canopy_height > 3 ~ "wrong",
-        TRUE ~ NA_character_
-      ),
-      valid_1_count = rowSums(across(c(valid_1_CH), ~ . == "wrong"), na.rm = TRUE),
-      valid_1 = if_else(valid_1_count > 0, "At least 1 rule broken", "No rules broken so far") 
-    ) %>%
-    # Keep only rows with no rules broken
-    dplyr::filter(valid_1 == "No rules broken so far")
-}
-```
-
-# Function for rough validation (Landsat)
-
-```{r}
-rough_validation_Landsat <- function(data) {
-  data %>%
-    mutate(
-      valid_1_NDWI = case_when(
-        NDWI_max > 0.3 ~ "wrong",
-        TRUE ~ NA_character_
-      ),
-      valid_1_count = rowSums(across(c(valid_1_NDWI), ~ . == "wrong"), na.rm = TRUE),
-      valid_1 = if_else(valid_1_count > 0, "At least 1 rule broken", "No rules broken so far")
-    ) %>%
-    # Keep only rows with no rules broken
-    dplyr::filter(valid_1 == "No rules broken so far")
-}
-```
-
-# Function for rough validation based on NDVI
-
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 # data: your tibble/data.frame
 # y_var: name of the numeric column as a string, e.g., "NDVI_pos_value"
 filter_by_group_percentiles <- function(data, y_var) {
@@ -907,11 +634,9 @@ filter_by_group_percentiles <- function(data, y_var) {
 
   return(d_filtered)
 }
-```
 
-# Function to create plots with violin + boxplot + points with percentiles
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 distr_plot_percentiles <- function(data, y_vars, y_labels) {
   for (i in seq_along(y_vars)) {
     y_var <- y_vars[[i]]
@@ -965,11 +690,9 @@ distr_plot_percentiles <- function(data, y_vars, y_labels) {
     print(p)
   }
 }
-```
 
-# Function to calculate auxiliary metrics for data refinement
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 calculate_df_aux <- function(data, prob_cols) {
   data %>%
     rowwise() %>%
@@ -991,13 +714,9 @@ calculate_df_aux <- function(data, prob_cols) {
     ) %>%
     ungroup()
 }
-```
 
-# Function for filtering based on model probabilities
 
-## Negatives 35% + positives 10%
-
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 filter_probs_neg35_pos10 <- function(gdf) {
   # Removes negatives until 35% of the class
   cap_total <- ceiling(0.35 * nrow(gdf))  # max 35% of the class
@@ -1023,11 +742,9 @@ filter_probs_neg35_pos10 <- function(gdf) {
   gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
     select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
 }
-```
 
-## Negatives only 35%
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 filter_probs_neg35 <- function(gdf) {
   # Removes negatives until 35% of the class
   cap_total <- ceiling(0.35 * nrow(gdf))  # max 35% of the class
@@ -1040,11 +757,9 @@ filter_probs_neg35 <- function(gdf) {
   gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
     select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
 }
-```
 
-## Negatives 20% + positives 10%
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 filter_probs_neg20_pos10 <- function(gdf) {
   # Removes negatives until 20% of the class
   cap_total <- ceiling(0.20 * nrow(gdf))  # max 20% of the class
@@ -1070,11 +785,9 @@ filter_probs_neg20_pos10 <- function(gdf) {
   gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
     select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
 }
-```
 
-## Negatives only 20%
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 filter_probs_neg20 <- function(gdf) {
   # Removes negatives until 20% of the class
   cap_total <- ceiling(0.20 * nrow(gdf))  # max 20% of the class
@@ -1087,11 +800,9 @@ filter_probs_neg20 <- function(gdf) {
   gdf %>% filter(!PlotObservationID %in% drop_ids) %>%
     select(-max_prob, -second_max, -delta, -neg_flag, -small_flag, -gap_neg)
 }
-```
 
-# Function for plotting confusion matrix
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 plot_confusion_matrix <- function(predictions, reference, 
                                   title = "Confusion Matrix") {
   cm_df <- as.data.frame(as.table(confusionMatrix(predictions, reference)))
@@ -1110,11 +821,9 @@ plot_confusion_matrix <- function(predictions, reference,
       plot.title = element_text(size = 16, face = "bold")
     )
 }
-```
 
-# Function for comparing classes before and after filtering by model probabilities
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 compare_classes <- function(
   data_before, data_step1, data_step2 = NULL,
   class_col = "EUNIS1",
@@ -1226,11 +935,9 @@ compare_classes <- function(
     return(list(plot = p, counts = counts))
   }
 }
-```
 
-# Session info
 
-```{r}
+## -----------------------------------------------------------------------------------------------------------------------------------------------------------
 # Session info
 sessionInfo()
-```
+

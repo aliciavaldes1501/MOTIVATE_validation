@@ -26,6 +26,8 @@ library(cowplot)
 
 # Read data
 
+## Data from ReSurveyEurope
+
 ```{r}
 data_V2025.2 <- read_tsv(
   "C:/Data/MOTIVATE/MOTIVATE_data/Data/EVA and ReSurvey Data/2025 data - V2025.2/Core data/200_Motivate20250415_notJUICE_header_with_precise_coordinates.csv")
@@ -33,7 +35,23 @@ data_V2025.2 <- read_tsv(
 
 No parsing issues!
 
-# Keep only the columns needed
+## Data from DK_Naturdata_Res
+
+```{r}
+db_DK_J<-read_tsv(
+  "C:/Data/MOTIVATE/DK_Naturdata_Res_habitat_hab_codes_Jesper/DK_Naturdata_Res_habitat_hab_codes.txt")
+```
+
+## Data on correspondences HabitatID (DK_Naturdata_Res) - EUNIS
+
+```{r}
+correspondences<-read_excel(here("..", "DB_first_check", "data", "edited",
+                                 "correspondence_HabitatID_DK.xlsx"))
+```
+
+# Data preparation ReSurvey
+
+## Keep only the columns needed
 
 ```{r}
 data_V2025.2 <- data_V2025.2 %>%
@@ -44,7 +62,7 @@ data_V2025.2 <- data_V2025.2 %>%
          RS_CODE, RS_PROJTYP, Dataset, Longitude, Latitude, Lon_prec, Lat_prec)
 ```
 
-# Filter only ReSurvey part
+## Filter only ReSurvey part
 
 How many observations are truly resurveyed?
 
@@ -62,7 +80,7 @@ data_V2025.2 <- data_V2025.2 %>%
   select(-`ReSurvey plot (Y/N)`)
 ```
 
-# Remove manipulated observations
+## Remove manipulated observations
 
 Homogeneize RS_PROJTYP column:
 
@@ -93,7 +111,7 @@ data_V2025.2 <- data_V2025.2 %>%
 nrow(data_V2025.2)
 ```
 
-# Data manipulation
+## Data manipulation
 
 ```{r}
 data_V2025.2 <- data_V2025.2 %>%
@@ -197,16 +215,7 @@ data_V2025.2 <- data_V2025.2 %>%
   )
 ```
 
-# Add EUNIS from info on HabitatID from DK 
-
-Based on information got from Jesper.
-
-## Read the data sent by Jesper from DK
-
-```{r}
-db_DK_J<-read_tsv(
-  "C:/Data/MOTIVATE/DK_Naturdata_Res_habitat_hab_codes_Jesper/DK_Naturdata_Res_habitat_hab_codes.txt")
-```
+# Add EUNIS from info on HabitatID from DK_Naturdata_Res 
 
 ## Add info on HabitatID
 
@@ -225,20 +234,13 @@ data_V2025.2 <- data_V2025.2 %>%
                             ifelse(HabitatID == "9999", "91E0", HabitatID)))
 ```
 
-## Add info on correspondences HabitatID (DK, Jesper) - EUNIS
-
-Read correspondences file:
-
-```{r}
-correspondences<-read_excel(here("..", "DB_first_check", "data", "edited",
-                                 "correspondence_HabitatID_DK.xlsx"))
-```
+## Add info on correspondences HabitatID (DK_Naturdata_Res) - EUNIS
 
 Add info to data_V2025.2:
 
 ```{r}
 data_V2025.2 <- data_V2025.2 %>%
-  # Keeping all obs in data_V2025.2 but not all in db_DK_J
+  # Keeping all obs in data_V2025.2
   left_join(correspondences %>% select(HabitatID, EUNIS))
 ```
 
@@ -249,12 +251,12 @@ data_V2025.2 <- data_V2025.2 %>%
   mutate(EUNIS = ifelse(EUNIS == "NA", NA, EUNIS))
 ```
 
-Add info on EUNIS (DK) to EUNISa:
+Add info on EUNIS (DK_Naturdata_Res) to EUNISa:
 
 ```{r}
 data_V2025.2 <- data_V2025.2 %>%
   mutate(EUNISa =
-           # If EUNIS (DK) is available, add as EUNISa
+           # If EUNIS (DK_Naturdata_Res) is available, add as EUNISa
            ifelse(!is.na(EUNIS), EUNIS, 
                   # Otherwise keep EUNISa
                   EUNISa),
@@ -493,13 +495,13 @@ See PlotObservationIDs for those rows:
 
 ```{r}
 multiple_assign <- data_V2025.2 %>% 
-  filter(!is.na(EUNISb_1) & EUNISb_1 != EUNISa_1) %>%
+  dplyr::filter(!is.na(EUNISb_1) & EUNISb_1 != EUNISa_1) %>%
   pull(PlotObservationID)
 ```
 
 ```{r}
 data_V2025.2 <- data_V2025.2 %>%
-  filter(!PlotObservationID %in% multiple_assign)
+  dplyr::filter(!PlotObservationID %in% multiple_assign)
 ```
 
 # Identify ESY columns
@@ -1011,9 +1013,24 @@ n_to_n <- data_V2025.2_clean %>%
   mutate(n_obs_year = n()) %>%
   ungroup() %>%
   group_by(plotID_AV) %>%
-  filter(any(n_obs_year > 1)) %>%
+  dplyr::filter(any(n_obs_year > 1)) %>%
   distinct(plotID_AV) %>%
   pull(plotID_AV)
+```
+
+# Initial dataset
+
+```{r}
+initial_dataset <- data_V2025.2_clean %>% 
+  dplyr::filter(year >= 1984) %>% 
+  mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, 
+                           sep = "_")) %>%
+  # Add if N-to-N
+  mutate(n_to_n = plotID_AV %in% n_to_n) %>%
+  # Exclude N-to-N
+  dplyr::filter(n_to_n == FALSE) %>% 
+  # Remove one dataset that the custodian did not want to release
+  dplyr::filter(Dataset != "ForestREplot_EU_046")
 ```
 
 ## N obs
@@ -1021,19 +1038,7 @@ n_to_n <- data_V2025.2_clean %>%
 Number of observations:
 
 ```{r}
-cat("If using all plots:", 
-    data_V2025.2_clean %>% filter(year >= 1984) %>% nrow(), "\n")
-cat("If using plots where all obs have same coords:", 
-    data_V2025.2_clean %>% filter(year >= 1984) %>% 
-      dplyr::filter(multi_coords == F) %>% nrow(), "\n")
-cat("If using all plots + removing N-to-N:", 
-    data_V2025.2_clean %>% filter(year >= 1984) %>% 
-      mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_")) %>%
-      # Add if N-to-N
-      mutate(n_to_n = plotID_AV %in% n_to_n) %>%
-      # Exclude N-to-N
-      filter(n_to_n == FALSE) %>%
-      nrow(), "\n")
+nrow(initial_dataset)
 ```
 
 ## N plots
@@ -1041,23 +1046,27 @@ cat("If using all plots + removing N-to-N:",
 Number of plots (i.e. unique combinations of RS_CODE, ReSurvey site and ReSurvey plot):
 
 ```{r}
-cat("All plots:", 
-    data_V2025.2_clean %>% filter(year >= 1984) %>% 
-      distinct(plot_id) %>% nrow(), "\n")
-cat("Plots where all obs  have same coords:", 
-    data_V2025.2_clean %>% filter(year >= 1984) %>% 
-      dplyr::filter(multi_coords == F) %>% distinct(plot_id) %>% nrow(), "\n")
-cat("Plots where obs have different coords:", 
-    data_V2025.2_clean %>% filter(year >= 1984) %>% 
-      dplyr::filter(multi_coords == T) %>% distinct(plot_id) %>% nrow(), "\n")
-cat("All plots + removing N-to-N:", 
-    data_V2025.2_clean %>% filter(year >= 1984) %>% 
-      mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_")) %>%
-      # Add if N-to-N
-      mutate(n_to_n = plotID_AV %in% n_to_n) %>%
-      # Exclude N-to-N
-      filter(n_to_n == FALSE) %>%
-      distinct(plot_id) %>% nrow(), "\n")
+initial_dataset %>% distinct(plot_id) %>% nrow()
+```
+
+# Save to clean datafiles and shapefiles
+
+## All data Q, R, S, T
+
+This will be provided as "data" in the paper.
+
+```{r}
+write_csv(initial_dataset,
+          here("data", "clean","ReSurvey_QRST_data_V2025.2_20260618.csv"))
+```
+
+```{r}
+st_write(st_as_sf(initial_dataset %>%
+                    # Keep minimum number of fields
+                    # to avoid problems with long names
+                    select(PlotObservationID, year, Lat_updated, Lon_updated),
+                  coords = c("Lon_updated", "Lat_updated"), crs = 4326),
+         here("data", "shp", "ReSurvey_QRST_data_V2025.2_20260618.shp"))
 ```
 
 # List of databases for supplementary material
@@ -1071,73 +1080,11 @@ database_list <- read_excel(here("data", "clean", "databases_paper.xlsx"))
 Add number of observations:
 
 ```{r}
-data_V2025.2_clean %>% filter(year >= 1984) %>% 
-  mutate(plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_")) %>%
-  # Add if N-to-N
-  mutate(n_to_n = plotID_AV %in% n_to_n) %>%
-  # Exclude N-to-N
-  filter(n_to_n == FALSE) %>%
+initial_dataset %>%
   count(Dataset) %>% rename(n_obs = n) %>%
   left_join(database_list, by = c("Dataset" = "Dataset name")) %>%
   select(Dataset, `GIVD code`, Countries, Custodian, n_obs) %>%
   write_csv(here("data", "clean", "databases_paper_with_nobs.csv"))
-```
-
-# Save to clean datafiles and shapefiles
-
-## All data Q, R, S, T
-
-```{r}
-write_csv(data_V2025.2_clean,
-          here("data", "clean","ReSurvey_QRST_data_V2025.2_20260304.csv"))
-```
-
-```{r}
-st_write(st_as_sf(data_V2025.2_clean %>%
-                    # Keep minimum number of fields
-                    # to avoid problems with long names
-                    select(PlotObservationID, year, Lat_updated, Lon_updated),
-                  coords = c("Lon_updated", "Lat_updated"), crs = 4326),
-         here("data", "shp", "ReSurvey_QRST_data_V2025.2_20260304.shp"))
-```
-
-```{r}
-st_write(st_as_sf(data_V2025.2_clean %>%
-                    # Keep minimum number of fields
-                    # to avoid problems with long names
-                    select(PlotObservationID, year, Lat_updated, Lon_updated,
-                           EUNIS1, EUNIS2),
-                  coords = c("Lon_updated", "Lat_updated"), crs = 4326),
-         here("data", "shp", "ReSurvey_QRST_data_V2025.2_EUNIS_20260306.shp"))
-```
-
-## From 2016  Q, R, S, T
-
-```{r}
-write_csv(data_V2025.2_clean %>% 
-            dplyr::filter(year >= 2016),
-          here("data", "clean","ReSurvey_QRST_from2016_data_V2025.2_20260304.csv"))
-```
-
-```{r}
-st_write(st_as_sf(data_V2025.2_clean %>%
-                    # Keep minimum number of fields
-                    # to avoid problems with long names
-                    select(PlotObservationID, year, Lat_updated, Lon_updated) %>% 
-                    dplyr::filter(year >= 2016),
-                  coords = c("Lon_updated", "Lat_updated"), crs = 4326),
-         here("data", "shp", "ReSurvey_QRST_from2016_data_V2025.2_20260304.shp"))
-```
-
-```{r}
-st_write(st_as_sf(data_V2025.2_clean %>%
-                    # Keep minimum number of fields
-                    # to avoid problems with long names
-                    select(PlotObservationID, year, Lat_updated, Lon_updated,
-                           EUNIS1, EUNIS2) %>% 
-                    dplyr::filter(year >= 2016),
-                  coords = c("Lon_updated", "Lat_updated"), crs = 4326),
-         here("data", "shp", "ReSurvey_QRST_from2016_data_V2025.2_EUNIS_20260306.shp"))
 ```
 
 # Session info

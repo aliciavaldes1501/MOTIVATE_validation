@@ -29,15 +29,15 @@ library(cowplot)
 # Load functions
 
 ```{r}
-knitr::purl("functions_20260225.Rmd", output = "functions_20260225.R")
-source("functions_20260225.R")
+knitr::purl("functions_20260611_reduced.Rmd", output = "functions_20260611_reduced.R")
+source("functions_20260611_reduced.R")
 ```
 
 # Load previously created objects
 
 ```{r}
 # Define the folder path
-folder_path <- here("objects", "validated_points")
+folder_path <- here("objects", "validated_points_20260616")
 
 # List all .RData or .rda files in the folder
 rdata_files <- list.files(folder_path, full.names = TRUE)
@@ -51,8 +51,8 @@ lapply(rdata_files, load, envir = .GlobalEnv)
 Model with months, Landsat:
 
 ```{r}
-# Load best model - Accuracy = 0.852 (without k-fold)
-rf_months_Landsat <- get(load(here("objects", "RF_1500_20260318",
+# Load best model
+rf_months_Landsat <- get(load(here("objects", "RF_1500_20260608",
                                "rf_months_Landsat_refin_20_10_2x_model.Rdata")))$model
 ```
 
@@ -62,7 +62,7 @@ Read data validation Landsat:
 
 ```{r}
 data_validation <- read_tsv(here(
-  "data", "clean","final_RS_data_bands_Landsat_all_20260309.csv"))
+  "data", "clean","final_RS_data_bands_Landsat_all_20260611.csv"))
 ```
 
 No parsing issues!
@@ -81,7 +81,6 @@ data_V2025.2 <- read_tsv(
 # Define lists of predictor variables
 
 ```{r}
-# Excluding EVI because many values outside of range -1, 1
 vars_RF_months_Landsat <- c(
   # Min values of all indices
   "NDVI_min", "NDMI_min", "NDWI_min", "SAVI_min",
@@ -100,51 +99,61 @@ vars_RF_months_Landsat <- c(
   "NDVI_diff_pos_oct_doy", "SAVI_diff_pos_oct_doy")
 ```
 
-# Apply similar filtering as to prepare data for models
-
-First, we were predicting in all data, even with missing values in predictors and values out ot the expected ranges!
+# Get full dataset
 
 ```{r}
-data_validation_filtered <- data_validation %>%
-  # Data filtering
-  # Remove rows with missing values in predictors
-  dplyr::filter(if_all(all_of(vars_RF_months_Landsat), ~ !is.na(.))) %>%
-  # Remove all rows with wrong values of indices (not between -1 and 1)
-  dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
-  # With Landsat data, many observations removed because of high/low EVI values
-  # In Landsat_extraction, values of EVI outside of expected range were set as NA,
-  # so better not to use EVI here
-  # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
-  dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
-  dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
-  dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
-  # Keep only rows with differences > 0 in variables
-  filter(if_all(any_of(vars_RF_months_Landsat[grepl("diff", 
-                                                   vars_RF_months_Landsat)]), 
-                ~ .x > 0)) %>%
-  # Rough validation based on NDWI
-  rough_validation_Landsat()
+get_full_datasets <- function(data, variables) {
+  data %>%
+    mutate(EUNIS1 = as.factor(EUNIS1)) %>%
+    # Remove rows with missing values in predictors
+    dplyr::filter(if_all(all_of(variables), ~ !is.na(.))) %>%
+    # Remove all rows with wrong values of indices (not between -1 and 1)
+    dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
+    dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
+    dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
+    dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
+    # Keep only rows with differences > 0 in variables
+    dplyr::filter(if_all(any_of(variables[grepl("diff", variables)]), 
+                  ~ .x > 0)) %>%
+    # Filter based on max NDWI
+    mutate(valid_1_NDWI = case_when(NDWI_max > 0.3 ~ "wrong", 
+                                    TRUE ~ NA_character_),
+           valid_1_count = rowSums(across(c(valid_1_NDWI), ~ . == "wrong"), 
+                                   na.rm = TRUE),
+           valid_1 = if_else(valid_1_count > 0,
+                             "At least 1 rule broken", "No rules broken so far")
+           ) %>%
+    # Keep only rows with no rules broken
+    dplyr::filter(valid_1 == "No rules broken so far") %>%
+    # Remove unneeded cols
+    select(-starts_with("valid"))
+  }
 ```
 
 ```{r}
-nrow(data_validation_filtered)
+full_dataset <- data_validation %>%
+  get_full_datasets(vars_RF_months_Landsat)
+```
+
+```{r}
+nrow(full_dataset)
 ```
 
 # Predictions from best models 
 
-Predict in data without NAs! 
+Predict in full dataset.
 
 Model with months, Landsat for predicting EVERYWHERE:
 
 ```{r eval=FALSE, include=FALSE}
 prediction_Landsat_resp <- predict(rf_months_Landsat,
-                                   newdata = data_validation_filtered, 
+                                   newdata = full_dataset, 
                                    type = "response")
 ```
 
 ```{r eval=FALSE, include=FALSE}
 prediction_Landsat_prob <- predict(rf_months_Landsat,
-                                   newdata = data_validation_filtered, 
+                                   newdata = full_dataset, 
                                    type = "prob")
 ```
 
@@ -156,7 +165,7 @@ Save:
 
 ```{r eval=FALSE, include=FALSE}
 for (prediction_name in predictions) {
-  file_path <- paste0("objects/validated_points/", prediction_name, ".Rdata")
+  file_path <- paste0("objects/validated_points_20260616/", prediction_name, ".Rdata")
   save(list = prediction_name, file = file_path)
 }
 ```
@@ -170,7 +179,7 @@ data_validated <- data_validation %>%
     cbind(
       data.frame(
         # PlotObservationIDs
-        PlotObservationID = data_validation_filtered %>% 
+        PlotObservationID = full_dataset %>% 
           pull(PlotObservationID),
         # Prediction response
         pred_Landsat_resp = prediction_Landsat_resp
@@ -186,18 +195,12 @@ data_validated <- data_validation %>%
                                 ifelse(is.na(pred_Landsat_resp), NA, FALSE)))
 ```
 
-# Counts
-
-```{r}
-data_validated %>% count(valid_Landsat)
-```
-
-# Data cleaning
+# Data cleaning and preparation
 
 ```{r}
 data_validated_clean <- data_validated %>%
   # Keep only needed cols
-  select(PlotObservationID, year, biogeo, unit, EUNIS1, EUNIS2, 
+  select(PlotObservationID, plotID, year, EUNIS1, 
          pred_Landsat_resp, pred_Landsat_Q, pred_Landsat_R, pred_Landsat_S, 
          pred_Landsat_T, valid_Landsat)
 ```
@@ -207,27 +210,28 @@ How many NAs for each row?
 ```{r}
 data_validated_clean %>% 
   summarise(across(everything(), ~ sum(is.na(.))))
+# Year missing for some rows
 ```
 
-# Get info from original db
-
-## Read original db
-
-```{r}
-data_V2025.2 <- read_tsv(
-  "C:/Data/MOTIVATE/MOTIVATE_data/Data/EVA and ReSurvey Data/2025 data - V2025.2/Core data/200_Motivate20250415_notJUICE_header_with_precise_coordinates.csv")
-```
-
-## Get info for cols where there were NAs
+## Get info from original database for cols where there were NAs
 
 ```{r}
 data_validated_clean <- left_join(
-  data_validated_clean,
-  data_V2025.2 %>%
-    # Select cols where there were NAs
-    select(RS_CODE, `ReSurvey site`, `ReSurvey plot`, `ReSurvey observation`, 
-           PlotObservationID, `Date of recording`, `Location method`),
-  by = "PlotObservationID")
+  data_validated_clean, 
+  data_V2025.2 %>% 
+    select(PlotObservationID, `Date of recording`)
+  ) %>%
+  mutate(year_new = as.integer(year(dmy(`Date of recording`)))) %>%
+  mutate(year = ifelse(!is.na(year), year, year_new)) %>%
+  select(-`Date of recording`, -year_new)
+```
+
+How many NAs for each row?
+
+```{r}
+data_validated_clean %>% 
+  summarise(across(everything(), ~ sum(is.na(.))))
+# Year not missing for any row now
 ```
 
 ## Add coordinates
@@ -251,57 +255,15 @@ data_validated_clean %>%
   summarise(across(everything(), ~ sum(is.na(.))))
 ```
 
-# More data cleaning
+## Add info on nr resurveys (n different years)
 
-```{r}
-data_validated_clean <- data_validated_clean %>%
-  # Convert to date
-  mutate(`Date of recording` = dmy(`Date of recording`))
-```
-
-# Obs with more than one row
-
-```{r}
-data_validated_clean %>%
-  # These 4 cols uniquely identify each obs
-  group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`, `ReSurvey observation`) %>%
-  # Filter obs with more than 1 row
-  filter(n() > 1) %>%
-  arrange(RS_CODE, `ReSurvey site`, `ReSurvey plot`, `ReSurvey observation`)
-```
-
-For each unique combination of RS_CODE, ReSurvey site, ReSurvey plot and ReSurvey observation, check whether any of the other columns (except PlotObservationID) differ across the rows in that group:
-
-```{r}
-data_validated_clean %>%
-  group_by(
-    RS_CODE, `ReSurvey site`, `ReSurvey plot`, `ReSurvey observation`
-  ) %>%
-  filter(n() > 1) %>%
-  group_modify(~ {
-    
-    # Exclude columns that should NOT be checked
-    cols_to_check <- setdiff(names(.x), "PlotObservationID")
-    
-    # Identify columns where at least one value differs
-    diffs <- map_lgl(.x[cols_to_check], ~ n_distinct(.x, na.rm = FALSE) > 1)
-    
-    tibble(
-      differing_columns = paste(names(diffs)[diffs], collapse = ", ")
-      )
-    }) %>%
-  ungroup() %>%
-  # Keep only groups where at least one difference exists
-  filter(differing_columns != "")
-```
-
-# Add info on nr resurveys (n different years)
+### From validation
 
 Some have only 1 year, either because the first year(s) were prior to Landsat, or because they were still not resurveyed. 
 
 ```{r}
 data_validated_clean <- data_validated_clean %>%
-  group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`) %>%
+  group_by(plotID) %>%
   mutate(
     n_resurveys = n_distinct(year, na.rm = TRUE),   # count unique years
     first_year  = min(year, na.rm = TRUE),          # earliest year
@@ -310,65 +272,105 @@ data_validated_clean <- data_validated_clean %>%
   ungroup()
 ```
 
-# Add unique, self_created plot ID
-
-```{r}
-data_validated_clean <- data_validated_clean %>% 
-  mutate(
-    plotID_AV = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "_"))
-```
-
-# Get only latest obs for each plot
-
-```{r}
-data_validated_clean_latest <- data_validated_clean %>%
-  # Keep only rows from the last year
-  filter(year == last_year) %>%
-  # These 3 cols are supposed to uniquely identify each plot
-  group_by(RS_CODE, `ReSurvey site`, `ReSurvey plot`) %>%
-  # If more than one row in the same year, keep the latest date
-  #slice_max(`Date of recording`, n = 1, with_ties = FALSE) %>%
-  ungroup()
-```
-
-## Obs with more than one row
-
-```{r}
-data_validated_clean_latest %>%
-  group_by(plotID_AV) %>%
-  # Filter obs with more than 1 row
-  filter(n() > 1) %>%
-  ungroup() %>%
-  arrange(RS_CODE, `ReSurvey site`, `ReSurvey plot`)
-```
-
-# Write csvs
+### Write csv
 
 ```{r}
 write_csv(data_validated_clean,
-          here("data", "clean","data_validated_clean_20260318.csv"))
-write_csv(data_validated_clean_latest,
-          here("data", "clean","data_validated_clean_latest_20260318.csv"))
+          here("data", "clean","data_validated_clean_20260616.csv"))
+```
+
+## From original db
+
+```{r}
+PlotObservationIDs <- data_validated_clean %>% distinct(PlotObservationID) %>% pull(PlotObservationID)
+data_V2025.2_sel <- data_V2025.2 %>%
+  mutate(plotID = paste(RS_CODE, `ReSurvey site`, `ReSurvey plot`, sep = "-")) %>%
+  # Keep only observations in the validation data
+  filter(PlotObservationID %in% PlotObservationIDs) %>%
+  mutate(year = as.integer(year(dmy(`Date of recording`)))) %>%
+  group_by(plotID) %>%
+  mutate(
+    n_resurveys = n_distinct(year, na.rm = TRUE),   # count unique years
+    first_year  = min(year, na.rm = TRUE),          # earliest year
+    last_year   = max(year, na.rm = TRUE)           # latest year
+  ) %>%
+  ungroup()
+```
+
+## Join and compare
+
+```{r}
+plot_resurveys <-full_join(
+  # Full dataset
+  full_dataset  %>%
+    group_by(plotID) %>%
+    mutate(
+      n_resurveys = n_distinct(year, na.rm = TRUE),   # count unique years
+      first_year  = min(year, na.rm = TRUE),          # earliest year
+      last_year   = max(year, na.rm = TRUE)           # latest year
+      ) %>%
+    ungroup() %>%
+    distinct(plotID, n_resurveys, first_year, last_year) %>%
+    rename(n_resurveys_full = n_resurveys, first_year_full = first_year, 
+           last_year_full = last_year),
+  # Original data
+  data_V2025.2_sel %>%
+    distinct(plotID, n_resurveys, first_year, last_year) %>%
+    rename(n_resurveys_orig = n_resurveys, first_year_orig = first_year, 
+           last_year_orig = last_year)
+  ) %>%
+  mutate(prop_resurveys_in_full = n_resurveys_full / n_resurveys_orig)
+```
+
+```{r}
+plot_resurveys %>% filter(n_resurveys_orig != n_resurveys_full)
+plot_resurveys %>% filter(first_year_orig != first_year_full)
+plot_resurveys %>% filter(last_year_orig != last_year_full)
+```
+
+```{r}
+PlotObservationIDs_fuill_dataset <- full_dataset %>% pull(PlotObservationID)
+data_validated_clean <- data_validated_clean %>%
+  mutate(in_full_dataset = ifelse(
+    PlotObservationID %in% PlotObservationIDs_fuill_dataset, TRUE, FALSE))
+```
+
+```{r}
+data_validated_clean %>%
+  count(plotID, in_full_dataset) %>%
+  pivot_wider(
+    names_from = in_full_dataset,
+    values_from = n,
+    values_fill = 0,
+    names_prefix = "n_"
+  ) %>%
+  filter(n_FALSE != 0 & n_TRUE != 0) %>%
+  nrow()
 ```
 
 # Counts of validated / not-validated obs
 
 ## General
 
+### From all obs
+
 ```{r}
 data_validated_clean %>%
   count(valid_Landsat) %>%
   mutate(percent = n / sum(n) * 100)
+# Here, NAs are those obs not in the full dataset
 ```
+
+### From full dataset
 
 ```{r}
 data_validated_clean %>%
-  filter(!is.na(valid_Landsat)) %>%
+  filter(!is.na(valid_Landsat)) %>% # This keeps only those obs in the full dataset!
   count(valid_Landsat) %>%
   mutate(percent = n / sum(n) * 100)
 ```
 
-## By habitat
+## By habitat, from full dataset
 
 ```{r}
 data_validated_clean %>%
@@ -404,21 +406,46 @@ data_validated_clean %>%
 
 # Validation of plots
 
-Extract EUNIS assignations for each plot (sometimes different among different observations of the same plot):
+Check that only one EUNIS1 is assigned to each plot and year:
 
 ```{r}
-eunis_wide <- data_validated_clean %>%
-  group_by(plotID_AV, n_resurveys) %>%
+data_validated_clean %>%
+  group_by(plotID, n_resurveys, year) %>%
   reframe(
     EUNISa_vals = unique(EUNIS1)) %>%
   unnest(EUNISa_vals) %>%
-  group_by(plotID_AV, n_resurveys) %>%
+  group_by(plotID, n_resurveys, year) %>%
   mutate(EUNIS_idx = row_number()) %>%
   pivot_wider(
     names_from = EUNIS_idx,
     values_from = EUNISa_vals,
     names_prefix = "EUNIS1_"
   ) %>%
+  ungroup() %>%
+  # Number of different EUNIS1 assigned
+  mutate(n_EUNIS1 = rowSums(!is.na(select(., starts_with("EUNIS1_"))))) %>%
+  filter(n_EUNIS1 > 1) %>%
+  nrow()
+```
+
+Extract EUNIS assignations for each plot (sometimes different among years, i.e. different observations of the same plot):
+
+```{r}
+eunis_wide <- data_validated_clean %>%
+  group_by(plotID, n_resurveys) %>%
+  reframe(
+    EUNISa_vals = unique(EUNIS1)) %>%
+  unnest(EUNISa_vals) %>%
+  group_by(plotID, n_resurveys) %>%
+  mutate(EUNIS_idx = row_number()) %>%
+  pivot_wider(
+    names_from = EUNIS_idx,
+    values_from = EUNISa_vals,
+    names_prefix = "EUNIS1_"
+  ) %>%
+  ungroup() %>%
+  # Number of different EUNIS1 assigned
+  mutate(n_EUNIS1 = rowSums(!is.na(select(., starts_with("EUNIS1_"))))) %>%
   # Categorize as "Habitat change" if there was more than one EUNIS assigned
   # to different observations within a plot
   mutate(EUNIS = case_when(
@@ -430,15 +457,20 @@ eunis_wide <- data_validated_clean %>%
   select(-EUNIS1_1, -EUNIS1_2, -EUNIS1_3, -EUNIS1_4)
 ```
 
+Check that the number of EUNIS assignations is never larger than the number of resurveys:
+
+```{r}
+eunis_wide %>% filter(n_EUNIS1 > n_resurveys) %>% nrow()
+```
+
 Extract the latest coordinate pair per plot (sometimes coordinates are different among different observations of the same plot):
 
 ```{r}
 coords_latest <- data_validated_clean %>%
-  group_by(plotID_AV, n_resurveys) %>%
+  group_by(plotID, n_resurveys) %>%
   slice_max(order_by = year, n = 1, with_ties = FALSE) %>%
   select(
-    plotID_AV, RS_CODE, `ReSurvey site`, `ReSurvey plot`, n_resurveys,
-    Lon_updated, Lat_updated
+    plotID, n_resurveys, Lon_updated, Lat_updated
   ) %>%
   ungroup()
 ```
@@ -447,176 +479,153 @@ coords_latest <- data_validated_clean %>%
 data_validated_plots <- data_validated_clean %>%
   left_join(
     eunis_wide,
-    by = c("plotID_AV", "n_resurveys")
+    by = c("plotID", "n_resurveys")
   ) %>%
-  group_by(plotID_AV, n_resurveys, EUNIS) %>%
+  group_by(plotID, n_resurveys, EUNIS) %>%
   summarise(
-    n_obs = n(),
-    n_true = sum(valid_Landsat == TRUE, na.rm = TRUE),
-    n_false = sum(valid_Landsat == FALSE, na.rm = TRUE),
+    # Total number of observations for that plot
+    n_obs = n(), 
+    # Number of validated observations, not validated and NA
+    n_val = sum(valid_Landsat == TRUE, na.rm = TRUE),
+    n_notval = sum(valid_Landsat == FALSE, na.rm = TRUE),
     n_na = sum(is.na(valid_Landsat)),
+    # N obs in full dataset
+    n_in_full = sum(in_full_dataset),
     .groups = "drop"
   ) %>%
   mutate(
-    share_true = ifelse((n_true + n_false) > 0,
-                        n_true / (n_true + n_false), NA_real_),
-    share_false = ifelse((n_true + n_false) > 0,
-                         n_false / (n_true + n_false), NA_real_)
-  ) %>%
-  mutate(
-    valid_status = case_when(
-      # --- ALL cases (keep first so they never get overridden) ---
-      # All observations validated
-      n_true  == n_obs ~ "all_TRUE",
-      # All observations not validated
-      n_false == n_obs ~ "all_FALSE",
-      # All observations NA
-      n_na    == n_obs ~ "all_NA",
-      
-      # Equal number of observations validated and not validated
-      n_true == n_false & n_na == 0 ~ "TRUE_FALSE",
-
-      # All three present --> keep as some observations validated and some not validated
-      # --- TRUE + FALSE + NA -> treat as TRUE_FALSE
-      n_true == n_false & n_na > 0 ~ "TRUE_FALSE",
-      
-      # --- More cases (dominance) ---
-      # TRUE dominates FALSE
-      share_true > share_false & n_false > 0 ~ "more_TRUE",
-      # FALSE dominates TRUE
-      share_false > share_true & n_true > 0 ~ "more_FALSE",
-
-      # Some observations validated and some NA --> keep as all validated
-      # TRUE + NA  --> treat as all_TRUE
-      n_true  > 0 & n_na > 0 & n_false == 0 ~ "all_TRUE",
-
-      # Some observations not validated and some NA --> keep as all not validated
-      # FALSE + NA --> treat as all_FALSE
-      n_false > 0 & n_na > 0 & n_true  == 0 ~ "all_FALSE",
-      
-      # Fallback (shouldn’t happen, but safe to keep)
-      TRUE ~ "mixed"
-    ),
-    n_resurveys_equal_n_obs = n_resurveys == n_obs
-  ) %>%
-  # Less restrictive validity status
-  mutate(valid_status_new = case_when(
-    valid_status == "TRUE_FALSE" ~ "tie",
-    valid_status %in% c("all_FALSE", "more_FALSE") ~ "not_valid",
-    valid_status %in% c("all_TRUE", "more_TRUE") ~ "valid",
-    valid_status == "all_NA" ~ NA,
-    TRUE ~ "other"
-  )) %>%
-  # Add coordinates (if coordinates are different among different observations 
-  # of the same plot, extract the latest coordinate pair per plot, i.e. from
-  # the last observation year)
-  left_join(
-    coords_latest,
-    by = c("plotID_AV", "n_resurveys")
+    # Calculate shares (proportions) of validated and not validated observations 
+    # (only if there are any non-NA observations, otherwise set as NA)
+    share_val = ifelse((n_val + n_notval) > 0,
+                        n_val / (n_val + n_notval), NA_real_),
+    share_notval = ifelse((n_val + n_notval) > 0,
+                         n_notval / (n_val + n_notval), NA_real_),
+    # Calculate proportion of NA observations
+    prop_na = n_na/n_obs,
+    # Calculate proportion of obs in full dataset
+    prop_in_full = n_in_full / n_obs
   )
 ```
 
 ```{r}
+cat("\nPlots with no observations in full dataset",
+    data_validated_plots %>% filter(prop_in_full == 0) %>% nrow()) # --> Plot cannot be validated - NA
+cat("\nPlots with all observations in full dataset",
+    data_validated_plots %>% filter(prop_in_full == 1) %>% nrow()) # --> Plot can be validated
+cat("\nPlots with some observations in full dataset and some not",
+    data_validated_plots %>% filter(prop_in_full > 0 & prop_in_full < 1) %>% nrow()) # --> Plot cannot be validated - NA
+```
+
+```{r}
+data_validated_plots <- data_validated_plots %>%
+  mutate(valid_status = case_when(
+    prop_in_full == 0 ~ NA,                           # Plots with no observations in full dataset
+    prop_in_full > 0 & prop_in_full < 1 ~ NA,         # Plots with some observations in full dataset and some not
+    prop_in_full == 1 & share_val == 1 ~ "valid",     # Plots with all observations in full dataset
+    prop_in_full == 1 & share_val != 1 ~ "not_valid"  # Plots with all observations in full dataset
+  )) %>%
+  # Add coordinates (if coordinates are different among different observations 
+  # of the same plot, extract the latest coordinate pair per plot, i.e. from
+  # the last observation year)
+  left_join(coords_latest, by = c("plotID", "n_resurveys"))
+```
+
+```{r}
 data_validated_plots %>% count(valid_status)
-data_validated_plots %>% count(valid_status_new)
 ```
 
 # Counts of validated / not-validated plots
 
 ## General
 
-```{r}
-data_validated_plots %>%
-  count(valid_status_new) %>%
-  mutate(percent = n / sum(n) * 100)
-```
+### All plots
 
 ```{r}
 data_validated_plots %>%
-  filter(!is.na(valid_status_new)) %>%
-  count(valid_status_new) %>%
+  count(valid_status) %>%
   mutate(percent = n / sum(n) * 100)
 ```
 
-## By habitat
+### Plots with all obs in full dataset
+
+```{r}
+data_validated_plots %>%
+  filter(!is.na(valid_status)) %>%
+  count(valid_status) %>%
+  mutate(percent = n / sum(n) * 100)
+```
+
+## By habitat, plots with all obs in full dataset
 
 ```{r}
 data_validated_plots %>%
   filter(EUNIS == "Q") %>%
-  filter(!is.na(valid_status_new)) %>%
-  count(valid_status_new) %>%
+  filter(!is.na(valid_status)) %>%
+  count(valid_status) %>%
   mutate(percent = n / sum(n) * 100)
 ```
 
 ```{r}
 data_validated_plots %>%
   filter(EUNIS == "R") %>%
-  filter(!is.na(valid_status_new)) %>%
-  count(valid_status_new) %>%
+  filter(!is.na(valid_status)) %>%
+  count(valid_status) %>%
   mutate(percent = n / sum(n) * 100)
 ```
 
 ```{r}
 data_validated_plots %>%
   filter(EUNIS == "S") %>%
-  filter(!is.na(valid_status_new)) %>%
-  count(valid_status_new) %>%
+  filter(!is.na(valid_status)) %>%
+  count(valid_status) %>%
   mutate(percent = n / sum(n) * 100)
 ```
 
 ```{r}
 data_validated_plots %>%
   filter(EUNIS == "T") %>%
-  filter(!is.na(valid_status_new)) %>%
-  count(valid_status_new) %>%
+  filter(!is.na(valid_status)) %>%
+  count(valid_status) %>%
   mutate(percent = n / sum(n) * 100)
 ```
 
 ```{r}
 data_validated_plots %>%
   filter(EUNIS == "Change") %>%
-  filter(!is.na(valid_status_new)) %>%
-  count(valid_status_new) %>%
+  filter(!is.na(valid_status)) %>%
+  count(valid_status) %>%
   mutate(percent = n / sum(n) * 100)
 ```
 
 # Write csv of observations in validated plots
 
-This csv contains only information about observations in validated plots (i.e. plots with all observations validated, where valid_status == "all_TRUE", or plots with more observations validated that not validated, where valid_status == "more_TRUE").
+This csv contains only information about observations in validated plots (i.e. plots with all observations validated).
 
 ```{r}
 data_obs_in_val_plots <- data_validated_clean %>% 
   # Filter validated plots
-  filter(plotID_AV %in% 
+  filter(plotID %in% 
            c(data_validated_plots %>% 
-           filter(valid_status_new == "valid") %>% 
-           pull(plotID_AV))) %>%
-  # Join info on plot validation
-  left_join(
-    data_validated_plots %>% select(plotID_AV, valid_status),
-    by = "plotID_AV") %>%
-  rename(valid_status_plot = valid_status) %>%
-  # For each plotID_AV, create a column plotID_AV_num (numeric identifier)
-  group_by(plotID_AV) %>%
-  mutate(plotID_AV_num = cur_group_id()) %>%
+           filter(valid_status == "valid") %>% 
+           pull(plotID))) %>%
+  # For each plotID, create a column plotID_num (numeric identifier)
+  group_by(plotID) %>%
+  mutate(plotID_num = cur_group_id()) %>%
   ungroup()
 ```
 
 ```{r}
 write_csv(data_obs_in_val_plots,
-          here("data", "clean","data_obs_in_val_plots_20260416.csv"))
+          here("data", "clean","data_obs_in_val_plots_20260617.csv"))
 ```
 
-# (Fig 4) Maps + graph validated plots
+ (Fig 4) Maps + graph validated plots
 
 ```{r}
 plot_plots <- data_validated_plots %>%
   mutate(EUNIS = forcats::fct_relevel(EUNIS, "Change", after = Inf)) %>%
-  count(EUNIS, valid_status_new, name = "n") %>% 
-  # Put those with "tie" as NA
-  mutate(valid_status_new = ifelse(valid_status_new == "tie", NA,
-                                   valid_status_new)) %>% 
-  ggplot(aes(x = EUNIS, y = n, fill = valid_status_new)) +
+  count(EUNIS, valid_status, name = "n") %>% 
+  ggplot(aes(x = EUNIS, y = n, fill = valid_status)) +
   geom_col(position = position_stack()) +
   xlab(NULL) + ylab("Number of plots") +
   scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k")) +
@@ -631,7 +640,7 @@ plot_plots <- data_validated_plots %>%
     labels = function(x) {
       x <- ifelse(x == "Q", "Q - Wetlands", x)
       x <- ifelse(x == "R", "R - Grasslands", x)
-      x <- ifelse(x == "S", "S - Scrublands", x)
+      x <- ifelse(x == "S", "S - Shrublands", x)
       x <- ifelse(x == "T", "T - Forests", x)
       x <- ifelse(x == "Change", "Habitat change", x)
       x
@@ -694,7 +703,7 @@ plots_3035_crop <- st_crop(plots_3035, europe_bbox_3035)
 # (st_join on polygons brings grid_id onto points)
 pts_with_grid <- st_join(
   plots_3035_crop %>% # points, filter only validated / invalidated
-    filter(valid_status_new == "not_valid" | valid_status_new == "valid"),
+    filter(valid_status == "not_valid" | valid_status == "valid"),
   grid_3035["grid_id"],           # only keep grid_id column from grid
   left = FALSE                    # drop points outside the grid
 )
@@ -706,7 +715,7 @@ agg <- pts_with_grid |>
     # ensure EUNIS "Change" is last if you facet later (optional)
     EUNIS = fct_relevel(EUNIS, "Change", after = Inf),
     is_valid = case_when(
-      valid_status_new == "valid" ~ 1L,
+      valid_status == "valid" ~ 1L,
       TRUE ~ 0L
     )
   ) |>
@@ -732,7 +741,7 @@ map_grid_plots <- ggplot() +
     nrow = 3,
     ncol = 2,
     labeller = labeller(EUNIS = c("Q" = "Q - Wetlands", "R" = "R - Grasslands",
-                                   "S" = "S - Scrublands", "T" = "T - Forests",
+                                   "S" = "S - Shrublands", "T" = "T - Forests",
                                    "Change" = "Habitat change"))) +
   scale_fill_gradientn(
     colours = c("#D55E00", "#F0E442", "#0072B2"),    # orange → yellow → blue
@@ -813,7 +822,7 @@ plot_obs <- data_validated_clean %>%
   count(EUNIS1, valid_Landsat, name = "n") %>% 
   ggplot(aes(x = EUNIS1, y = n, fill = valid_Landsat)) +
   geom_col(position = position_stack()) +
-  xlab(NULL) + ylab("Number of observations") +
+  xlab(NULL) + ylab("Number of plot observations") +
   scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k")) +
   scale_fill_manual(values = c("FALSE" = "#D55E00", "TRUE" = "#0072B2",
                                "NA" = "#828282"),
@@ -825,7 +834,7 @@ plot_obs <- data_validated_clean %>%
     labels = function(x) {
       x <- ifelse(x == "Q", "Q - Wetlands", x)
       x <- ifelse(x == "R", "R - Grasslands", x)
-      x <- ifelse(x == "S", "S - Scrublands", x)
+      x <- ifelse(x == "S", "S - Shrublands", x)
       x <- ifelse(x == "T", "T - Forests", x)
       x
       }
@@ -896,7 +905,7 @@ map_obs_plots <- ggplot() +
     nrow = 3,
     ncol = 2,
     labeller = labeller(EUNIS1 = c("Q" = "Q - Wetlands", "R" = "R - Grasslands",
-                                   "S" = "S - Scrublands", "T" = "T - Forests"))) +
+                                   "S" = "S - Shrublands", "T" = "T - Forests"))) +
   scale_fill_gradientn(
     colours = c("#D55E00", "#F0E442", "#0072B2"),    # orange → yellow → blue
     values = rescale(c(0, 0.5, 1)),
@@ -973,9 +982,9 @@ plot3_Landsat <- data_validated_clean %>%
   mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
   filter(!is.na(valid_Landsat)) %>%
   left_join(data_validation %>% 
-              select(PlotObservationID, NDVI_diff_pos_march_value)) %>%
-  distr_plot("NDVI_diff_pos_march_value", 
-             "Difference in NDVI between peak and greening", 
+              select(PlotObservationID, SAVI_diff_pos_march_value)) %>%
+  distr_plot("SAVI_diff_pos_march_value", 
+             "Difference in SAVI between peak and greening", 
              grey = F) +
   theme(plot.margin = margin(2, 2, 2, 2)) +
   scale_x_discrete(limits = c("T", "S", "R", "Q"))
@@ -983,15 +992,40 @@ plot4_Landsat <- data_validated_clean %>%
   mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
   filter(!is.na(valid_Landsat)) %>%
   left_join(data_validation %>% 
-              select(PlotObservationID, NDVI_auc_mar_oct)) %>%
-  distr_plot("NDVI_auc_mar_oct", 
-             "AUC for NDVI", grey = F) +
+              select(PlotObservationID, NDVI_diff_pos_march_value)) %>%
+  distr_plot("NDVI_diff_pos_march_value", 
+             "Difference in NDVI between peak and greening", 
+             grey = F)  +
   theme(axis.title.y = element_blank(),
         axis.text.y  = element_blank(),
         axis.ticks.y = element_blank()) + 
   theme(plot.margin = margin(2, 2, 2, 2)) +
   scale_x_discrete(limits = c("T", "S", "R", "Q"))
 plot5_Landsat <- data_validated_clean %>%
+  mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
+  filter(!is.na(valid_Landsat)) %>%
+  left_join(data_validation %>% 
+              select(PlotObservationID, NDVI_auc_mar_oct)) %>%
+  distr_plot("NDVI_auc_mar_oct", 
+             "AUC for NDVI", grey = F) +
+  theme(plot.margin = margin(2, 2, 2, 2)) +
+  scale_x_discrete(limits = c("T", "S", "R", "Q"))
+plot6_Landsat <- data_validated_clean %>%
+  mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
+  filter(!is.na(valid_Landsat)) %>%
+  left_join(data_validation %>% 
+              select(PlotObservationID, SAVI_auc_mar_oct)) %>%
+  distr_plot("SAVI_auc_mar_oct", 
+             "AUC for SAVI", grey = F)  +
+  theme(axis.title.y = element_blank(),
+        axis.text.y  = element_blank(),
+        axis.ticks.y = element_blank()) + 
+  theme(axis.title.y = element_blank(),
+        axis.text.y  = element_blank(),
+        axis.ticks.y = element_blank()) + 
+  theme(plot.margin = margin(2, 2, 2, 2)) +
+  scale_x_discrete(limits = c("T", "S", "R", "Q"))
+plot7_Landsat <- data_validated_clean %>%
   mutate(EUNIS1 = factor(EUNIS1, levels = c("Q", "R", "S", "T"))) %>%
   filter(!is.na(valid_Landsat)) %>%
   left_join(data_validation %>% 
@@ -1012,11 +1046,11 @@ plot_for_legend <- data_validated_clean %>%
   scale_fill_manual(values = c("#0072B2", "#D55E00", "#009E73", "#CC79A7"),
                     breaks = c("Q", "R", "S", "T"), 
                     labels = c("Q" = "Q - Wetlands","R" = "R - Grasslands", 
-                               "S" = "S - Scrublands", "T" = "T - Forests")) +
+                               "S" = "S - Shrublands", "T" = "T - Forests")) +
   scale_color_manual(values = c("#0072B2", "#D55E00", "#009E73", "#CC79A7"),
                      breaks = c("Q", "R", "S", "T"),
                      labels = c("Q" = "Q - Wetlands","R" = "R - Grasslands", 
-                               "S" = "S - Scrublands", "T" = "T - Forests")) +
+                               "S" = "S - Shrublands", "T" = "T - Forests")) +
   guides(fill = guide_legend(
     override.aes = list(shape = 22, size = 8, 
                         fill = c("#0072B2", "#D55E00", "#009E73", "#CC79A7"),
@@ -1037,51 +1071,56 @@ fig3 <- (
      plot4_Landsat + theme(plot.margin = margin(2,2,2,2))
    ) /
   (plot5_Landsat + theme(plot.margin = margin(2,2,2,2)) |
+     plot6_Landsat + theme(plot.margin = margin(2,2,2,2))
+   ) /
+  (plot7_Landsat + theme(plot.margin = margin(2,2,2,2)) |
     legend
   ) +
-  plot_layout(heights = c(1,1,1)) &
+  plot_layout(heights = c(1,1,1,1)) &
   theme(plot.margin = margin(2,2,2,2))
 
 ggsave(here("output", "figures", "manuscript", "fig3.jpeg"), plot = fig3,
-       dpi = 300, width = 7, height = 9)
+       dpi = 300, width = 7, height = 11)
 ```
 
 # (Appendix 4) Plot GPS observations used for models
 
 ```{r}
-filter_data_Landsat <- function(data, variables) {
+get_full_datasets <- function(data, variables) {
   data %>%
     mutate(EUNIS1 = as.factor(EUNIS1)) %>%
     # Remove rows with missing values in predictors
     dplyr::filter(if_all(all_of(variables), ~ !is.na(.))) %>%
     # Remove all rows with wrong values of indices (not between -1 and 1)
     dplyr::filter(NDVI_max <= 1 & NDVI_min >= -1) %>%
-    # With Landsat data, many observations removed because of high/low EVI values
-    # In Landsat_extraction, values of EVI outside of expected range were set as NA,
-    # so better not to use EVI here
-    # dplyr::filter(EVI_max <= 1 & EVI_min >= -1) %>%
     dplyr::filter(SAVI_max <= 1 & SAVI_min >= -1) %>%
     dplyr::filter(NDMI_max <= 1 & NDMI_min >= -1) %>%
     dplyr::filter(NDWI_max <= 1 & NDWI_min >= -1) %>%
-    # Select only variables needed
-    dplyr::select(PlotObservationID, EUNIS1, all_of(variables), 
-           valid_1) %>%
     # Keep only rows with differences > 0 in variables
-    filter(if_all(any_of(variables[grepl("diff", variables)]), 
-                  ~ .x > 0))
-}
+    dplyr::filter(if_all(any_of(variables[grepl("diff", variables)]), 
+                  ~ .x > 0)) %>%
+    # Filter based on max NDWI
+    mutate(valid_1_NDWI = case_when(NDWI_max > 0.3 ~ "wrong", 
+                                    TRUE ~ NA_character_),
+           valid_1_count = rowSums(across(c(valid_1_NDWI), ~ . == "wrong"), 
+                                   na.rm = TRUE),
+           valid_1 = if_else(valid_1_count > 0,
+                             "At least 1 rule broken", "No rules broken so far")
+           ) %>%
+    # Keep only rows with no rules broken
+    dplyr::filter(valid_1 == "No rules broken so far") %>%
+    # Remove unneeded cols
+    select(-starts_with("valid"))
+  }
 ```
 
 ```{r}
-data_models <- filter_data_Landsat(
-  data_validation %>%
-    rough_validation_Landsat(), # Rough validation based on NDWI
-  vars_RF_months_Landsat) %>%
+data_GPS <- get_full_datasets(data_validation, vars_RF_months_Landsat) %>%
   left_join(data_V2025.2 %>%
               # Update coordinates
               mutate(Lon_updated = ifelse(is.na(Lon_prec), Longitude, Lon_prec),
                      Lat_updated = ifelse(is.na(Lat_prec), Latitude, Lat_prec)) %>%
-              select(PlotObservationID, `Location method`, Lon_updated, Lat_updated)) %>%
+              dplyr::select(PlotObservationID, Lon_updated, Lat_updated)) %>%
   mutate(GPS = case_when(`Location method` %in% 
                            c("Location with GPS", 
                              "Location with differential GPS") ~ TRUE,
@@ -1092,7 +1131,7 @@ data_models <- filter_data_Landsat(
 ```
 
 ```{r}
-points_3035 <- st_as_sf(data_models,
+points_3035 <- st_as_sf(data_GPS,
                         coords = c("Lon_updated", "Lat_updated"),
                         crs = 4326
                         ) |>
@@ -1150,7 +1189,7 @@ map_grid_GPS <- ggplot() +
     nrow = 2,
     ncol = 2,
     labeller = labeller(EUNIS1 = c("Q" = "Q - Wetlands", "R" = "R - Grasslands",
-                                   "S" = "S - Scrublands", "T" = "T - Forests"))) +
+                                   "S" = "S - Shrublands", "T" = "T - Forests"))) +
   scale_fill_gradientn(
     colours = c("#009E73", "#D3D3D3", "#CC79A7"),  # green → light grey → purple
     values = rescale(c(0, 0.5, 1)),
@@ -1185,6 +1224,40 @@ map_grid_GPS <- ggplot() +
 map_grid_GPS
 ggsave(here("output", "figures", "manuscript", "appendix4.jpeg"), 
        dpi = 300, width = 5, height = 6)
+```
+
+# HERE: (Fig 4) Maps + graph validated plots
+
+```{r}
+plot_plots <- data_validated_plots %>%
+  mutate(EUNIS = forcats::fct_relevel(EUNIS, "Change", after = Inf)) %>%
+  count(EUNIS, valid_status, name = "n") %>%
+  ggplot(aes(x = EUNIS, y = n, fill = valid_status)) +
+  geom_col(position = position_stack()) +
+  xlab(NULL) + ylab("Number of plots") +
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k")) +
+  scale_fill_manual(values = c("not_valid" = "#D55E00", "valid" = "#0072B2",
+                               "NA" = "#828282"),
+                    labels = c("not_valid" = "Non-validated",
+                               "valid"     = "Validated",
+                               "NA"        = "NA"),
+                    name = "Validated") +
+  scale_x_discrete(
+    breaks = c("Q", "R", "S", "T", "Change"),
+    labels = function(x) {
+      x <- ifelse(x == "Q", "Q - Wetlands", x)
+      x <- ifelse(x == "R", "R - Grasslands", x)
+      x <- ifelse(x == "S", "S - Shrublands", x)
+      x <- ifelse(x == "T", "T - Forests", x)
+      x <- ifelse(x == "Change", "Habitat change", x)
+      x
+      }
+    ) +
+  theme_minimal() + theme(legend.position = c(0.9, 0.9)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank())
+plot_plots
 ```
 
 # Session info
